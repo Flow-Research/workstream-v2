@@ -1,0 +1,19 @@
+# Code Owners for FlowStream
+# These owners will be requested for review when someone opens a pull request
+
+# Global owners
+* @wisemrmusa
+
+# Cryptography - requires security review
+/crates/flowstream-crypto/ @wisemrmusa
+/crates/flowstream-state/ @wisemrmusa
+
+# STF and consensus - critical
+/crates/flowstream-stf/ @wisemrmusa
+/crates/flowstream-tx/ @wisemrmusa
+
+# Binaries and networking
+/src/bin/ @wisemrmusa
+
+# CI/CD and workflows
+/.github/ @wisemrmusa

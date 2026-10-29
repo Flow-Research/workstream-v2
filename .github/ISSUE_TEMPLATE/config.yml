@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Research Documentation
+    url: ../../research/
+    about: Read the design documents and papers
+  - name: Architecture Docs
+    url: ../blob/main/docs/ARCHITECTURE.md
+    about: Review the architecture documentation

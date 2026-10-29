@@ -53,7 +53,7 @@ bitvec = "1.0"
 
 # Testing
 proptest = "1.4"
-rstest = "0.18"
+rstest = "0.28"
 
 # zkVM (optional for now)
 # risc0-zkvm = { version = "1.0", optional = true }

@@ -9,10 +9,13 @@ pub struct Rlp;
 impl Rlp {
     pub fn encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
         // Use bincode for now as simplified canonical encoding
-        bincode::serialize(value).map_err(|e: bincode::Error| Error::Serialization(e.to_string()))
+        bincode::serde::encode_to_vec(value, bincode::config::standard())
+            .map_err(|e| Error::Serialization(e.to_string()))
     }
     
     pub fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-        bincode::deserialize(bytes).map_err(|e: bincode::Error| Error::Serialization(e.to_string()))
+        let (result, _): (T, usize) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+            .map_err(|e| Error::Serialization(e.to_string()))?;
+        Ok(result)
     }
 }

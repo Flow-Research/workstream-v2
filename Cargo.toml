@@ -36,7 +36,7 @@ sha3 = "0.10"
 blake3 = "1.5"
 hex = "0.4"
 rand = "0.8"
-rand_core = "0.6"
+rand_core = "0.10"
 
 # Types & utils
 thiserror = "1.0"

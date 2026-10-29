@@ -1,0 +1,32 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# zkVM artifacts
+*.zkproof
+*.wit
+build/
+
+# Data
+/data/
+/db/
+
+# Logs
+*.log
+
+# Env
+.env
+.env.local

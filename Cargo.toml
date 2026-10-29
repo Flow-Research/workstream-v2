@@ -1,0 +1,69 @@
+[workspace]
+members = [
+    "crates/flowstream-core",
+    "crates/flowstream-crypto",
+    "crates/flowstream-state",
+    "crates/flowstream-tx",
+    "crates/flowstream-stf",
+    "crates/flowstream-rlp",
+    "src/bin/sequencer",
+    "src/bin/prover",
+    "src/bin/node",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["Musa AbdulKareem <wisemrmusa@gmail.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/wisemrmusa/flowstream"
+homepage = "https://flowstream.xyz"
+keywords = ["zkrollup", "blockchain", "zkvm", "workstream", "sovereign-rollup"]
+categories = ["cryptography", "blockchain"]
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+bytes = { version = "1.5", features = ["serde"] }
+
+# Crypto
+sha2 = "0.10"
+sha3 = "0.10"
+blake3 = "1.5"
+hex = "0.4"
+rand = "0.8"
+rand_core = "0.6"
+
+# Types & utils
+thiserror = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.4", features = ["derive"] }
+async-trait = "0.1"
+tokio = { version = "1.35", features = ["full"] }
+
+# Hashing/trees
+merkle-cbt = "0.3"
+bitvec = "1.0"
+
+# Testing
+proptest = "1.4"
+rstest = "0.18"
+
+# zkVM (optional for now)
+# risc0-zkvm = { version = "1.0", optional = true }
+# sp1-sdk = { version = "1.0", optional = true }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[profile.dev]
+opt-level = 0
+debug = true

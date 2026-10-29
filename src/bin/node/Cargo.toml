@@ -1,0 +1,23 @@
+[package]
+name = "flowstream-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "node"
+path = "main.rs"
+
+[dependencies]
+flowstream-core = { path = "../../../crates/flowstream-core" }
+flowstream-state = { path = "../../../crates/flowstream-state" }
+flowstream-stf = { path = "../../../crates/flowstream-stf" }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

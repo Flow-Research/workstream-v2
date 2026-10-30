@@ -1,11 +1,11 @@
-//! State Transition Function (STF) for FlowStream
+//! State Transition Function (STF) for WorkStream
 //! 
 //! Deterministic state transition: stf(state, block) -> (new_state, events)
 //! All logic must be deterministic - no wall clocks, no network calls, no randomness
 
-use flowstream_core::{types::*, Result, Error};
-use flowstream_state::State;
-use flowstream_tx::TxValidator;
+use workstream_core::{types::*, Result, Error};
+use workstream_state::State;
+use workstream_tx::TxValidator;
 use tracing::{debug, info};
 
 #[derive(Clone)]

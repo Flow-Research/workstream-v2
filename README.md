@@ -1,10 +1,10 @@
-# FlowStream
+# WorkStream
 
-A sovereign zk-Rollup for governed work coordination, built from the design documented in the [Flow Research](../research/) repository. FlowStream implements the Workstream protocol as a verifiable state transition function proven in a zkVM.
+A sovereign zk-Rollup for governed work coordination, built from the design documented in the [Flow Research](../research/) repository. WorkStream implements the Workstream protocol as a verifiable state transition function proven in a zkVM.
 
 ## Overview
 
-FlowStream is a sovereign zero-knowledge rollup where:
+WorkStream is a sovereign zero-knowledge rollup where:
 - **Canonical truth lives on-chain**: Rollup state root is canonical, not a database
 - **Verifiable execution**: All state transitions are proven in a zkVM (RISC Zero/SP1)
 - **Privacy by default**: Only commitments go on-chain, artifacts are encrypted off-rollup
@@ -30,14 +30,14 @@ Based on the research papers:
 ## Workspace Structure
 
 ```
-flowstream/
+workstream/
 ├── crates/
-│   ├── flowstream-core/      # Core types, traits, errors
-│   ├── flowstream-crypto/    # Hashing, Merkle trees, signatures
-│   ├── flowstream-state/     # State trie (SMT + MMR)
-│   ├── flowstream-tx/        # Transaction types and validation
-│   ├── flowstream-stf/       # State transition function
-│   └── flowstream-rlp/       # Serialization (RLP-style)
+│   ├── workstream-core/      # Core types, traits, errors
+│   ├── workstream-crypto/    # Hashing, Merkle trees, signatures
+│   ├── workstream-state/     # State trie (SMT + MMR)
+│   ├── workstream-tx/        # Transaction types and validation
+│   ├── workstream-stf/       # State transition function
+│   └── workstream-rlp/       # Serialization (RLP-style)
 ├── src/
 │   ├── bin/                  # Binaries (sequencer, prover, node)
 │   └── (shared modules)

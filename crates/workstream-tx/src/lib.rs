@@ -1,10 +1,10 @@
-//! Transaction types and validation for FlowStream
+//! Transaction types and validation for WorkStream
 //! 
 //! Implements the 19 transaction types from the design:
 //! actor.*, project.*, policy.*, task.*, bundle.*, submission.*,
 //! check.*, route.*, review.*, revision.*, accept.*, award.*, etc.
 
-use flowstream_core::{types::*, Result, Error};
+use workstream_core::{types::*, Result, Error};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -1,5 +1,5 @@
-use flowstream_core::hash::{Hash, H256};
-use flowstream_core::{Error, Result};
+use workstream_core::hash::{Hash, H256};
+use workstream_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 /// Sparse Merkle Tree for mutable lifecycle objects

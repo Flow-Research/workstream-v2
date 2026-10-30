@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in FlowStream, please report it responsibly:
+If you discover a security vulnerability in WorkStream, please report it responsibly:
 
 **DO NOT** open a public GitHub issue for security vulnerabilities.
 
@@ -18,7 +18,7 @@ We will acknowledge receipt within 48 hours and provide a detailed response with
 
 ## Security Considerations
 
-FlowStream is a zkRollup implementing complex cryptography and consensus. Key security areas:
+WorkStream is a zkRollup implementing complex cryptography and consensus. Key security areas:
 
 ### Critical Components
 - **State Transition Function (STF)**: Must be fully deterministic

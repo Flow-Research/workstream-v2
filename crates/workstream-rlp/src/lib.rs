@@ -1,8 +1,8 @@
-//! Canonical serialization for FlowStream
+//! Canonical serialization for WorkStream
 //! 
 //! Ensures canonical encoding for hash-locked lineage
 
-use flowstream_core::{Result, Error};
+use workstream_core::{Result, Error};
 
 pub struct Rlp;
 

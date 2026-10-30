@@ -1,10 +1,10 @@
 # GitHub Security & Collaboration Setup
 
-This document outlines all the security measures, workflows, and protections implemented for the FlowStream repository.
+This document outlines all the security measures, workflows, and protections implemented for the WorkStream repository.
 
 ## Overview
 
-FlowStream is a security-critical zkRollup project. All configurations below have been added to ensure safe collaboration, supply chain security, and code quality.
+WorkStream is a security-critical zkRollup project. All configurations below have been added to ensure safe collaboration, supply chain security, and code quality.
 
 ## Implemented Components
 

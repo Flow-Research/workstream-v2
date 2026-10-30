@@ -1,4 +1,4 @@
-use flowstream_core::hash::{Hash, H256};
+use workstream_core::hash::{Hash, H256};
 
 /// Pedersen-style commitment using SHA-256 (simplified)
 #[derive(Clone, Debug)]

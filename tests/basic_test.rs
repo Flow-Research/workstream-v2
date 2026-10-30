@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests {
-    use flowstream_core::types::*;
-    use flowstream_core::hash::{Hash, H256};
-    use flowstream_state::State;
-    use flowstream_stf::StateTransitionFunction;
-    use flowstream_tx::TxBuilder;
+    use workstream_core::types::*;
+    use workstream_core::hash::{Hash, H256};
+    use workstream_state::State;
+    use workstream_stf::StateTransitionFunction;
+    use workstream_tx::TxBuilder;
     
     #[test]
     fn test_state_creation() {

@@ -1,6 +1,6 @@
-# Contributing to FlowStream
+# Contributing to WorkStream
 
-Thank you for your interest in contributing to FlowStream! This document provides guidelines for contributing to this sovereign zkRollup project.
+Thank you for your interest in contributing to WorkStream! This document provides guidelines for contributing to this sovereign zkRollup project.
 
 ## Code of Conduct
 
@@ -66,7 +66,7 @@ Examples:
 - Use `rustfmt` with default settings
 - Follow Clippy recommendations (treat warnings as errors in CI)
 - Prefer explicit error types over `unwrap()`/`expect()` in library code
-- Use `Result<T, Error>` from `flowstream-core`
+- Use `Result<T, Error>` from `workstream-core`
 - Add `#[derive(...)]` as appropriate
 
 ### Security-Critical Code
@@ -107,4 +107,4 @@ Check the [limitations](.idea/limitations.md) document for priority areas:
 
 Feel free to open an issue for discussion before starting major work.
 
-Thank you for contributing to FlowStream!
+Thank you for contributing to WorkStream!

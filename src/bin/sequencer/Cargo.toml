@@ -1,5 +1,5 @@
 [package]
-name = "flowstream-sequencer"
+name = "workstream-sequencer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,8 +11,8 @@ name = "sequencer"
 path = "main.rs"
 
 [dependencies]
-flowstream-core = { path = "../../../crates/flowstream-core" }
-flowstream-tx = { path = "../../../crates/flowstream-tx" }
+workstream-core = { path = "../../../crates/workstream-core" }
+workstream-tx = { path = "../../../crates/workstream-tx" }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

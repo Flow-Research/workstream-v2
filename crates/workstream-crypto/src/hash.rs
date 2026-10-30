@@ -1,4 +1,4 @@
-pub use flowstream_core::hash::*;
+pub use workstream_core::hash::*;
 use sha2::{Digest, Sha256};
 
 /// Content identifier: sha256:<hex>

@@ -1,5 +1,5 @@
 [package]
-name = "flowstream-tx"
+name = "workstream-tx"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,8 +7,8 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-flowstream-core = { path = "../flowstream-core" }
-flowstream-crypto = { path = "../flowstream-crypto" }
+workstream-core = { path = "../workstream-core" }
+workstream-crypto = { path = "../workstream-crypto" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

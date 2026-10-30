@@ -1,11 +1,11 @@
 [workspace]
 members = [
-    "crates/flowstream-core",
-    "crates/flowstream-crypto",
-    "crates/flowstream-state",
-    "crates/flowstream-tx",
-    "crates/flowstream-stf",
-    "crates/flowstream-rlp",
+    "crates/workstream-core",
+    "crates/workstream-crypto",
+    "crates/workstream-state",
+    "crates/workstream-tx",
+    "crates/workstream-stf",
+    "crates/workstream-rlp",
     "src/bin/sequencer",
     "src/bin/prover",
     "src/bin/node",
@@ -18,8 +18,8 @@ edition = "2021"
 rust-version = "1.75"
 authors = ["Musa AbdulKareem <wisemrmusa@gmail.com>"]
 license = "Apache-2.0"
-repository = "https://github.com/wisemrmusa/flowstream"
-homepage = "https://flowstream.xyz"
+repository = "https://github.com/wisemrmusa/workstream"
+homepage = "https://workstream.xyz"
 keywords = ["zkrollup", "blockchain", "zkvm", "workstream", "sovereign-rollup"]
 categories = ["cryptography", "blockchain"]
 

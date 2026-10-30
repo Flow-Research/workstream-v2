@@ -1,11 +1,11 @@
-//! State management for FlowStream
+//! State management for WorkStream
 //! 
 //! Two-structure model:
 //! - Sparse Merkle Tree for mutable lifecycle objects
 //! - Merkle Mountain Range for append-only immutable records
 
-use flowstream_core::{hash::H256, types::StateRoot, Result, Error};
-use flowstream_crypto::{SparseMerkleTree, MerkleMountainRange};
+use workstream_core::{hash::H256, types::StateRoot, Result, Error};
+use workstream_crypto::{SparseMerkleTree, MerkleMountainRange};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

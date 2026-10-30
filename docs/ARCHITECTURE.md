@@ -1,8 +1,8 @@
-# FlowStream Architecture
+# WorkStream Architecture
 
 ## Design Philosophy
 
-FlowStream implements a sovereign zkRollup for the Workstream governed work protocol. The design follows the research documents in detail:
+WorkStream implements a sovereign zkRollup for the Workstream governed work protocol. The design follows the research documents in detail:
 
 1. **Canonical truth in the rollup** - State root is canonical, not PostgreSQL
 2. **Verifiable computation** - All transitions proven in zkVM

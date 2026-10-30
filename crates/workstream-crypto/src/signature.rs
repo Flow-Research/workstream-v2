@@ -1,5 +1,5 @@
-use flowstream_core::{Error, Result};
-use flowstream_core::hash::H256;
+use workstream_core::{Error, Result};
+use workstream_core::hash::H256;
 
 /// Signature verification placeholder
 /// In production, would support ECDSA, Ed25519, passkeys, etc.

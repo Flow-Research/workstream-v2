@@ -1,5 +1,5 @@
 [package]
-name = "flowstream-node"
+name = "workstream-node"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,9 +11,9 @@ name = "node"
 path = "main.rs"
 
 [dependencies]
-flowstream-core = { path = "../../../crates/flowstream-core" }
-flowstream-state = { path = "../../../crates/flowstream-state" }
-flowstream-stf = { path = "../../../crates/flowstream-stf" }
+workstream-core = { path = "../../../crates/workstream-core" }
+workstream-state = { path = "../../../crates/workstream-state" }
+workstream-stf = { path = "../../../crates/workstream-stf" }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

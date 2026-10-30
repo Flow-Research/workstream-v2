@@ -35,16 +35,16 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: flowstream
-            asset_name: flowstream-linux-amd64
+            artifact_name: workstream
+            asset_name: workstream-linux-amd64
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact_name: flowstream
-            asset_name: flowstream-macos-amd64
+            artifact_name: workstream
+            asset_name: workstream-macos-amd64
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: flowstream
-            asset_name: flowstream-macos-arm64
+            artifact_name: workstream
+            asset_name: workstream-macos-arm64
 
     steps:
       - name: Checkout

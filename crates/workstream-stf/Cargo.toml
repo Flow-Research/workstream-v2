@@ -1,5 +1,5 @@
 [package]
-name = "flowstream-core"
+name = "workstream-stf"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,14 +7,14 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+workstream-core = { path = "../workstream-core" }
+workstream-state = { path = "../workstream-state" }
+workstream-tx = { path = "../workstream-tx" }
+workstream-crypto = { path = "../workstream-crypto" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-bytes = { workspace = true }
-sha2 = { workspace = true }
-hex = { workspace = true }
 tracing = { workspace = true }
-async-trait = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

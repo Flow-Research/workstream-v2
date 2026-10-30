@@ -3,8 +3,8 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser, Debug)]
-#[command(name = "flowstream-node")]
-#[command(about = "FlowStream full node - validates proofs and maintains canonical state", long_about = None)]
+#[command(name = "workstream-node")]
+#[command(about = "WorkStream full node - validates proofs and maintains canonical state", long_about = None)]
 struct Args {
     #[arg(short, long, default_value = "30303")]
     p2p_port: u16,
@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
     
     let args = Args::parse();
     
-    info!("Starting FlowStream Full Node on P2P port {}", args.p2p_port);
+    info!("Starting WorkStream Full Node on P2P port {}", args.p2p_port);
     info!("Verifying proofs and maintaining canonical state");
     
     // TODO: Implement P2P, block sync, proof verification, RPC

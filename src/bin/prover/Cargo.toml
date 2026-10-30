@@ -1,5 +1,5 @@
 [package]
-name = "flowstream-prover"
+name = "workstream-prover"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,9 +11,9 @@ name = "prover"
 path = "main.rs"
 
 [dependencies]
-flowstream-core = { path = "../../../crates/flowstream-core" }
-flowstream-stf = { path = "../../../crates/flowstream-stf" }
-flowstream-state = { path = "../../../crates/flowstream-state" }
+workstream-core = { path = "../../../crates/workstream-core" }
+workstream-stf = { path = "../../../crates/workstream-stf" }
+workstream-state = { path = "../../../crates/workstream-state" }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

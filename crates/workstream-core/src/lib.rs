@@ -1,4 +1,4 @@
-//! Core types and traits for FlowStream zkRollup
+//! Core types and traits for WorkStream zkRollup
 //! 
 //! This crate defines the fundamental types used throughout the system:
 //! - Hashes, addresses, identifiers

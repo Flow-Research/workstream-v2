@@ -1,4 +1,4 @@
-//! Cryptographic primitives for FlowStream
+//! Cryptographic primitives for WorkStream
 //! 
 //! Implements SHA-256 everywhere as per design: content addressing,
 //! Merkle trees, commitments, all use SHA-256/SHA-3

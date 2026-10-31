@@ -32,6 +32,15 @@ pub enum Error {
     #[error("Determinism violation: {0}")]
     Determinism(String),
 
+    #[error("Validation error: {0}")]
+    Validation(String),
+
+    #[error("Timeout: {0}")]
+    Timeout(String),
+
+    #[error("Version mismatch: {0}")]
+    VersionMismatch(String),
+
     #[error("Other: {0}")]
     Other(String),
 }

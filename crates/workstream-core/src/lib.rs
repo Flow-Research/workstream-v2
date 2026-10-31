@@ -13,3 +13,5 @@ pub mod types;
 pub use error::{Error, Result};
 pub use hash::{Hash, Hashable, H256};
 pub use types::*;
+
+pub mod traits;

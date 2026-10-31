@@ -16,4 +16,3 @@ jobs:
           fail-on-severity: moderate
           comment-summary-in-pr: true
           deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0, LGPL-2.0, LGPL-3.0
-          allow-licenses: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC, Unicode-DFS-2016, CC0-1.0, Unlicense

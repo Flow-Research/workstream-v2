@@ -29,10 +29,16 @@ pub struct ProveBlockRequest {
 impl ProveBlockRequest {
     pub fn validate(&self) -> Result<()> {
         if self.version != 1 {
-            return Err(Error::Validation(format!("unsupported dto version: {}", self.version)));
+            return Err(Error::Validation(format!(
+                "unsupported dto version: {}",
+                self.version
+            )));
         }
         if self.api_version != 1 {
-            return Err(Error::Validation(format!("unsupported api version: {}", self.api_version)));
+            return Err(Error::Validation(format!(
+                "unsupported api version: {}",
+                self.api_version
+            )));
         }
         Ok(())
     }

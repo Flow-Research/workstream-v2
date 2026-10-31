@@ -63,6 +63,42 @@ RUST_LOG=debug cargo test
 
 This is a research implementation following the specifications in the design documents. See the research papers for detailed rationale.
 
+### Error Handling
+
+All crates use the unified error type from `workstream-core`:
+
+```rust
+use workstream_core::{Error, Result};
+
+fn validate_input(input: &[u8]) -> Result<()> {
+    if input.is_empty() {
+        return Err(Error::Validation("input cannot be empty".to_string()));
+    }
+    Ok(())
+}
+```
+
+Error features:
+- **Categories**: `ErrorCategory` classifies errors (State, Crypto, Validation, etc.)
+- **Error codes**: Stable numeric codes via `err.code()` for programmatic handling
+- **Retryability**: `err.is_retryable()` and `err.is_fatal()` helpers
+- **Conversions**: `From<std::io::Error>` and `From<serde_json::Error>` impls
+
+### Logging
+
+All binaries use `workstream_core::logging` for tracing:
+
+```rust
+use workstream_core::logging;
+
+fn main() {
+    logging::init_tracing();  // respects RUST_LOG, safe to call multiple times
+    tracing::info!("component started");
+}
+```
+
+Log macros are available: `log_error!`, `log_warn!`, `log_info!`, `log_debug!`, `log_trace!`.
+
 ### Key Components
 
 - **State**: `State` with SMT for mutable objects and MMR for immutable records

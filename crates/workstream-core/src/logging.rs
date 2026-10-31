@@ -1,26 +1,27 @@
 //! Unified logging utilities using tracing
 
+pub use crate::error::ErrorCode;
+
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 /// Initialize tracing subscriber with default configuration
 pub fn init_tracing() {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    tracing_subscriber::registry()
+    let _ = tracing_subscriber::registry()
         .with(fmt::layer())
         .with(env_filter)
-        .init();
+        .try_init();
 }
 
 /// Initialize tracing subscriber with custom filter
 pub fn init_tracing_with_filter(filter: &str) {
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter));
 
-    tracing_subscriber::registry()
+    let _ = tracing_subscriber::registry()
         .with(fmt::layer())
         .with(env_filter)
-        .init();
+        .try_init();
 }
 
 /// Initialize tracing subscriber for testing
@@ -72,62 +73,61 @@ macro_rules! log_trace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Error, Result};
 
     #[test]
     fn test_init_tracing_test() {
-        // Should not panic
+        // Should not panic even if called multiple times
+        init_tracing_test();
         init_tracing_test();
     }
 
     #[test]
     fn test_init_tracing_with_filter() {
-        // Should not panic
-        let _ = std::panic::catch_unwind(|| {
-            // Can't actually init twice in same process easily, but test function exists
-        });
+        // Should not panic even if a subscriber is already set
+        init_tracing_test();
+        init_tracing_with_filter("info");
+        init_tracing_with_filter("debug");
     }
-}
 
-/// Error code mapping for programmatic handling
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorCode {
-    E1000 = 1000, // State
-    E1001 = 1001, // State transition
-    E2000 = 2000, // Transaction
-    E3000 = 3000, // Crypto
-    E3001 = 3001, // Invalid proof
-    E3002 = 3002, // Invalid signature
-    E4000 = 4000, // Serialization
-    E5000 = 5000, // Validation
-    E5001 = 5001, // Config
-    E6000 = 6000, // Unauthorized
-    E7000 = 7000, // Not found
-    E7001 = 7001, // Timeout
-    E8000 = 8000, // Determinism
-    E8001 = 8001, // Consensus
-    E9000 = 9000, // Version mismatch
-    E9999 = 9999, // Internal/Other
-}
+    #[test]
+    fn test_init_tracing_default() {
+        // Should not panic even if a subscriber is already set
+        init_tracing_test();
+        init_tracing();
+        init_tracing();
+    }
 
-impl From<&crate::Error> for ErrorCode {
-    fn from(err: &crate::Error) -> Self {
-        match err {
-            crate::Error::State(_) => ErrorCode::E1000,
-            crate::Error::InvalidTransition(_) => ErrorCode::E1001,
-            crate::Error::Transaction(_) => ErrorCode::E2000,
-            crate::Error::Crypto(_) => ErrorCode::E3000,
-            crate::Error::InvalidProof(_) => ErrorCode::E3001,
-            crate::Error::InvalidSignature => ErrorCode::E3002,
-            crate::Error::Serialization(_) => ErrorCode::E4000,
-            crate::Error::Validation(_) => ErrorCode::E5000,
-            crate::Error::Config(_) => ErrorCode::E5001,
-            crate::Error::Unauthorized(_) => ErrorCode::E6000,
-            crate::Error::NotFound(_) => ErrorCode::E7000,
-            crate::Error::Timeout(_) => ErrorCode::E7001,
-            crate::Error::Determinism(_) => ErrorCode::E8000,
-            crate::Error::Consensus(_) => ErrorCode::E8001,
-            crate::Error::VersionMismatch(_) => ErrorCode::E9000,
-            crate::Error::Io(_) | crate::Error::Other(_) => ErrorCode::E9999,
-        }
+    #[test]
+    fn test_log_macros_compile_and_run() {
+        init_tracing_test();
+
+        crate::log_info!("test info message");
+        crate::log_warn!("test warn message");
+        crate::log_debug!("test debug message");
+        crate::log_trace!("test trace message");
+
+        let err = Error::Validation("bad input".to_string());
+        crate::log_error!(err);
+
+        let err2 = Error::Timeout("slow".to_string());
+        crate::log_error!(err2, "operation timed out with retries left: {}", 3);
+
+        let _: Result<()> = Ok(());
+    }
+
+    #[test]
+    fn test_log_error_with_format_args() {
+        init_tracing_test();
+
+        let err = Error::NotFound("missing".to_string());
+        crate::log_error!(err, "resource id: {}", "abc123");
+    }
+
+    #[test]
+    fn test_error_code_reexport() {
+        // ErrorCode should be accessible from the logging module for backwards compatibility
+        let code: ErrorCode = crate::Error::Timeout("x".to_string()).code();
+        assert_eq!(code, ErrorCode::E7001);
     }
 }

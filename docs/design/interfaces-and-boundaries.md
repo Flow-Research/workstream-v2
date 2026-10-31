@@ -189,3 +189,46 @@ The trait-based approach with versioned DTOs provides the right balance of flexi
 - [Ethereum Engine API](https://github.com/ethereum/execution-apis/blob/main/src/engine/)
 - [WorkStream Architecture](../../docs/ARCHITECTURE.md)
 - [Ethereum Upgrade Patterns](../design-patterns/ethereum-upgrade-patterns-for-flowstream.md)
+
+---
+
+## Addressing Limitations
+
+### Error Handling Strategy
+All trait methods return `Result<T, workstream_core::Error>`. Errors are categorized:
+- `Validation` - Invalid request/DTO
+- `NotFound` - Resource doesn't exist
+- `Unauthorized` - Permission denied
+- `Timeout` - Operation timed out
+- `Internal` - Component internal error
+- `VersionMismatch` - API version incompatible
+
+### Version Negotiation
+Components exchange `StatusMessage` on initialization:
+```rust
+pub struct StatusMessage {
+    pub api_version: u32,
+    pub component: ComponentType,
+    pub capabilities: Vec<String>,
+    pub min_api_version: u32,
+}
+```
+Handshake rejects incompatible versions.
+
+### DTO Definitions
+All DTOs go in `workstream-core/src/types/api/` with:
+- `version: u32` field
+- `#[derive(Serialize, Deserialize)]`
+- Validation methods
+- Canonical serialization where needed
+
+### Timeouts & Cancellation
+All async methods respect timeouts via `tokio::time::timeout`. Cancellation via `tokio_util::sync::CancellationToken`.
+
+### Input Validation
+Every DTO implements `Validate` trait with `fn validate(&self) -> Result<()>`.
+
+### Trust Boundaries
+- In-process: components trust each other
+- Future IPC: will require authentication
+- Node verifies all proofs regardless of source

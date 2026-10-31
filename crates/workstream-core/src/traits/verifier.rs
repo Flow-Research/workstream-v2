@@ -2,6 +2,7 @@
 
 use crate::{Error, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 #[async_trait]
 pub trait VerifierApi: Send + Sync {
@@ -17,7 +18,7 @@ pub trait VerifierApi: Send + Sync {
     async fn verify_proof(&self, req: VerifyProofRequest) -> Result<VerifyProofResponse>;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerifyBlockRequest {
     pub version: u32,
     pub api_version: u32,
@@ -40,14 +41,15 @@ impl VerifyBlockRequest {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerifyBlockResponse {
     pub version: u32,
+    pub api_version: u32,
     pub valid: bool,
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerifyProofRequest {
     pub version: u32,
     pub api_version: u32,
@@ -70,9 +72,10 @@ impl VerifyProofRequest {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerifyProofResponse {
     pub version: u32,
+    pub api_version: u32,
     pub valid: bool,
     pub error: Option<String>,
 }

@@ -2,6 +2,7 @@
 
 use crate::{Error, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 #[async_trait]
 pub trait SequencerApi: Send + Sync {
@@ -25,7 +26,7 @@ pub trait SequencerApi: Send + Sync {
     async fn build_block(&self, req: BuildBlockRequest) -> Result<BlockHeaderDraft>;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SubmitTxRequest {
     pub version: u32,
     pub api_version: u32,
@@ -47,27 +48,29 @@ impl SubmitTxRequest {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SubmitTxResponse {
     pub version: u32,
+    pub api_version: u32,
     pub tx_hash: [u8; 32],
     pub status: TxStatus,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TxStatus {
     Pending,
     Rejected(String),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MempoolStatus {
     pub version: u32,
+    pub api_version: u32,
     pub pending_count: u64,
     pub size_bytes: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BuildBlockRequest {
     pub version: u32,
     pub api_version: u32,
@@ -86,9 +89,10 @@ impl BuildBlockRequest {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BlockHeaderDraft {
     pub version: u32,
+    pub api_version: u32,
     pub block_hash: [u8; 32],
     pub tx_count: u32,
     pub state_root: [u8; 32],

@@ -2,6 +2,7 @@
 
 use crate::{Error, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 #[async_trait]
 pub trait DaClient: Send + Sync {
@@ -18,7 +19,7 @@ pub trait DaClient: Send + Sync {
     async fn get_availability(&self) -> Result<AvailabilityInfo>;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PostBlockRequest {
     pub version: u32,
     pub api_version: u32,
@@ -40,14 +41,15 @@ impl PostBlockRequest {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PostBlockResponse {
     pub version: u32,
+    pub api_version: u32,
     pub da_id: String,
     pub available: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GetBlockRequest {
     pub version: u32,
     pub api_version: u32,
@@ -69,15 +71,17 @@ impl GetBlockRequest {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GetBlockResponse {
     pub version: u32,
+    pub api_version: u32,
     pub block_bytes: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AvailabilityInfo {
     pub version: u32,
+    pub api_version: u32,
     pub available: bool,
     pub latency_ms: u64,
 }

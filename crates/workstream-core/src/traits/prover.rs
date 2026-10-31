@@ -2,6 +2,7 @@
 
 use crate::{Error, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 #[async_trait]
 pub trait ProverApi: Send + Sync {
@@ -18,7 +19,7 @@ pub trait ProverApi: Send + Sync {
     async fn get_prover_status(&self) -> Result<ProverStatus>;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProveBlockRequest {
     pub version: u32,
     pub api_version: u32,
@@ -37,24 +38,27 @@ impl ProveBlockRequest {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProofBundleResponse {
     pub version: u32,
+    pub api_version: u32,
     pub proof_bytes: Vec<u8>,
     pub public_inputs: Vec<u8>,
     pub guest_id: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GuestInfo {
     pub version: u32,
+    pub api_version: u32,
     pub guest_id: String,
     pub name: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProverStatus {
     pub version: u32,
+    pub api_version: u32,
     pub available: bool,
     pub queue_length: u64,
 }

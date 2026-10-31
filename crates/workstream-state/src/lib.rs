@@ -5,7 +5,7 @@
 //! - Merkle Mountain Range for append-only immutable records
 
 use serde::{Deserialize, Serialize};
-use workstream_core::{hash::H256, types::StateRoot, Error, Result};
+use workstream_core::{types::StateRoot, Result};
 use workstream_crypto::{MerkleMountainRange, SparseMerkleTree};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -1,4 +1,3 @@
-use sha2::{Digest, Sha256};
 pub use workstream_core::hash::*;
 
 /// Content identifier: sha256:<hex>

@@ -4,7 +4,7 @@
 //! All logic must be deterministic - no wall clocks, no network calls, no randomness
 
 use tracing::{debug, info};
-use workstream_core::{types::*, Error, Result};
+use workstream_core::{types::*, Result};
 use workstream_state::State;
 use workstream_tx::TxValidator;
 

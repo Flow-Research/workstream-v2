@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use workstream_core::hash::{Hash, H256};
-use workstream_core::{Error, Result};
+use workstream_core::Result;
 
 /// Sparse Merkle Tree for mutable lifecycle objects
 #[derive(Clone, Debug, Serialize, Deserialize)]

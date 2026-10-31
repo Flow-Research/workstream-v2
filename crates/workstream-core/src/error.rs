@@ -1,5 +1,20 @@
 use thiserror::Error;
 
+/// Error categories for classification
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCategory {
+    State,
+    Transaction,
+    Crypto,
+    Serialization,
+    Validation,
+    Authorization,
+    Network,
+    Consensus,
+    Configuration,
+    Internal,
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("State error: {0}")]
@@ -41,8 +56,47 @@ pub enum Error {
     #[error("Version mismatch: {0}")]
     VersionMismatch(String),
 
+    #[error("Configuration error: {0}")]
+    Config(String),
+
+    #[error("Consensus error: {0}")]
+    Consensus(String),
+
+    #[error("IO error: {0}")]
+    Io(String),
+
     #[error("Other: {0}")]
     Other(String),
+}
+
+impl Error {
+    pub fn category(&self) -> ErrorCategory {
+        match self {
+            Error::State(_) | Error::InvalidTransition(_) => ErrorCategory::State,
+            Error::Transaction(_) => ErrorCategory::Transaction,
+            Error::Crypto(_) | Error::InvalidProof(_) | Error::InvalidSignature => {
+                ErrorCategory::Crypto
+            }
+            Error::Serialization(_) => ErrorCategory::Serialization,
+            Error::Validation(_) | Error::Config(_) => ErrorCategory::Validation,
+            Error::Unauthorized(_) => ErrorCategory::Authorization,
+            Error::NotFound(_) | Error::Timeout(_) => ErrorCategory::Network,
+            Error::Determinism(_) | Error::Consensus(_) => ErrorCategory::Consensus,
+            Error::VersionMismatch(_) => ErrorCategory::Internal,
+            Error::Io(_) | Error::Other(_) => ErrorCategory::Internal,
+        }
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Error::Timeout(_) | Error::Io(_))
+    }
+
+    pub fn is_fatal(&self) -> bool {
+        matches!(
+            self,
+            Error::Determinism(_) | Error::Consensus(_) | Error::InvalidSignature
+        )
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -19,3 +19,6 @@ async-trait = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 rstest = { workspace = true }
+
+[dependencies.tracing-subscriber]
+workspace = true

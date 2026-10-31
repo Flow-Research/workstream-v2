@@ -15,3 +15,5 @@ pub use hash::{Hash, Hashable, H256};
 pub use types::*;
 
 pub mod traits;
+
+pub mod logging;

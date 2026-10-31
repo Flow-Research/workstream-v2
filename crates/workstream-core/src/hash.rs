@@ -7,19 +7,19 @@ pub struct H256([u8; 32]);
 
 impl H256 {
     pub const ZERO: H256 = H256([0u8; 32]);
-    
+
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         H256(bytes)
     }
-    
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
-    
+
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
-    
+
     pub fn from_hex(s: &str) -> crate::Result<Self> {
         let bytes = hex::decode(s).map_err(|e| crate::Error::Crypto(e.to_string()))?;
         if bytes.len() != 32 {
@@ -59,7 +59,7 @@ impl Hash {
         let result = hasher.finalize();
         H256(result.into())
     }
-    
+
     pub fn sha256_concat(data: &[&[u8]]) -> H256 {
         let mut hasher = Sha256::new();
         for d in data {

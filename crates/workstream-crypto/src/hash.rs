@@ -1,5 +1,4 @@
 pub use workstream_core::hash::*;
-use sha2::{Digest, Sha256};
 
 /// Content identifier: sha256:<hex>
 #[derive(Clone, Debug)]
@@ -10,11 +9,11 @@ impl ContentId {
         let hash = Hash::sha256(data);
         ContentId(format!("sha256:{}", hash.to_hex()))
     }
-    
+
     pub fn from_hash(hash: H256) -> Self {
         ContentId(format!("sha256:{}", hash.to_hex()))
     }
-    
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

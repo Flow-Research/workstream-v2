@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [ "main", "develop" ]
   schedule:
-    - cron: '0 3 * * 1' # Weekly on Monday at 03:00 UTC
+    - cron: '0 3 * * 1'
 
 permissions:
   contents: read
@@ -23,11 +23,11 @@ jobs:
       matrix:
         include:
         - language: rust
-          build-mode: autobuild
+          build-mode: none
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
 
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v3
@@ -35,9 +35,6 @@ jobs:
         languages: ${{ matrix.language }}
         build-mode: ${{ matrix.build-mode }}
         queries: security-extended,security-and-quality
-
-    - name: Autobuild
-      uses: github/codeql-action/autobuild@v3
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3

@@ -8,7 +8,7 @@ use tracing_subscriber::FmtSubscriber;
 struct Args {
     #[arg(short, long)]
     blocks: Option<String>,
-    
+
     #[arg(long)]
     zkvm: String,
 }
@@ -19,14 +19,14 @@ async fn main() -> anyhow::Result<()> {
         .with_max_level(Level::INFO)
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
-    
+
     let args = Args::parse();
-    
+
     info!("Starting WorkStream Prover");
     info!("Using zkVM: {}", args.zkvm);
-    
+
     // TODO: Implement zkVM integration (RISC Zero/SP1), proof generation, recursion
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    
+
     Ok(())
 }

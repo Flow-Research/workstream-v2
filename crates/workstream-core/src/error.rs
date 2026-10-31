@@ -78,7 +78,8 @@ impl Error {
                 ErrorCategory::Crypto
             }
             Error::Serialization(_) => ErrorCategory::Serialization,
-            Error::Validation(_) | Error::Config(_) => ErrorCategory::Validation,
+            Error::Validation(_) => ErrorCategory::Validation,
+            Error::Config(_) => ErrorCategory::Configuration,
             Error::Unauthorized(_) => ErrorCategory::Authorization,
             Error::NotFound(_) | Error::Timeout(_) => ErrorCategory::Network,
             Error::Determinism(_) | Error::Consensus(_) => ErrorCategory::Consensus,
@@ -100,3 +101,61 @@ impl Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_categories() {
+        assert_eq!(Error::State("x".to_string()).category(), ErrorCategory::State);
+        assert_eq!(Error::Transaction("x".to_string()).category(), ErrorCategory::Transaction);
+        assert_eq!(Error::Crypto("x".to_string()).category(), ErrorCategory::Crypto);
+        assert_eq!(Error::InvalidProof("x".to_string()).category(), ErrorCategory::Crypto);
+        assert_eq!(Error::InvalidSignature.category(), ErrorCategory::Crypto);
+        assert_eq!(Error::Validation("x".to_string()).category(), ErrorCategory::Validation);
+        assert_eq!(Error::Config("x".to_string()).category(), ErrorCategory::Configuration);
+        assert_eq!(Error::Unauthorized("x".to_string()).category(), ErrorCategory::Authorization);
+        assert_eq!(Error::NotFound("x".to_string()).category(), ErrorCategory::Network);
+        assert_eq!(Error::Timeout("x".to_string()).category(), ErrorCategory::Network);
+        assert_eq!(Error::Determinism("x".to_string()).category(), ErrorCategory::Consensus);
+        assert_eq!(Error::Consensus("x".to_string()).category(), ErrorCategory::Consensus);
+    }
+
+    #[test]
+    fn test_error_retryable() {
+        assert!(Error::Timeout("x".to_string()).is_retryable());
+        assert!(Error::Io("x".to_string()).is_retryable());
+        assert!(!Error::Validation("x".to_string()).is_retryable());
+        assert!(!Error::InvalidSignature.is_retryable());
+    }
+
+    #[test]
+    fn test_error_fatal() {
+        assert!(Error::Determinism("x".to_string()).is_fatal());
+        assert!(Error::Consensus("x".to_string()).is_fatal());
+        assert!(Error::InvalidSignature.is_fatal());
+        assert!(!Error::Timeout("x".to_string()).is_fatal());
+        assert!(!Error::Validation("x".to_string()).is_fatal());
+    }
+
+    #[test]
+    fn test_error_display() {
+        let err = Error::Validation("invalid input".to_string());
+        assert_eq!(err.to_string(), "Validation error: invalid input");
+        
+        let err = Error::Config("missing key".to_string());
+        assert_eq!(err.to_string(), "Configuration error: missing key");
+        
+        let err = Error::InvalidSignature;
+        assert_eq!(err.to_string(), "Invalid signature");
+    }
+
+    #[test]
+    fn test_result_type() {
+        fn returns_error() -> Result<()> {
+            Err(Error::Other("test".to_string()))
+        }
+        assert!(returns_error().is_err());
+    }
+}

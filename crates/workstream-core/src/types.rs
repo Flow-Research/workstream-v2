@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::hash::H256;
+use serde::{Deserialize, Serialize};
 
 // Identifiers
 pub type BlockNumber = u64;
@@ -27,7 +27,7 @@ impl StateRoot {
             mmr_root,
         }
     }
-    
+
     pub fn hash(&self) -> H256 {
         crate::hash::Hash::sha256_concat(&[
             &[self.version],
@@ -115,48 +115,48 @@ pub enum ActionType {
     ActorSuspend,
     ActorReactivate,
     ActorDeactivate,
-    
+
     // Project & guide
     ProjectCreate,
     GuideIngest,
-    
+
     // Policy
     PolicyCompile,
     PolicyApprove,
     GuideActivate,
-    
+
     // Task lifecycle
     TaskCreate,
     TaskScreen,
     TaskRelease,
     TaskClaim,
     TaskStart,
-    
+
     // Bundle & submission
     BundlePrepare,
     BundleAdmit,
     SubmissionCreate,
-    
+
     // Checks & routing
     CheckRun,
     RouteSubmission,
-    
+
     // Review
     ReviewLease,
     ReviewDecide,
-    
+
     // Revision
     RevisionPrepare,
-    
+
     // Acceptance & records
     AcceptFinal,
-    
+
     // Compensation
     AwardFulfill,
-    
+
     // Reputation
     ReputationProject,
-    
+
     // Governance
     GovUpgrade,
     GovSetSequencer,

@@ -8,7 +8,7 @@ use tracing_subscriber::FmtSubscriber;
 struct Args {
     #[arg(short, long, default_value = "8545")]
     port: u16,
-    
+
     #[arg(short, long)]
     config: Option<String>,
 }
@@ -20,14 +20,14 @@ async fn main() -> anyhow::Result<()> {
         .with_max_level(Level::INFO)
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
-    
+
     let args = Args::parse();
-    
+
     info!("Starting WorkStream Sequencer on port {}", args.port);
     info!("Sovereign zkRollup for governed work coordination");
-    
+
     // TODO: Implement mempool, block production, DA submission
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    
+
     Ok(())
 }

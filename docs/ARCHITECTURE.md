@@ -62,6 +62,10 @@ All crates use the unified error type `workstream_core::Error`:
 - `is_retryable()` / `is_fatal()` helpers
 - `From<std::io::Error>` and `From<serde_json::Error>` conversions
 
+## Configuration
+
+Per-component config structs (`SequencerConfig`, `ProverConfig`, `NodeConfig`) live in `workstream-core/src/config.rs` with TOML serialization, defaults, validation, and env overrides. Loading order: defaults → TOML file (`--config`) → env (`WORKSTREAM_*`) → CLI flags. Example configs are in `config/*.example.toml`.
+
 ## Logging
 
 Binaries initialize tracing via `workstream_core::logging::init_tracing()` (respects `RUST_LOG`, safe to call multiple times). Log macros `log_error!`, `log_warn!`, `log_info!`, `log_debug!`, `log_trace!` are exported.

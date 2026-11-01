@@ -1,0 +1,23 @@
+# WorkStream Node example configuration
+# Load with: workstream-node --config config/node.example.toml
+#
+# Loading order (later wins):
+#   1. Built-in defaults
+#   2. This file
+#   3. Environment overrides (e.g. WORKSTREAM_NODE_P2P_PORT=30304)
+#   4. CLI flags (e.g. --p2p-port 30304)
+
+# P2P listening port (default: 30303)
+p2p_port = 30303
+
+# Sync from genesis on startup (default: false)
+sync = false
+
+# Optional RPC port for client queries
+# rpc_port = 8546
+
+# Directory for chain data (default: .workstream)
+data_dir = ".workstream"
+
+# Log level: trace, debug, info, warn, error (default: info)
+log_level = "info"

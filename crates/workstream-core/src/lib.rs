@@ -6,6 +6,7 @@
 //! - Core traits (State, STFTrait, etc.)
 //! - Error types
 
+pub mod config;
 pub mod error;
 pub mod hash;
 pub mod types;

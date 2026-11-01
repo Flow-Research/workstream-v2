@@ -1,6 +1,6 @@
 use clap::Parser;
-use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::info;
+use workstream_core::{logging, Result};
 
 #[derive(Parser, Debug)]
 #[command(name = "workstream-node")]
@@ -14,11 +14,8 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)?;
+async fn main() -> Result<()> {
+    logging::init_tracing();
 
     let args = Args::parse();
 

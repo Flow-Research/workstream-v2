@@ -44,6 +44,28 @@ pub struct StateRoot {
 }
 ```
 
+## Component Interfaces
+
+All cross-component communication goes through versioned traits in `workstream-core/src/traits/`:
+- `SequencerApi` - Transaction submission, mempool status, block building
+- `ProverApi` - Proof generation for state transitions
+- `VerifierApi` - Block and proof verification
+- `DaClient` - Data availability layer interaction
+
+DTOs are versioned (serde-serializable) and separate from internal types. See `docs/design/interfaces-and-boundaries.md` for the full design.
+
+## Error Handling
+
+All crates use the unified error type `workstream_core::Error`:
+- `ErrorCategory` classifies errors (State, Crypto, Validation, etc.)
+- Stable numeric `ErrorCode`s via `err.code()` for cross-boundary handling
+- `is_retryable()` / `is_fatal()` helpers
+- `From<std::io::Error>` and `From<serde_json::Error>` conversions
+
+## Logging
+
+Binaries initialize tracing via `workstream_core::logging::init_tracing()` (respects `RUST_LOG`, safe to call multiple times). Log macros `log_error!`, `log_warn!`, `log_info!`, `log_debug!`, `log_trace!` are exported.
+
 ## Transaction Flow
 
 1. **Mempool** - Sequencer collects transactions

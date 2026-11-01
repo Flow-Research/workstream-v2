@@ -29,13 +29,21 @@ pub struct VerifyBlockRequest {
 impl VerifyBlockRequest {
     pub fn validate(&self) -> Result<()> {
         if self.version != 1 {
-            return Err(Error::Validation(format!("unsupported dto version: {}", self.version)));
+            return Err(Error::Validation(format!(
+                "unsupported dto version: {}",
+                self.version
+            )));
         }
         if self.api_version != 1 {
-            return Err(Error::Validation(format!("unsupported api version: {}", self.api_version)));
+            return Err(Error::Validation(format!(
+                "unsupported api version: {}",
+                self.api_version
+            )));
         }
         if self.proof_bundle.is_empty() {
-            return Err(Error::Validation("proof_bundle cannot be empty".to_string()));
+            return Err(Error::Validation(
+                "proof_bundle cannot be empty".to_string(),
+            ));
         }
         Ok(())
     }
@@ -60,10 +68,16 @@ pub struct VerifyProofRequest {
 impl VerifyProofRequest {
     pub fn validate(&self) -> Result<()> {
         if self.version != 1 {
-            return Err(Error::Validation(format!("unsupported dto version: {}", self.version)));
+            return Err(Error::Validation(format!(
+                "unsupported dto version: {}",
+                self.version
+            )));
         }
         if self.api_version != 1 {
-            return Err(Error::Validation(format!("unsupported api version: {}", self.api_version)));
+            return Err(Error::Validation(format!(
+                "unsupported api version: {}",
+                self.api_version
+            )));
         }
         if self.proof_bytes.is_empty() {
             return Err(Error::Validation("proof_bytes cannot be empty".to_string()));

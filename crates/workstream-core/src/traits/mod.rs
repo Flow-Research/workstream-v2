@@ -1,17 +1,17 @@
 //! Component interfaces and boundaries
-//! 
+//!
 //! This module defines versioned trait interfaces for cross-component communication
 //! following the design in docs/design/interfaces-and-boundaries.md
 
-pub mod sequencer;
-pub mod prover;
-pub mod verifier;
 pub mod da;
+pub mod prover;
+pub mod sequencer;
+pub mod verifier;
 
-pub use sequencer::SequencerApi;
-pub use prover::ProverApi;
-pub use verifier::VerifierApi;
 pub use da::DaClient;
+pub use prover::ProverApi;
+pub use sequencer::SequencerApi;
+pub use verifier::VerifierApi;
 
 /// Status message for version negotiation during component handshake
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -52,7 +52,9 @@ impl StatusMessage {
 
     pub fn validate(&self) -> crate::Result<()> {
         if self.api_version == 0 || self.min_api_version == 0 {
-            return Err(crate::Error::Validation("api versions must be >= 1".to_string()));
+            return Err(crate::Error::Validation(
+                "api versions must be >= 1".to_string(),
+            ));
         }
         if self.min_api_version > self.api_version {
             return Err(crate::Error::Validation(

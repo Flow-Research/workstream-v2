@@ -29,10 +29,16 @@ pub struct PostBlockRequest {
 impl PostBlockRequest {
     pub fn validate(&self) -> Result<()> {
         if self.version != 1 {
-            return Err(Error::Validation(format!("unsupported dto version: {}", self.version)));
+            return Err(Error::Validation(format!(
+                "unsupported dto version: {}",
+                self.version
+            )));
         }
         if self.api_version != 1 {
-            return Err(Error::Validation(format!("unsupported api version: {}", self.api_version)));
+            return Err(Error::Validation(format!(
+                "unsupported api version: {}",
+                self.api_version
+            )));
         }
         if self.block_bytes.is_empty() {
             return Err(Error::Validation("block_bytes cannot be empty".to_string()));
@@ -59,10 +65,16 @@ pub struct GetBlockRequest {
 impl GetBlockRequest {
     pub fn validate(&self) -> Result<()> {
         if self.version != 1 {
-            return Err(Error::Validation(format!("unsupported dto version: {}", self.version)));
+            return Err(Error::Validation(format!(
+                "unsupported dto version: {}",
+                self.version
+            )));
         }
         if self.api_version != 1 {
-            return Err(Error::Validation(format!("unsupported api version: {}", self.api_version)));
+            return Err(Error::Validation(format!(
+                "unsupported api version: {}",
+                self.api_version
+            )));
         }
         if self.da_id.is_empty() {
             return Err(Error::Validation("da_id cannot be empty".to_string()));

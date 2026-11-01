@@ -10,5 +10,4 @@ license.workspace = true
 workstream-core = { path = "../workstream-core" }
 serde = { workspace = true }
 bytes = { workspace = true }
-thiserror = { workspace = true }
 bincode = { workspace = true }

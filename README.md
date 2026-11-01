@@ -112,6 +112,12 @@ WORKSTREAM_SEQUENCER_PORT=9000 workstream-sequencer
 Example configs live in `config/*.example.toml`. Every config struct has
 `validate()`, `apply_env_overrides()`, and `Default` implementations.
 
+### Fork Gating
+
+Consensus upgrades are hard forks activated by block height via `ForkSchedule`
+(see `docs/ARCHITECTURE.md`). Headers are validated against the schedule; the
+STF gates actions by fork feature flags. Resolution is a pure function of
+height — fully deterministic for the zkVM.
 ### Logging
 
 All binaries use `workstream_core::logging` for tracing:

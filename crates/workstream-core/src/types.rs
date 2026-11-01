@@ -46,6 +46,12 @@ pub struct BlockHeader {
     pub tx_root: H256,
     pub state_root: StateRoot,
     pub da_ref: H256,
+    /// Active fork id at this block (MUST match the resolved fork)
+    pub fork_id: u64,
+    /// zkVM guest image hash used to produce the proof (MUST be approved for fork_id)
+    pub guest_hash: H256,
+    /// Proof system version (MUST be >= fork's min_proof_system)
+    pub proof_system_version: u32,
     pub proof: Option<Proof>,
 }
 
@@ -105,7 +111,7 @@ pub struct Action {
     pub payload: Vec<u8>, // Canonical encoded payload
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ActionType {
     // Actor & identity
     ActorRegister,

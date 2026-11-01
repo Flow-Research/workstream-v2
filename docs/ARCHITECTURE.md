@@ -66,6 +66,16 @@ All crates use the unified error type `workstream_core::Error`:
 
 Per-component config structs (`SequencerConfig`, `ProverConfig`, `NodeConfig`) live in `workstream-core/src/config.rs` with TOML serialization, defaults, validation, and env overrides. Loading order: defaults → TOML file (`--config`) → env (`WORKSTREAM_*`) → CLI flags. Example configs are in `config/*.example.toml`.
 
+## Fork Gating
+
+Hard forks activate at fixed block heights (no timestamps, no mid-block forks), following the Ethereum upgrade model:
+
+- `ForkSchedule` in `workstream-core/src/fork.rs` holds an ordered, validated list of `ForkConfig`s (fork_id, name, activation_height, guest_hash, min_proof_system, features)
+- Active fork is a pure function of block height: `schedule.active_fork_at(height)`
+- Block headers carry `fork_id`, `guest_hash`, and `proof_system_version`; `validate_header_fork()` rejects unknown fork ids, unapproved guest hashes, and insufficient proof systems
+- The STF resolves the fork per block, validates headers, and gates actions by feature flags (e.g. `task-lifecycle`, `submission-review`, `reputation`, `governance`)
+- `ForkActivationHook` fires exactly once at a fork's activation height for state migrations — must be deterministic
+- Genesis must define the initial fork at height 0
 ## Logging
 
 Binaries initialize tracing via `workstream_core::logging::init_tracing()` (respects `RUST_LOG`, safe to call multiple times). Log macros `log_error!`, `log_warn!`, `log_info!`, `log_debug!`, `log_trace!` are exported.

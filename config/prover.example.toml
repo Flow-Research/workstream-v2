@@ -1,0 +1,20 @@
+# WorkStream Prover example configuration
+# Load with: workstream-prover --config config/prover.example.toml
+#
+# Loading order (later wins):
+#   1. Built-in defaults
+#   2. This file
+#   3. Environment overrides (e.g. WORKSTREAM_PROVER_ZKVM=sp1)
+#   4. CLI flags (e.g. --zkvm sp1)
+
+# zkVM backend: "risc0" or "sp1" (default: risc0)
+zkvm = "risc0"
+
+# Optional path to a file listing block numbers to prove
+# blocks = "blocks.txt"
+
+# Optional guest program identifier
+# guest_id = "workstream-guest"
+
+# Log level: trace, debug, info, warn, error (default: info)
+log_level = "info"

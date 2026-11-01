@@ -1,0 +1,20 @@
+# WorkStream Sequencer example configuration
+# Load with: workstream-sequencer --config config/sequencer.example.toml
+#
+# Loading order (later wins):
+#   1. Built-in defaults
+#   2. This file
+#   3. Environment overrides (e.g. WORKSTREAM_SEQUENCER_PORT=9000)
+#   4. CLI flags (e.g. --port 9000)
+
+# RPC port for transaction submission (default: 8545)
+port = 8545
+
+# Maximum number of transactions in the mempool (default: 10000)
+mempool_size = 10000
+
+# Block production interval in milliseconds (default: 2000)
+block_interval_ms = 2000
+
+# Log level: trace, debug, info, warn, error (default: info)
+log_level = "info"

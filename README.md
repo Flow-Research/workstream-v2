@@ -84,6 +84,34 @@ Error features:
 - **Retryability**: `err.is_retryable()` and `err.is_fatal()` helpers
 - **Conversions**: `From<std::io::Error>` and `From<serde_json::Error>` impls
 
+### Configuration
+
+All binaries load configuration from `workstream_core::config` with this precedence (later wins):
+
+1. Built-in defaults
+2. TOML file (`--config path/to/file.toml`)
+3. Environment overrides (e.g. `WORKSTREAM_SEQUENCER_PORT=9000`)
+4. CLI flags (e.g. `--port 9000`)
+
+```toml
+# config/sequencer.toml
+port = 8545
+mempool_size = 10000
+block_interval_ms = 2000
+log_level = "info"
+```
+
+```bash
+# Run with a config file
+workstream-sequencer --config config/sequencer.toml
+
+# Override via environment
+WORKSTREAM_SEQUENCER_PORT=9000 workstream-sequencer
+```
+
+Example configs live in `config/*.example.toml`. Every config struct has
+`validate()`, `apply_env_overrides()`, and `Default` implementations.
+
 ### Logging
 
 All binaries use `workstream_core::logging` for tracing:

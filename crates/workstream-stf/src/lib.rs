@@ -15,8 +15,9 @@ use workstream_tx::TxValidator;
 pub mod handlers;
 
 pub use handlers::{
-    AcceptanceRecord, ActorGrantPayload, ActorRecord, ActorRegisterPayload, ActorRole, Capability,
-    ProjectCreatePayload, ProjectRecord, SubmissionCreatePayload, SubmissionIdPayload,
+    derive_project, derive_submission, derive_task, get_actor, get_project, get_submission,
+    get_task, AcceptanceRecord, ActorGrantPayload, ActorRecord, ActorRegisterPayload, ActorRole,
+    Capability, ProjectCreatePayload, ProjectRecord, SubmissionCreatePayload, SubmissionIdPayload,
     SubmissionRecord, SubmissionStatus, TaskCreatePayload, TaskIdPayload, TaskRecord, TaskStatus,
 };
 

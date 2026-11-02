@@ -6,6 +6,7 @@ members = [
     "crates/workstream-tx",
     "crates/workstream-stf",
     "crates/workstream-rlp",
+    "crates/workstream-tests",
     "src/bin/sequencer",
     "src/bin/prover",
     "src/bin/node",

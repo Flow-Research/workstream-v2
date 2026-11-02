@@ -152,15 +152,17 @@ const D_TASK: &[u8] = b"WS:v1:id:task:";
 const D_SUBMISSION: &[u8] = b"WS:v1:id:submission:";
 
 /// Deterministic project id: H(tag ‖ owner ‖ title).
-pub(crate) fn derive_project(owner: &H256, title: &str) -> ProjectId {
+pub fn derive_project(owner: &H256, title: &str) -> ProjectId {
     Hash::sha256_concat(&[D_PROJECT, owner.as_bytes(), title.as_bytes()])
 }
 
-pub(crate) fn derive_task(project: &H256, title: &str) -> TaskId {
+/// Deterministic task id: H(tag ‖ project ‖ title).
+pub fn derive_task(project: &H256, title: &str) -> TaskId {
     Hash::sha256_concat(&[D_TASK, project.as_bytes(), title.as_bytes()])
 }
 
-pub(crate) fn derive_submission(task: &H256, content_hash: &H256) -> SubmissionId {
+/// Deterministic submission id: H(tag ‖ task ‖ content_hash).
+pub fn derive_submission(task: &H256, content_hash: &H256) -> SubmissionId {
     Hash::sha256_concat(&[D_SUBMISSION, task.as_bytes(), content_hash.as_bytes()])
 }
 

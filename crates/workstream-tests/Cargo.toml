@@ -1,0 +1,16 @@
+[package]
+name = "workstream-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+workstream-core = { path = "../workstream-core" }
+workstream-state = { path = "../workstream-state" }
+workstream-stf = { path = "../workstream-stf" }
+workstream-tx = { path = "../workstream-tx" }
+workstream-sequencer = { path = "../../src/bin/sequencer" }
+workstream-node = { path = "../../src/bin/node" }

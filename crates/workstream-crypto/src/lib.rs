@@ -7,6 +7,9 @@ pub mod commitment;
 pub mod hash;
 pub mod merkle;
 pub mod signature;
+pub mod smt;
+
+pub use smt::{hash_key, hash_value, MemoryNodeStore, NodeStore, SmTree, SmtNode};
 
 pub use commitment::*;
 pub use hash::*;

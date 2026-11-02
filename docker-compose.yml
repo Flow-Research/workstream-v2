@@ -1,0 +1,48 @@
+name: workstream-localnet
+
+services:
+  sequencer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: workstream:dev
+    container_name: ws-sequencer
+    command: workstream-sequencer --config config/sequencer.example.toml
+    ports:
+      - "8545:8545"
+    environment:
+      WORKSTREAM_SEQUENCER_LOG_LEVEL: debug
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  prover:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: workstream:dev
+    container_name: ws-prover
+    command: workstream-prover --config config/prover.example.toml
+    ports:
+      - "8080:8080"
+    environment:
+      WORKSTREAM_PROVER_LOG_LEVEL: debug
+    depends_on:
+      - sequencer
+
+  node:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: workstream:dev
+    container_name: ws-node
+    command: workstream-node --config config/node.example.toml
+    ports:
+      - "30303:30303"
+    environment:
+      WORKSTREAM_NODE_LOG_LEVEL: debug
+    depends_on:
+      - sequencer
+      - prover

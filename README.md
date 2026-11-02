@@ -49,6 +49,9 @@ workstream/
 ## Quick Start
 
 ```bash
+# Verify tooling + build + test (first time)
+./scripts/devsetup.sh
+
 # Build the workspace
 cargo build
 
@@ -58,6 +61,19 @@ cargo test
 # Run with tracing
 RUST_LOG=debug cargo test
 ```
+
+### Makefile Targets
+
+| Command | Description |
+|---------|-------------|
+| `make help` | Show all targets |
+| `make build` | Build the workspace |
+| `make test` | Run all tests |
+| `make ci` | Run exactly what CI runs (fmt, clippy, test, doc) |
+| `make run-sequencer` / `run-prover` / `run-node` | Run a component with example config |
+| `make localnet-up` / `localnet-down` | Start/stop the dockerized localnet |
+
+See `docs/dev/localnet.md` for the full development guide.
 
 ## Development
 

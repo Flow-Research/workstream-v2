@@ -185,3 +185,15 @@ This is a starter template. Implementations are simplified for structure. Produc
 - RPC server
 - Indexer
 - Wallet support
+
+## Local Development
+
+The localnet runs all three components together:
+
+```bash
+./scripts/devsetup.sh   # verify tooling, build, test
+make localnet-up        # dockerized sequencer + prover + node
+make ci                 # CI parity checks
+```
+
+Config precedence per component: defaults → TOML (`--config`) → `WORKSTREAM_*` env → CLI flags. See `docs/dev/localnet.md` for the full guide.

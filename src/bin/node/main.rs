@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use tracing::info;
+use tracing::{debug, info};
 use workstream_core::config::{load_config, NodeConfig};
 use workstream_core::{logging, Result};
 
@@ -44,7 +44,10 @@ async fn main() -> Result<()> {
     info!("Verifying proofs and maintaining canonical state");
 
     // TODO: Implement P2P, block sync, proof verification, RPC
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-    Ok(())
+    // Idle loop keeps the process alive until real event loops land.
+    let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(10));
+    loop {
+        tick.tick().await;
+        debug!("node heartbeat");
+    }
 }

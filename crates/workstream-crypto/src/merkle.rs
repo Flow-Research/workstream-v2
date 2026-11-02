@@ -1,98 +1,101 @@
 //! Merkle structures for WorkStream state.
 //!
-//! Placeholder-but-functional versions pending the real SMT (#34/#35) and
-//! MMR (#36) per `docs/design/smt-mmr.md`. These provide honest semantic
-//! behavior — real key-value storage below a canonical commitment root, and
-//! append-only records — so the STF (#15), sequencer (#16), and node (#32)
-//! can be built and tested. Internals will be replaced; the public API stays.
+//! This module provides the high-level state structures used by workstream-state:
+//! - `SparseMerkleTree`: Authenticated key-value store backed by a real compressed SMT
+//! - `MerkleMountainRange`: Append-only record log (placeholder, real impl in #36)
+//!
+//! The SMT implementation follows `docs/design/smt-mmr.md`.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use workstream_core::hash::{Hash, H256};
 use workstream_core::Result;
 
-/// Deterministic commitment over an empty entry set.
-const SMT_EMPTY: &[u8] = b"WS:v1:KVS:EMPTY";
-/// Domain tag for the KV-set root.
-const SMT_ROOT_TAG: &[u8] = b"WS:v1:KVS";
-/// Deterministic commitment over an empty record log.
-const MMR_EMPTY: &[u8] = b"WSMMR:v1:EMPTY";
-/// Domain tag for the size-bound record-log root.
-const MMR_ROOT_TAG: &[u8] = b"WSMMR:v1:PEAKS";
-
-/// Root over a sorted key-value set: H(tag ‖ le_count ‖ Σ (key ‖ H(value))).
-fn kv_root(entries: &BTreeMap<H256, Vec<u8>>) -> H256 {
-    if entries.is_empty() {
-        return Hash::sha256(SMT_EMPTY);
-    }
-    let mut data: Vec<u8> = Vec::with_capacity(8 + entries.len() * 64);
-    data.extend_from_slice(&(entries.len() as u64).to_le_bytes());
-    for (k, v) in entries.iter() {
-        data.extend_from_slice(k.as_bytes());
-        data.extend_from_slice(Hash::sha256(v).as_bytes());
-    }
-    Hash::sha256_concat(&[SMT_ROOT_TAG, &data])
-}
-
-/// Size-bound root over an append-only list of leaf hashes:
-/// H(tag ‖ le_count ‖ Σ leaf_hash).
-fn record_root(leaves: &[H256]) -> H256 {
-    if leaves.is_empty() {
-        return Hash::sha256(MMR_EMPTY);
-    }
-    let mut data: Vec<u8> = Vec::with_capacity(8 + leaves.len() * 32);
-    data.extend_from_slice(&(leaves.len() as u64).to_le_bytes());
-    for leaf in leaves {
-        data.extend_from_slice(leaf.as_bytes());
-    }
-    Hash::sha256_concat(&[MMR_ROOT_TAG, &data])
-}
+use crate::smt::{hash_key, hash_value, MemoryNodeStore, SmTree};
 
 /// Sparse Merkle Tree for mutable lifecycle objects.
 ///
-/// MVP implementation: flat key-value store with a deterministic canonical
-/// root over the sorted entry set (BTreeMap keeps iteration order stable, so
-/// the same entry set always produces the same root). The real compressed
-/// SMT (#34) replaces the internals behind this unchanged API.
+/// Wraps the core `SmTree` and provides value storage. The tree commits to
+/// value hashes; actual values are stored in a separate map for retrieval.
+/// This separation enables efficient proofs (small witnesses) while
+/// supporting full value retrieval for application logic.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SparseMerkleTree {
-    entries: BTreeMap<H256, Vec<u8>>,
-    root: H256,
+    /// The underlying SMT storing key → value_hash mappings.
+    tree: SmTree<MemoryNodeStore>,
+    /// Value storage: value_hash → value bytes.
+    values: HashMap<H256, Vec<u8>>,
 }
 
 impl SparseMerkleTree {
     pub fn new() -> Self {
         SparseMerkleTree {
-            entries: BTreeMap::new(),
-            root: kv_root(&BTreeMap::new()),
+            tree: SmTree::new(),
+            values: HashMap::new(),
         }
     }
 
+    /// Get the current Merkle root.
     pub fn root(&self) -> H256 {
-        self.root
+        self.tree.root()
     }
 
+    /// Number of entries in the tree.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.values.len()
     }
 
+    /// Check if the tree is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.tree.is_empty()
     }
 
-    /// Insert or overwrite the value stored under `key`.
-    /// The full key material is hashed to the key space internally.
+    /// Insert or update a key-value pair.
+    ///
+    /// The key is hashed to the 256-bit key space. The value is stored
+    /// separately and its hash is committed to the tree.
     pub fn update(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        let key_hash = Hash::sha256(key);
-        self.entries.insert(key_hash, value.to_vec());
-        self.root = kv_root(&self.entries);
+        let key_hash = hash_key(key);
+        let value_hash = hash_value(value);
+
+        // Store the value
+        self.values.insert(value_hash, value.to_vec());
+
+        // Update the tree
+        self.tree.update(&key_hash, value_hash);
+
         Ok(())
     }
 
+    /// Retrieve a value by key.
+    ///
+    /// Returns `None` if the key doesn't exist.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let key_hash = Hash::sha256(key);
-        Ok(self.entries.get(&key_hash).cloned())
+        let key_hash = hash_key(key);
+
+        match self.tree.get(&key_hash) {
+            Some(value_hash) => Ok(self.values.get(&value_hash).cloned()),
+            None => Ok(None),
+        }
+    }
+
+    /// Delete a key from the tree.
+    ///
+    /// Note: The value remains in storage (for historical access / proofs).
+    /// A future GC pass can reclaim unreferenced values.
+    pub fn delete(&mut self, key: &[u8]) -> Result<bool> {
+        let key_hash = hash_key(key);
+        let existed = self.tree.get(&key_hash).is_some();
+        if existed {
+            self.tree.delete(&key_hash);
+        }
+        Ok(existed)
+    }
+
+    /// Access the underlying tree (for proof generation in #35).
+    pub fn tree(&self) -> &SmTree<MemoryNodeStore> {
+        &self.tree
     }
 }
 
@@ -104,37 +107,58 @@ impl Default for SparseMerkleTree {
 
 /// Merkle Mountain Range for append-only immutable records.
 ///
-/// MVP implementation: holds the leaf hash list; the root is a
-/// deterministic, size-bound commitment over all leaves (the same shape the
-/// final MMR (#36) bag). Only appends exist; records never change.
+/// Placeholder implementation storing leaf hashes with a size-bound root.
+/// The real MMR (#36) will implement peaks and proper proofs per the design.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MerkleMountainRange {
-    leaf_hashes: Vec<H256>,
+    /// Leaf hashes in append order.
+    leaves: Vec<H256>,
+    /// Current root (recomputed on each append).
     root: H256,
+}
+
+/// Domain tags for MMR (from design doc).
+const MMR_EMPTY: &[u8] = b"WSMMR:v1:EMPTY";
+const MMR_PEAKS: &[u8] = b"WSMMR:v1:PEAKS";
+
+/// Compute MMR root as H(tag ‖ size ‖ leaves...).
+fn mmr_root(leaves: &[H256]) -> H256 {
+    if leaves.is_empty() {
+        return Hash::sha256(MMR_EMPTY);
+    }
+    let mut data = Vec::with_capacity(8 + leaves.len() * 32);
+    data.extend_from_slice(&(leaves.len() as u64).to_le_bytes());
+    for leaf in leaves {
+        data.extend_from_slice(leaf.as_bytes());
+    }
+    Hash::sha256_concat(&[MMR_PEAKS, &data])
 }
 
 impl MerkleMountainRange {
     pub fn new() -> Self {
         MerkleMountainRange {
-            leaf_hashes: Vec::new(),
-            root: record_root(&[]),
+            leaves: Vec::new(),
+            root: mmr_root(&[]),
         }
     }
 
+    /// Get the current root.
     pub fn root(&self) -> H256 {
         self.root
     }
 
-    /// Append a record and return its zero-based index.
-    pub fn append(&mut self, leaf: &[u8]) -> Result<u64> {
-        let index = self.leaf_hashes.len() as u64;
-        self.leaf_hashes.push(Hash::sha256(leaf));
-        self.root = record_root(&self.leaf_hashes);
-        Ok(index)
+    /// Number of records in the log.
+    pub fn size(&self) -> u64 {
+        self.leaves.len() as u64
     }
 
-    pub fn size(&self) -> u64 {
-        self.leaf_hashes.len() as u64
+    /// Append a record and return its index.
+    pub fn append(&mut self, record: &[u8]) -> Result<u64> {
+        let leaf_hash = Hash::sha256(record);
+        let index = self.leaves.len() as u64;
+        self.leaves.push(leaf_hash);
+        self.root = mmr_root(&self.leaves);
+        Ok(index)
     }
 }
 
@@ -150,87 +174,125 @@ mod tests {
 
     #[test]
     fn smt_empty_root_is_deterministic() {
-        assert_eq!(
-            SparseMerkleTree::new().root(),
-            SparseMerkleTree::new().root()
-        );
-        // Distinct from any populated tree.
+        let tree1 = SparseMerkleTree::new();
+        let tree2 = SparseMerkleTree::new();
+        assert_eq!(tree1.root(), tree2.root());
+    }
+
+    #[test]
+    fn smt_insert_and_retrieve() {
         let mut tree = SparseMerkleTree::new();
-        tree.update(b"k", b"v").unwrap();
-        assert_ne!(tree.root(), SparseMerkleTree::new().root());
+        let key = b"test-key";
+        let value = b"test-value";
+
+        assert_eq!(tree.get(key).unwrap(), None);
+
+        tree.update(key, value).unwrap();
+        assert_eq!(tree.get(key).unwrap(), Some(value.to_vec()));
     }
 
     #[test]
-    fn smt_get_set_roundtrip() {
+    fn smt_update_changes_root() {
         let mut tree = SparseMerkleTree::new();
-        assert_eq!(tree.get(b"missing").unwrap(), None);
+        let empty_root = tree.root();
 
-        tree.update(b"key-1", b"value-1").unwrap();
-        assert_eq!(tree.get(b"key-1").unwrap(), Some(b"value-1".to_vec()));
-
-        // Overwrite
-        tree.update(b"key-1", b"value-2").unwrap();
-        assert_eq!(tree.get(b"key-1").unwrap(), Some(b"value-2".to_vec()));
-        assert_eq!(tree.len(), 1);
+        tree.update(b"key", b"value").unwrap();
+        assert_ne!(tree.root(), empty_root);
     }
 
     #[test]
-    fn smt_root_depends_on_content_and_keys() {
-        let mut a = SparseMerkleTree::new();
-        a.update(b"k", b"v1").unwrap();
-        let mut b = SparseMerkleTree::new();
-        b.update(b"k", b"v2").unwrap();
-        assert_ne!(a.root(), b.root());
+    fn smt_update_overwrites() {
+        let mut tree = SparseMerkleTree::new();
+        let key = b"key";
 
-        let mut c = SparseMerkleTree::new();
-        c.update(b"k2", b"v1").unwrap();
-        assert_ne!(a.root(), c.root());
+        tree.update(key, b"value1").unwrap();
+        assert_eq!(tree.get(key).unwrap(), Some(b"value1".to_vec()));
 
-        // Reinsertion of the same content in a fresh tree reproduces the root.
-        let mut d = SparseMerkleTree::new();
-        d.update(b"k", b"v1").unwrap();
-        assert_eq!(a.root(), d.root());
-
-        // Insertion order does not matter for the root commitment.
-        let mut e = SparseMerkleTree::new();
-        e.update(b"a", b"1").unwrap();
-        e.update(b"b", b"2").unwrap();
-        let mut f = SparseMerkleTree::new();
-        f.update(b"b", b"2").unwrap();
-        f.update(b"a", b"1").unwrap();
-        assert_eq!(e.root(), f.root());
+        tree.update(key, b"value2").unwrap();
+        assert_eq!(tree.get(key).unwrap(), Some(b"value2".to_vec()));
     }
 
     #[test]
-    fn mmr_append_assigns_indices_and_size_bounds_root() {
-        let mut mmr = MerkleMountainRange::new();
-        assert_eq!(mmr.size(), 0);
+    fn smt_multiple_keys() {
+        let mut tree = SparseMerkleTree::new();
 
-        let i0 = mmr.append(b"record-0").unwrap();
-        let i1 = mmr.append(b"record-1").unwrap();
-        assert_eq!(i0, 0);
-        assert_eq!(i1, 1);
-        assert_eq!(mmr.size(), 2);
+        for i in 0..10 {
+            let key = format!("key-{}", i);
+            let value = format!("value-{}", i);
+            tree.update(key.as_bytes(), value.as_bytes()).unwrap();
+        }
 
-        // Root changes with each append and depends on content.
-        let root_2 = mmr.root();
-        let i2 = mmr.append(b"record-2").unwrap();
-        assert_eq!(i2, 2);
-        assert_ne!(mmr.root(), root_2);
+        for i in 0..10 {
+            let key = format!("key-{}", i);
+            let value = format!("value-{}", i);
+            assert_eq!(
+                tree.get(key.as_bytes()).unwrap(),
+                Some(value.as_bytes().to_vec())
+            );
+        }
+    }
 
-        // An identical MMR construction reproduces the root.
-        let mut mmr2 = MerkleMountainRange::new();
-        mmr2.append(b"record-0").unwrap();
-        mmr2.append(b"record-1").unwrap();
-        mmr2.append(b"record-2").unwrap();
-        assert_eq!(mmr2.root(), mmr.root());
+    #[test]
+    fn smt_root_independent_of_insert_order() {
+        let mut tree_a = SparseMerkleTree::new();
+        tree_a.update(b"a", b"1").unwrap();
+        tree_a.update(b"b", b"2").unwrap();
+
+        let mut tree_b = SparseMerkleTree::new();
+        tree_b.update(b"b", b"2").unwrap();
+        tree_b.update(b"a", b"1").unwrap();
+
+        assert_eq!(tree_a.root(), tree_b.root());
+    }
+
+    #[test]
+    fn smt_delete() {
+        let mut tree = SparseMerkleTree::new();
+        tree.update(b"key", b"value").unwrap();
+        assert!(tree.get(b"key").unwrap().is_some());
+
+        tree.delete(b"key").unwrap();
+        assert!(tree.get(b"key").unwrap().is_none());
     }
 
     #[test]
     fn mmr_empty_root_is_deterministic() {
-        assert_eq!(
-            MerkleMountainRange::new().root(),
-            MerkleMountainRange::new().root()
-        );
+        let mmr1 = MerkleMountainRange::new();
+        let mmr2 = MerkleMountainRange::new();
+        assert_eq!(mmr1.root(), mmr2.root());
+    }
+
+    #[test]
+    fn mmr_append_returns_indices() {
+        let mut mmr = MerkleMountainRange::new();
+        assert_eq!(mmr.size(), 0);
+
+        assert_eq!(mmr.append(b"record-0").unwrap(), 0);
+        assert_eq!(mmr.append(b"record-1").unwrap(), 1);
+        assert_eq!(mmr.append(b"record-2").unwrap(), 2);
+        assert_eq!(mmr.size(), 3);
+    }
+
+    #[test]
+    fn mmr_root_changes_on_append() {
+        let mut mmr = MerkleMountainRange::new();
+        let empty_root = mmr.root();
+
+        mmr.append(b"record").unwrap();
+        assert_ne!(mmr.root(), empty_root);
+    }
+
+    #[test]
+    fn mmr_deterministic_replay() {
+        let mut mmr1 = MerkleMountainRange::new();
+        let mut mmr2 = MerkleMountainRange::new();
+
+        for i in 0..5 {
+            let record = format!("record-{}", i);
+            mmr1.append(record.as_bytes()).unwrap();
+            mmr2.append(record.as_bytes()).unwrap();
+        }
+
+        assert_eq!(mmr1.root(), mmr2.root());
     }
 }

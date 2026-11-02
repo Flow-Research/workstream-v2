@@ -62,6 +62,9 @@ pub enum Error {
     #[error("Consensus error: {0}")]
     Consensus(String),
 
+    #[error("Fork error: {0}")]
+    Fork(String),
+
     #[error("IO error: {0}")]
     Io(String),
 
@@ -82,7 +85,9 @@ impl Error {
             Error::Config(_) => ErrorCategory::Configuration,
             Error::Unauthorized(_) => ErrorCategory::Authorization,
             Error::NotFound(_) | Error::Timeout(_) => ErrorCategory::Network,
-            Error::Determinism(_) | Error::Consensus(_) => ErrorCategory::Consensus,
+            Error::Determinism(_) | Error::Consensus(_) | Error::Fork(_) => {
+                ErrorCategory::Consensus
+            }
             Error::VersionMismatch(_) => ErrorCategory::Internal,
             Error::Io(_) | Error::Other(_) => ErrorCategory::Internal,
         }
@@ -220,6 +225,7 @@ mod tests {
         assert_eq!(Error::Timeout("x".to_string()).code(), ErrorCode::E7001);
         assert_eq!(Error::Determinism("x".to_string()).code(), ErrorCode::E8000);
         assert_eq!(Error::Consensus("x".to_string()).code(), ErrorCode::E8001);
+        assert_eq!(Error::Fork("x".to_string()).code(), ErrorCode::E8002);
         assert_eq!(
             Error::VersionMismatch("x".to_string()).code(),
             ErrorCode::E9000
@@ -308,6 +314,8 @@ pub enum ErrorCode {
     E8000 = 8000,
     /// Consensus error
     E8001 = 8001,
+    /// Fork gating error
+    E8002 = 8002,
     /// Version mismatch
     E9000 = 9000,
     /// Internal or other error
@@ -338,6 +346,7 @@ impl From<&Error> for ErrorCode {
             Error::Timeout(_) => ErrorCode::E7001,
             Error::Determinism(_) => ErrorCode::E8000,
             Error::Consensus(_) => ErrorCode::E8001,
+            Error::Fork(_) => ErrorCode::E8002,
             Error::VersionMismatch(_) => ErrorCode::E9000,
             Error::Io(_) | Error::Other(_) => ErrorCode::E9999,
         }

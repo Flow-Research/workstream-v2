@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn secp256k1_sign_verify() {
-        let signing_key = Secp256k1SigningKey::random(&mut rand::thread_rng());
+        let signing_key = Secp256k1SigningKey::random(&mut rand::rng());
         let verifying_key = signing_key.verifying_key();
 
         let message = b"test message for secp256k1";
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn secp256k1_invalid_signature() {
-        let signing_key = Secp256k1SigningKey::random(&mut rand::thread_rng());
+        let signing_key = Secp256k1SigningKey::random(&mut rand::rng());
         let verifying_key = signing_key.verifying_key();
 
         let message = b"test message";
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn ed25519_sign_verify() {
-        let signing_key = Ed25519SigningKey::generate(&mut rand::thread_rng());
+        let signing_key = Ed25519SigningKey::generate(&mut rand::rng());
         let verifying_key = signing_key.verifying_key();
 
         let message = b"test message for ed25519";
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn ed25519_invalid_signature() {
-        let signing_key = Ed25519SigningKey::generate(&mut rand::thread_rng());
+        let signing_key = Ed25519SigningKey::generate(&mut rand::rng());
         let verifying_key = signing_key.verifying_key();
 
         let message = b"test message";
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn algorithm_mismatch_error() {
-        let signing_key = Ed25519SigningKey::generate(&mut rand::thread_rng());
+        let signing_key = Ed25519SigningKey::generate(&mut rand::rng());
         let verifying_key = signing_key.verifying_key();
 
         let message = b"test message";
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn invalid_signature_format() {
-        let signing_key = Ed25519SigningKey::generate(&mut rand::thread_rng());
+        let signing_key = Ed25519SigningKey::generate(&mut rand::rng());
         let verifying_key = signing_key.verifying_key();
 
         let message = b"test";
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn secp256k1_compressed_and_uncompressed_keys() {
-        let signing_key = Secp256k1SigningKey::random(&mut rand::thread_rng());
+        let signing_key = Secp256k1SigningKey::random(&mut rand::rng());
         let verifying_key = signing_key.verifying_key();
 
         let message = b"test message";
@@ -276,7 +276,7 @@ mod tests {
         assert!(result, "compressed key should work");
 
         // Test with uncompressed key (65 bytes)
-        let uncompressed = verifying_key.to_encoded_point(false);
+        let uncompressed = verifying_key.to_sec1_point(false);
         let signature2 = Signature::secp256k1(sig.to_bytes().to_vec());
         let public_key2 = PublicKey::secp256k1(uncompressed.as_bytes().to_vec());
 
@@ -286,8 +286,8 @@ mod tests {
 
     #[test]
     fn different_signers_produce_invalid_verification() {
-        let signer1 = Ed25519SigningKey::generate(&mut rand::thread_rng());
-        let signer2 = Ed25519SigningKey::generate(&mut rand::thread_rng());
+        let signer1 = Ed25519SigningKey::generate(&mut rand::rng());
+        let signer2 = Ed25519SigningKey::generate(&mut rand::rng());
 
         let message = b"test message";
         let sig = signer1.sign(message);
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn empty_message() {
-        let signing_key = Ed25519SigningKey::generate(&mut rand::thread_rng());
+        let signing_key = Ed25519SigningKey::generate(&mut rand::rng());
         let verifying_key = signing_key.verifying_key();
 
         let message = b"";
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn large_message() {
-        let signing_key = Ed25519SigningKey::generate(&mut rand::thread_rng());
+        let signing_key = Ed25519SigningKey::generate(&mut rand::rng());
         let verifying_key = signing_key.verifying_key();
 
         // 1MB message

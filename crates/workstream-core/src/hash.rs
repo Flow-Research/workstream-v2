@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// 32-byte hash value. Orders lexicographically so it can key sorted maps
+/// (deterministic iteration order matters for canonical commitments).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct H256([u8; 32]);
 
 impl H256 {

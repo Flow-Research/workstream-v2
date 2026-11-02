@@ -7,9 +7,28 @@ use tracing::{debug, info};
 use workstream_core::fork::{
     features, validate_header_fork, ForkActivationHook, ForkConfig, ForkSchedule, NoopForkHook,
 };
+use workstream_core::hash::Hash;
 use workstream_core::{types::*, Error, Result};
 use workstream_state::State;
 use workstream_tx::TxValidator;
+
+pub mod handlers;
+
+pub use handlers::{
+    AcceptanceRecord, ActorGrantPayload, ActorRecord, ActorRegisterPayload, ActorRole, Capability,
+    ProjectCreatePayload, ProjectRecord, SubmissionCreatePayload, SubmissionIdPayload,
+    SubmissionRecord, SubmissionStatus, TaskCreatePayload, TaskIdPayload, TaskRecord, TaskStatus,
+};
+
+/// Encode an action payload for inclusion in a transaction.
+///
+/// Canonical encoding for action payloads is postcard (serde-backed,
+/// deterministic), consistent with the serialization policy adopted for all
+/// consensus types.
+pub fn encode_payload<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
+    postcard::to_allocvec(value)
+        .map_err(|e| Error::Serialization(format!("action payload encode: {e}")))
+}
 
 #[derive(Clone)]
 pub struct StateTransitionFunction {
@@ -65,6 +84,13 @@ impl StateTransitionFunction {
     }
 
     /// Execute a single transaction under the given fork context
+    ///
+    /// Contract: the caller (sequencer #16 / node #32) must only supply
+    /// transactions that are valid for the current state. Handlers apply
+    /// actions sequentially without rollback; a mid-transaction failure
+    /// leaves earlier actions applied and must not occur inside executed
+    /// blocks. Payload well-formedness is pre-checked here so malformed
+    /// payloads abort before any state mutation.
     pub fn execute_tx(&self, state: &mut State, tx: &Transaction) -> Result<Vec<Event>> {
         debug!("Executing transaction for account {:?}", tx.account);
 
@@ -73,6 +99,11 @@ impl StateTransitionFunction {
 
         // Check nonce (simplified)
         // TODO: Implement nonce tracking
+
+        // Pre-check: every action payload must decode for its action type
+        for action in &tx.actions {
+            self.decode_action_payload(action)?;
+        }
 
         // Execute all actions atomically
         let mut events = Vec::new();
@@ -114,6 +145,23 @@ impl StateTransitionFunction {
         Ok(())
     }
 
+    /// Pre-check that an action's payload decodes for its action type.
+    fn decode_action_payload(&self, action: &Action) -> Result<()> {
+        use handlers as h;
+        match action.action_type {
+            ActionType::ActorRegister => decode::<h::ActorRegisterPayload>(action),
+            ActionType::ActorGrant => decode::<h::ActorGrantPayload>(action),
+            ActionType::ProjectCreate => decode::<h::ProjectCreatePayload>(action),
+            ActionType::TaskCreate => decode::<h::TaskCreatePayload>(action),
+            ActionType::TaskClaim | ActionType::TaskStart => decode::<h::TaskIdPayload>(action),
+            ActionType::SubmissionCreate => decode::<h::SubmissionCreatePayload>(action),
+            ActionType::AcceptFinal => decode::<h::SubmissionIdPayload>(action),
+            // Types without MVP handlers yet: no payload preview is possible;
+            // their (not-yet-supported) execution errors below.
+            _ => Ok(()),
+        }
+    }
+
     /// Execute a single action
     fn execute_action(
         &self,
@@ -121,74 +169,27 @@ impl StateTransitionFunction {
         tx: &Transaction,
         action: &Action,
     ) -> Result<Vec<Event>> {
-        match action.action_type {
-            ActionType::ActorRegister => self.handle_actor_register(state, tx, action),
-            ActionType::ProjectCreate => self.handle_project_create(state, tx, action),
-            ActionType::TaskCreate => self.handle_task_create(state, tx, action),
-            ActionType::SubmissionCreate => self.handle_submission_create(state, tx, action),
-            ActionType::AcceptFinal => self.handle_accept_final(state, tx, action),
-            ActionType::ReviewDecide => self.handle_review_decide(state, tx, action),
-            _ => {
-                // For unimplemented actions in starter template
-                debug!("Action {:?} not yet fully implemented", action.action_type);
-                Ok(vec![])
+        let account = tx.account;
+        let payload = action.payload.as_slice();
+        let event = match action.action_type {
+            ActionType::ActorRegister => handlers::handle_actor_register(state, account, payload)?,
+            ActionType::ActorGrant => handlers::handle_actor_grant(state, account, payload)?,
+            ActionType::ProjectCreate => handlers::handle_project_create(state, account, payload)?,
+            ActionType::TaskCreate => handlers::handle_task_create(state, account, payload)?,
+            ActionType::TaskClaim => handlers::handle_task_claim(state, account, payload)?,
+            ActionType::TaskStart => handlers::handle_task_start(state, account, payload)?,
+            ActionType::SubmissionCreate => {
+                handlers::handle_submission_create(state, account, payload)?
             }
-        }
-    }
-
-    fn handle_actor_register(
-        &self,
-        _state: &mut State,
-        _tx: &Transaction,
-        _action: &Action,
-    ) -> Result<Vec<Event>> {
-        Ok(vec![])
-    }
-
-    fn handle_project_create(
-        &self,
-        _state: &mut State,
-        _tx: &Transaction,
-        _action: &Action,
-    ) -> Result<Vec<Event>> {
-        Ok(vec![])
-    }
-
-    fn handle_task_create(
-        &self,
-        _state: &mut State,
-        _tx: &Transaction,
-        _action: &Action,
-    ) -> Result<Vec<Event>> {
-        Ok(vec![])
-    }
-
-    fn handle_submission_create(
-        &self,
-        _state: &mut State,
-        _tx: &Transaction,
-        _action: &Action,
-    ) -> Result<Vec<Event>> {
-        Ok(vec![])
-    }
-
-    fn handle_accept_final(
-        &self,
-        _state: &mut State,
-        _tx: &Transaction,
-        _action: &Action,
-    ) -> Result<Vec<Event>> {
-        // FinalAcceptance: atomic record + award
-        Ok(vec![])
-    }
-
-    fn handle_review_decide(
-        &self,
-        _state: &mut State,
-        _tx: &Transaction,
-        _action: &Action,
-    ) -> Result<Vec<Event>> {
-        Ok(vec![])
+            ActionType::AcceptFinal => handlers::handle_accept_final(state, account, payload)?,
+            other => {
+                return Err(Error::Transaction(format!(
+                    "action {:?} is not enabled in the MVP era",
+                    other
+                )));
+            }
+        };
+        Ok(vec![event])
     }
 
     /// Execute a full block under fork rules.
@@ -218,16 +219,28 @@ impl StateTransitionFunction {
                 .on_activation(fork, block.header.number)?;
         }
 
-        // 4. Execute transactions under this fork's rules
+        // 4. Execute transactions under this fork's rules; stamp each
+        //    event with its real block position so event streams are
+        //    addressable by (block, index) without recomputing them.
         let mut all_events = Vec::new();
-        for tx in &block.transactions {
-            let events = self.execute_tx_with_fork(state, tx, fork)?;
+        for (tx_idx, tx) in block.transactions.iter().enumerate() {
+            let mut events = self.execute_tx_with_fork(state, tx, fork)?;
+            for ev in events.iter_mut() {
+                ev.block_number = block.header.number;
+                ev.tx_index = tx_idx as TxIndex;
+            }
             all_events.extend(events);
         }
 
-        // Update state root would happen here
         Ok(all_events)
     }
+}
+
+/// Decode an action payload as a specific typed payload.
+fn decode<T: serde::de::DeserializeOwned>(action: &Action) -> Result<()> {
+    postcard::from_bytes::<T>(&action.payload)
+        .map(|_| ())
+        .map_err(|e| Error::Serialization(format!("action payload decode: {e}")))
 }
 
 /// Map an action to the feature flag that gates it, if any.
@@ -266,6 +279,625 @@ fn required_feature_for(action: ActionType) -> Option<&'static str> {
 impl Default for StateTransitionFunction {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Convenience schedule for the MVP era: genesis fork at height 0 enabling
+/// `TASK_LIFECYCLE` and `SUBMISSION_REVIEW` so the M0.5 handlers run without
+/// waiting on a later fork. Reused by sequencer/node/e2e work in this
+/// milestone; its fork_id/name are consensus constants.
+pub fn mvp_genesis_schedule() -> Result<ForkSchedule> {
+    ForkSchedule::new(
+        1,
+        vec![ForkConfig {
+            fork_id: 1,
+            name: "genesis-mvp".to_string(),
+            activation_height: 0,
+            // Deterministic, constant guest marker for the MVP era.
+            guest_hash: Hash::sha256(b"workstream/genesis-mvp/guest"),
+            min_proof_system: 1,
+            features: vec![
+                features::TASK_LIFECYCLE.to_string(),
+                features::SUBMISSION_REVIEW.to_string(),
+            ],
+        }],
+    )
+}
+
+#[cfg(test)]
+mod mvp_handler_tests {
+    use super::*;
+    use workstream_core::hash::H256;
+    use workstream_tx::TxBuilder;
+
+    const TITLE: &str = "alpha";
+
+    fn sponsor() -> AccountId {
+        H256::from_bytes([11u8; 32])
+    }
+
+    fn worker() -> AccountId {
+        H256::from_bytes([22u8; 32])
+    }
+
+    fn sponsor2() -> AccountId {
+        H256::from_bytes([33u8; 32])
+    }
+
+    fn worker2() -> AccountId {
+        H256::from_bytes([44u8; 32])
+    }
+
+    fn content_hash(b: u8) -> H256 {
+        H256::from_bytes([b; 32])
+    }
+
+    fn mvp_stf() -> StateTransitionFunction {
+        StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap()).unwrap()
+    }
+
+    fn tx(acct: AccountId, seq: u64, t: ActionType, payload: Vec<u8>) -> Transaction {
+        TxBuilder::new()
+            .chain_id(1)
+            .account(acct)
+            .nonce(0, seq)
+            .add_action(t, payload)
+            .fee(FeeSpec {
+                payer: FeePayer::Self_,
+                asset_id: 0,
+                max_fee: 1000,
+            })
+            .build()
+            .unwrap()
+    }
+
+    fn register(acct: AccountId, role: ActorRole) -> Transaction {
+        let payload = encode_payload(&ActorRegisterPayload { role }).unwrap();
+        tx(acct, 0, ActionType::ActorRegister, payload)
+    }
+
+    fn grant(to: AccountId, cap: Capability) -> Transaction {
+        let payload = encode_payload(&ActorGrantPayload {
+            grantee: to,
+            capability: cap,
+        })
+        .unwrap();
+        tx(sponsor(), 0, ActionType::ActorGrant, payload)
+    }
+
+    fn create_project(
+        stf: &StateTransitionFunction,
+        state: &mut State,
+        acct: AccountId,
+    ) -> ProjectId {
+        let payload = encode_payload(&ProjectCreatePayload {
+            title: TITLE.to_string(),
+        })
+        .unwrap();
+        let project_tx = tx(acct, 1, ActionType::ProjectCreate, payload);
+        stf.execute_tx(state, &project_tx).unwrap();
+        handlers::derive_project(&acct, TITLE)
+    }
+
+    fn create_task(
+        stf: &StateTransitionFunction,
+        state: &mut State,
+        acct: AccountId,
+        project: ProjectId,
+    ) -> TaskId {
+        let payload = encode_payload(&TaskCreatePayload {
+            project,
+            title: "task-one".to_string(),
+            award: 100,
+        })
+        .unwrap();
+        let task_tx = tx(acct, 2, ActionType::TaskCreate, payload);
+        stf.execute_tx(state, &task_tx).unwrap();
+        handlers::derive_task(&project, "task-one")
+    }
+
+    fn setup_task_ready() -> (StateTransitionFunction, State, ProjectId, TaskId) {
+        let stf = mvp_stf();
+        let mut state = State::new();
+
+        // Sponsors + workers
+        stf.execute_tx(&mut state, &register(sponsor(), ActorRole::Sponsor))
+            .unwrap();
+        stf.execute_tx(&mut state, &register(sponsor2(), ActorRole::Sponsor))
+            .unwrap();
+        stf.execute_tx(&mut state, &register(worker(), ActorRole::Worker))
+            .unwrap();
+        stf.execute_tx(&mut state, &register(worker2(), ActorRole::Worker))
+            .unwrap();
+
+        // Grant the worker capabilities
+        stf.execute_tx(&mut state, &grant(worker(), Capability::ClaimWork))
+            .unwrap();
+        stf.execute_tx(&mut state, &grant(worker(), Capability::SubmitWork))
+            .unwrap();
+        stf.execute_tx(&mut state, &grant(worker2(), Capability::ClaimWork))
+            .unwrap();
+        stf.execute_tx(&mut state, &grant(worker2(), Capability::SubmitWork))
+            .unwrap();
+
+        // Project + task
+        let project = create_project(&stf, &mut state, sponsor());
+        let task = create_task(&stf, &mut state, sponsor(), project);
+        (stf, state, project, task)
+    }
+
+    fn mvp_block(number: BlockNumber, parent: H256, txs: Vec<Transaction>) -> Block {
+        Block {
+            header: BlockHeader {
+                number,
+                parent_hash: parent,
+                timestamp: number * 12,
+                tx_root: H256::ZERO,
+                state_root: StateRoot::new(H256::ZERO, H256::ZERO),
+                da_ref: H256::ZERO,
+                fork_id: 1,
+                // Must match the guest marker defined in mvp_genesis_schedule()
+                guest_hash: Hash::sha256(b"workstream/genesis-mvp/guest"),
+                proof_system_version: 1,
+                proof: None,
+            },
+            transactions: txs,
+        }
+    }
+
+    fn claim_tx(task: TaskId) -> Transaction {
+        tx(
+            worker(),
+            1,
+            ActionType::TaskClaim,
+            encode_payload(&TaskIdPayload { task }).unwrap(),
+        )
+    }
+
+    fn start_tx(task: TaskId) -> Transaction {
+        tx(
+            worker(),
+            2,
+            ActionType::TaskStart,
+            encode_payload(&TaskIdPayload { task }).unwrap(),
+        )
+    }
+
+    fn submit_tx(task: TaskId, content: H256) -> Transaction {
+        tx(
+            worker(),
+            3,
+            ActionType::SubmissionCreate,
+            encode_payload(&SubmissionCreatePayload {
+                task,
+                content_hash: content,
+            })
+            .unwrap(),
+        )
+    }
+
+    fn accept_tx(submission: SubmissionId) -> Transaction {
+        tx(
+            sponsor(),
+            3,
+            ActionType::AcceptFinal,
+            encode_payload(&SubmissionIdPayload { submission }).unwrap(),
+        )
+    }
+
+    fn submission_id(task: TaskId, content: H256) -> SubmissionId {
+        handlers::derive_submission(&task, &content)
+    }
+
+    #[test]
+    fn full_happy_path_via_blocks() {
+        let stf = mvp_stf();
+        let mut state = State::new();
+        let initial_root = state.root().hash();
+
+        // Block 0: identity
+        let events = stf
+            .execute_block(
+                &mut state,
+                &mvp_block(
+                    0,
+                    H256::ZERO,
+                    vec![
+                        register(sponsor(), ActorRole::Sponsor),
+                        register(worker(), ActorRole::Worker),
+                    ],
+                ),
+            )
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(&events[0].event_type, "actor.registered");
+        assert_eq!(&events[1].event_type, "actor.registered");
+        assert_eq!(events[0].block_number, 0);
+        assert_eq!(events[0].tx_index, 0);
+        assert_eq!(events[1].tx_index, 1);
+
+        // Block 1: capability grants for the worker
+        let events = stf
+            .execute_block(
+                &mut state,
+                &mvp_block(
+                    1,
+                    initial_root,
+                    vec![
+                        grant(worker(), Capability::ClaimWork),
+                        grant(worker(), Capability::SubmitWork),
+                    ],
+                ),
+            )
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(&events[0].event_type, "actor.granted");
+        assert_eq!(events[1].block_number, 1);
+        assert_eq!(events[1].tx_index, 1);
+        let root_after_grants = state.root().hash();
+
+        // Block 2: project + task
+        let events = stf
+            .execute_block(
+                &mut state,
+                &mvp_block(
+                    2,
+                    root_after_grants,
+                    vec![tx(
+                        sponsor(),
+                        0,
+                        ActionType::ProjectCreate,
+                        encode_payload(&ProjectCreatePayload {
+                            title: TITLE.to_string(),
+                        })
+                        .unwrap(),
+                    )],
+                ),
+            )
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "project.created");
+        let project: ProjectId = postcard::from_bytes(&events[0].data).unwrap();
+
+        let parent_root = state.root().hash();
+        let events = stf
+            .execute_block(
+                &mut state,
+                &mvp_block(
+                    3,
+                    parent_root,
+                    vec![tx(
+                        sponsor(),
+                        1,
+                        ActionType::TaskCreate,
+                        encode_payload(&TaskCreatePayload {
+                            project,
+                            title: "task-one".to_string(),
+                            award: 100,
+                        })
+                        .unwrap(),
+                    )],
+                ),
+            )
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "task.created");
+        let task: TaskId = postcard::from_bytes(&events[0].data).unwrap();
+
+        // Block 3: claim + start
+        let parent_root = state.root().hash();
+        let events = stf
+            .execute_block(
+                &mut state,
+                &mvp_block(4, parent_root, vec![claim_tx(task), start_tx(task)]),
+            )
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, "task.claimed");
+        assert_eq!(events[1].event_type, "task.started");
+        let task_record = handlers::get_task(&state, &task).unwrap().unwrap();
+        assert_eq!(task_record.status, TaskStatus::Started);
+        assert_eq!(task_record.assignee, Some(worker()));
+
+        // Block 4: submission
+        let submission = submission_id(task, content_hash(9));
+        let parent_root = state.root().hash();
+        let events = stf
+            .execute_block(
+                &mut state,
+                &mvp_block(5, parent_root, vec![submit_tx(task, content_hash(9))]),
+            )
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "submission.created");
+        let sub_record = handlers::get_submission(&state, &submission)
+            .unwrap()
+            .unwrap();
+        assert_eq!(sub_record.status, SubmissionStatus::Pending);
+        assert_eq!(sub_record.task, task);
+
+        // Block 5: accept final => MMR record + completed state
+        let parent_root = state.root().hash();
+        let events = stf
+            .execute_block(
+                &mut state,
+                &mvp_block(6, parent_root, vec![accept_tx(submission)]),
+            )
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "accept.finalized");
+        let (_, _, record_index): (SubmissionId, TaskId, u64) =
+            postcard::from_bytes(&events[0].data).unwrap();
+        assert_eq!(record_index, 0);
+
+        let task_record = handlers::get_task(&state, &task).unwrap().unwrap();
+        assert_eq!(task_record.status, TaskStatus::Completed);
+        let sub_record = handlers::get_submission(&state, &submission)
+            .unwrap()
+            .unwrap();
+        assert_eq!(sub_record.status, SubmissionStatus::Accepted);
+        assert_eq!(state.mmr.size(), 1); // one immutable acceptance record
+
+        // Final root differs from start and is deterministic
+        assert_ne!(state.root().hash(), initial_root);
+    }
+
+    #[test]
+    fn deterministic_replay() {
+        // Two independent executions of the identical op sequence against the
+        // same schedule must yield identical roots and events (no drift).
+        let stf = mvp_stf();
+        let mut state = State::new();
+        let _ = stf
+            .execute_block(
+                &mut state,
+                &mvp_block(
+                    0,
+                    H256::ZERO,
+                    vec![
+                        register(sponsor(), ActorRole::Sponsor),
+                        register(worker(), ActorRole::Worker),
+                    ],
+                ),
+            )
+            .unwrap();
+        let events_a = stf
+            .execute_tx(&mut state, &grant(worker(), Capability::ClaimWork))
+            .unwrap();
+        let root_a = state.root().hash();
+
+        let stf2 = mvp_stf();
+        let mut state2 = State::new();
+        let _ = stf2
+            .execute_block(
+                &mut state2,
+                &mvp_block(
+                    0,
+                    H256::ZERO,
+                    vec![
+                        register(sponsor(), ActorRole::Sponsor),
+                        register(worker(), ActorRole::Worker),
+                    ],
+                ),
+            )
+            .unwrap();
+        let events_b = stf2
+            .execute_tx(&mut state2, &grant(worker(), Capability::ClaimWork))
+            .unwrap();
+        let root_b = state2.root().hash();
+
+        assert_eq!(root_a, root_b);
+        assert_eq!(events_a.len(), events_b.len());
+    }
+
+    #[test]
+    fn register_twice_rejected() {
+        let (stf, mut state, ..) = setup_task_ready();
+        let result = stf.execute_tx(&mut state, &register(sponsor(), ActorRole::Sponsor));
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn worker_cannot_create_project() {
+        let mut state = State::new();
+        let stf = mvp_stf();
+        stf.execute_tx(&mut state, &register(worker(), ActorRole::Worker))
+            .unwrap();
+        let payload = encode_payload(&ProjectCreatePayload {
+            title: TITLE.to_string(),
+        })
+        .unwrap();
+        let err = stf
+            .execute_tx(
+                &mut state,
+                &tx(worker(), 1, ActionType::ProjectCreate, payload),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
+    }
+
+    #[test]
+    fn non_owner_sponsor_cannot_create_task() {
+        let (stf, mut state, project, _) = setup_task_ready();
+        // sponsor2 did not create the project
+        let payload = encode_payload(&TaskCreatePayload {
+            project,
+            title: "hostile".to_string(),
+            award: 1,
+        })
+        .unwrap();
+        let err = stf
+            .execute_tx(
+                &mut state,
+                &tx(sponsor2(), 0, ActionType::TaskCreate, payload),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
+    }
+
+    #[test]
+    fn claim_requires_capability() {
+        let mut state = State::new();
+        let stf = mvp_stf();
+        stf.execute_tx(&mut state, &register(sponsor(), ActorRole::Sponsor))
+            .unwrap();
+        stf.execute_tx(&mut state, &register(worker2(), ActorRole::Worker))
+            .unwrap();
+
+        let project = create_project(&stf, &mut state, sponsor());
+        let task = create_task(&stf, &mut state, sponsor(), project);
+
+        // worker2 has NO granted abilities
+        let payload = encode_payload(&TaskIdPayload { task }).unwrap();
+        let err = stf
+            .execute_tx(
+                &mut state,
+                &tx(worker2(), 0, ActionType::TaskClaim, payload),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
+        // task still Created
+        let record = handlers::get_task(&state, &task).unwrap().unwrap();
+        assert_eq!(record.status, TaskStatus::Created);
+    }
+
+    #[test]
+    fn claim_nonexistent_task_fails() {
+        let (stf, mut state, _, _) = setup_task_ready();
+        let ghost = H256::from_bytes([9u8; 32]);
+        let payload = encode_payload(&TaskIdPayload { task: ghost }).unwrap();
+        let err = stf
+            .execute_tx(&mut state, &tx(worker(), 9, ActionType::TaskClaim, payload))
+            .unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)));
+    }
+
+    #[test]
+    fn claim_twice_single_assignee() {
+        let (stf, mut state, _, task) = setup_task_ready();
+        stf.execute_tx(&mut state, &claim_tx(task)).unwrap();
+
+        // second worker with the capability, but the task is now claimed
+        let payload = encode_payload(&TaskIdPayload { task }).unwrap();
+        let err = stf
+            .execute_tx(
+                &mut state,
+                &tx(worker2(), 5, ActionType::TaskClaim, payload),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)));
+        let record = handlers::get_task(&state, &task).unwrap().unwrap();
+        assert_eq!(record.assignee, Some(worker()));
+    }
+
+    #[test]
+    fn start_requires_assignee() {
+        let (stf, mut state, _, task) = setup_task_ready();
+        stf.execute_tx(&mut state, &claim_tx(task)).unwrap();
+
+        // worker2 starts => not the assignee
+        let payload = encode_payload(&TaskIdPayload { task }).unwrap();
+        let err = stf
+            .execute_tx(
+                &mut state,
+                &tx(worker2(), 6, ActionType::TaskStart, payload),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
+    }
+
+    #[test]
+    fn submit_requires_started_task_and_right_worker() {
+        let (stf, mut state, _, task) = setup_task_ready();
+        stf.execute_tx(&mut state, &claim_tx(task)).unwrap();
+
+        // not started yet
+        let err = stf
+            .execute_tx(&mut state, &submit_tx(task, content_hash(1)))
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)));
+
+        // started, but submitted by a worker that is not the assignee
+        stf.execute_tx(&mut state, &start_tx(task)).unwrap();
+        let payload = encode_payload(&SubmissionCreatePayload {
+            task,
+            content_hash: content_hash(1),
+        })
+        .unwrap();
+        let err = stf
+            .execute_tx(
+                &mut state,
+                &tx(worker2(), 7, ActionType::SubmissionCreate, payload),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
+    }
+
+    #[test]
+    fn accept_requires_sponsor_and_pending_submission() {
+        let (stf, mut state, _, task) = setup_task_ready();
+        stf.execute_tx(&mut state, &claim_tx(task)).unwrap();
+        stf.execute_tx(&mut state, &start_tx(task)).unwrap();
+        stf.execute_tx(&mut state, &submit_tx(task, content_hash(1)))
+            .unwrap();
+        let submission = submission_id(task, content_hash(1));
+
+        // a different sponsor cannot accept (not the task sponsor)
+        let payload = encode_payload(&SubmissionIdPayload { submission }).unwrap();
+        let err = stf
+            .execute_tx(
+                &mut state,
+                &tx(sponsor2(), 0, ActionType::AcceptFinal, payload),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
+
+        // the sponsor accepts; a second accept is invalid
+        stf.execute_tx(&mut state, &accept_tx(submission)).unwrap();
+        let err = stf
+            .execute_tx(&mut state, &accept_tx(submission))
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)));
+
+        let record = handlers::get_task(&state, &task).unwrap().unwrap();
+        assert_eq!(record.status, TaskStatus::Completed);
+        assert_eq!(state.mmr.size(), 1);
+    }
+
+    #[test]
+    fn malformed_payload_aborts_without_state_change() {
+        let mut state = State::new();
+        let stf = mvp_stf();
+        let root_before = state.root();
+        let err = stf
+            .execute_tx(
+                &mut state,
+                &tx(sponsor(), 0, ActionType::ActorRegister, vec![0xff]),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::Serialization(_)));
+        assert_eq!(state.root(), root_before, "no state mutation before decode");
+        assert!(stf
+            .execute_tx(
+                &mut state,
+                &tx(sponsor(), 0, ActionType::ActorRegister, vec![0xff])
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn unsupported_action_rejected() {
+        let (stf, mut state, ..) = setup_task_ready();
+        let err = stf
+            .execute_tx(
+                &mut state,
+                &tx(sponsor(), 0, ActionType::ReviewDecide, vec![]),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::Transaction(_)), "got {err:?}");
+        let msg = format!("{err}");
+        assert!(msg.contains("not enabled in the MVP era"), "got {msg}");
     }
 }
 
@@ -393,13 +1025,91 @@ mod fork_gating_tests {
 
     #[test]
     fn test_task_action_allowed_after_fork() {
-        let mut state = State::new();
         let stf = StateTransitionFunction::with_schedule(schedule_with_task_fork()).unwrap();
+        let mut state = State::new();
+        let sponsor = H256::from_bytes([7u8; 32]);
+        let title = "bootstrap";
 
-        // Under fork 2, task lifecycle is enabled
+        // Register the sponsor and create a project under fork 1
+        // (identity + projects are genesis-era, ungated).
+        let reg_tx = TxBuilder::new()
+            .chain_id(1)
+            .account(sponsor)
+            .nonce(0, 0)
+            .add_action(
+                ActionType::ActorRegister,
+                encode_payload(&ActorRegisterPayload {
+                    role: ActorRole::Sponsor,
+                })
+                .unwrap(),
+            )
+            .fee(FeeSpec {
+                payer: FeePayer::Self_,
+                asset_id: 0,
+                max_fee: 1000,
+            })
+            .build()
+            .unwrap();
+        stf.execute_tx_with_fork(&mut state, &reg_tx, stf.active_fork_at(5).unwrap())
+            .unwrap();
+
+        let project_tx = TxBuilder::new()
+            .chain_id(1)
+            .account(sponsor)
+            .nonce(0, 1)
+            .add_action(
+                ActionType::ProjectCreate,
+                encode_payload(&ProjectCreatePayload {
+                    title: title.to_string(),
+                })
+                .unwrap(),
+            )
+            .fee(FeeSpec {
+                payer: FeePayer::Self_,
+                asset_id: 0,
+                max_fee: 1000,
+            })
+            .build()
+            .unwrap();
+        let events = stf
+            .execute_tx_with_fork(&mut state, &project_tx, stf.active_fork_at(5).unwrap())
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "project.created");
+
+        // Task creation requires the (later) task-lifecycle fork — allowed,
+        // and the handler runs for real.
+        let project_id = handlers::derive_project(&sponsor, title);
+        let task_tx = TxBuilder::new()
+            .chain_id(1)
+            .account(sponsor)
+            .nonce(0, 2)
+            .add_action(
+                ActionType::TaskCreate,
+                encode_payload(&TaskCreatePayload {
+                    project: project_id,
+                    title: "fix-bug".to_string(),
+                    award: 100,
+                })
+                .unwrap(),
+            )
+            .fee(FeeSpec {
+                payer: FeePayer::Self_,
+                asset_id: 0,
+                max_fee: 1000,
+            })
+            .build()
+            .unwrap();
+
         let fork2 = stf.active_fork_at(10).unwrap();
-        let tx = task_tx();
-        assert!(stf.execute_tx_with_fork(&mut state, &tx, fork2).is_ok());
+        assert!(stf
+            .execute_tx_with_fork(&mut state, &task_tx, fork2)
+            .is_ok());
+        let task = handlers::get_task(&state, &handlers::derive_task(&project_id, "fix-bug"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.status, TaskStatus::Created);
+        assert_eq!(task.award, 100);
     }
 
     #[test]
@@ -409,11 +1119,15 @@ mod fork_gating_tests {
         let fork1 = stf.active_fork_at(5).unwrap();
 
         let account = H256::from_bytes([7u8; 32]);
+        let payload = encode_payload(&ActorRegisterPayload {
+            role: ActorRole::Worker,
+        })
+        .unwrap();
         let tx = TxBuilder::new()
             .chain_id(1)
             .account(account)
             .nonce(0, 2)
-            .add_action(ActionType::ActorRegister, vec![])
+            .add_action(ActionType::ActorRegister, payload)
             .fee(FeeSpec {
                 payer: FeePayer::Self_,
                 asset_id: 0,
@@ -423,6 +1137,8 @@ mod fork_gating_tests {
             .unwrap();
 
         assert!(stf.execute_tx_with_fork(&mut state, &tx, fork1).is_ok());
+        // The handler executed: the actor record now exists in state.
+        assert!(handlers::get_actor(&state, &account).unwrap().is_some());
     }
 
     struct CountingHook {

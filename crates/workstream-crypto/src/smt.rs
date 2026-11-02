@@ -19,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use workstream_core::hash::{Hash, H256};
-// Note: Error and Result reserved for proof operations in #35
+use workstream_core::{Error, Result};
 
 // Domain tags per the design doc
 const TAG_EMPTY: &[u8] = b"WSMT:v1:EMPTY";
@@ -33,6 +33,118 @@ const TREE_DEPTH: usize = 256;
 /// Hash of an empty subtree (computed once, reused everywhere).
 fn empty_hash() -> H256 {
     Hash::sha256(TAG_EMPTY)
+}
+
+// ============================================================================
+// Proof Types (#35)
+// ============================================================================
+
+/// Type of SMT proof.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SmtProofKind {
+    /// Proves a key exists with a specific value.
+    Inclusion,
+    /// Proves a key does not exist in the tree.
+    NonExistence,
+}
+
+/// SMT membership/non-membership proof.
+///
+/// The proof contains the sibling hashes along the path from the leaf (or
+/// termination point) to the root. For inclusion proofs, verification
+/// recomputes the root from the leaf. For non-existence proofs, verification
+/// shows either an empty subtree or a different leaf at the query path.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SmtProof {
+    /// Type of proof (inclusion or non-existence).
+    pub kind: SmtProofKind,
+    /// The key being proven.
+    pub key: H256,
+    /// For inclusion: the value hash. For non-existence: None or the
+    /// conflicting leaf's value hash if path leads to a different leaf.
+    pub value_hash: Option<H256>,
+    /// For non-existence proofs ending at a different leaf: that leaf's key.
+    pub leaf_key: Option<H256>,
+    /// Sibling hashes from leaf/termination toward root (bottom-up).
+    pub siblings: Vec<H256>,
+    /// Direction bits: false = left, true = right (corresponding to siblings).
+    /// Bit i indicates which side the sibling at position i is on.
+    pub directions: Vec<bool>,
+    /// Depth at which the proof terminates (for non-existence proofs that
+    /// hit empty or a leaf early).
+    pub depth: usize,
+}
+
+impl SmtProof {
+    /// Verify this proof against a root hash.
+    ///
+    /// Returns `true` if the proof is valid for the given root.
+    pub fn verify(&self, root: H256) -> bool {
+        verify_smt_proof(root, self)
+    }
+}
+
+/// Verify an SMT proof against a root hash.
+///
+/// This is a standalone function that doesn't require access to the tree.
+/// It recomputes the root from the proof and compares.
+pub fn verify_smt_proof(root: H256, proof: &SmtProof) -> bool {
+    let empty = empty_hash();
+
+    // Compute the hash at the termination point
+    let mut current = match proof.kind {
+        SmtProofKind::Inclusion => {
+            // Must have a value hash for inclusion proofs
+            let value_hash = match proof.value_hash {
+                Some(vh) => vh,
+                None => return false,
+            };
+            // Compute leaf hash
+            SmtNode::Leaf {
+                key: proof.key,
+                value_hash,
+            }
+            .hash()
+        }
+        SmtProofKind::NonExistence => {
+            match (proof.leaf_key, proof.value_hash) {
+                // Path ends at empty subtree
+                (None, None) => empty,
+                // Path ends at a different leaf
+                (Some(leaf_key), Some(value_hash)) => {
+                    // The leaf key must be different from the query key
+                    if leaf_key == proof.key {
+                        return false;
+                    }
+                    SmtNode::Leaf {
+                        key: leaf_key,
+                        value_hash,
+                    }
+                    .hash()
+                }
+                // Invalid combination
+                _ => return false,
+            }
+        }
+    };
+
+    // Walk up the tree using siblings
+    if proof.siblings.len() != proof.directions.len() {
+        return false;
+    }
+
+    for (sibling, &went_right) in proof.siblings.iter().zip(proof.directions.iter()) {
+        // went_right indicates which direction we took at this level.
+        // If we went right, we're on the right side, sibling is on left.
+        let (left, right) = if went_right {
+            (*sibling, current)
+        } else {
+            (current, *sibling)
+        };
+        current = SmtNode::Inner { left, right }.hash();
+    }
+
+    current == root
 }
 
 /// A node in the sparse Merkle tree.
@@ -441,6 +553,105 @@ impl<S: NodeStore> SmTree<S> {
     pub fn store(&self) -> &S {
         &self.store
     }
+
+    /// Generate a proof for a key.
+    ///
+    /// Returns an inclusion proof if the key exists, or a non-existence proof
+    /// if it doesn't. The proof can be verified against the current root.
+    pub fn prove(&self, key: &H256) -> Result<SmtProof> {
+        let root = match self.root {
+            None => {
+                // Empty tree: non-existence proof with no siblings
+                return Ok(SmtProof {
+                    kind: SmtProofKind::NonExistence,
+                    key: *key,
+                    value_hash: None,
+                    leaf_key: None,
+                    siblings: vec![],
+                    directions: vec![],
+                    depth: 0,
+                });
+            }
+            Some(r) => r,
+        };
+
+        let mut siblings = Vec::new();
+        let mut directions = Vec::new();
+        let (kind, value_hash, leaf_key, depth) =
+            self.collect_proof_path(root, key, 0, &mut siblings, &mut directions)?;
+
+        Ok(SmtProof {
+            kind,
+            key: *key,
+            value_hash,
+            leaf_key,
+            siblings,
+            directions,
+            depth,
+        })
+    }
+
+    /// Recursively collect the proof path.
+    fn collect_proof_path(
+        &self,
+        node_hash: H256,
+        key: &H256,
+        depth: usize,
+        siblings: &mut Vec<H256>,
+        directions: &mut Vec<bool>,
+    ) -> Result<(SmtProofKind, Option<H256>, Option<H256>, usize)> {
+        if node_hash == self.empty {
+            // Hit empty subtree: non-existence
+            return Ok((SmtProofKind::NonExistence, None, None, depth));
+        }
+
+        let node = self
+            .store
+            .get(&node_hash)
+            .ok_or_else(|| Error::State(format!("missing node: {}", node_hash)))?;
+
+        match node {
+            SmtNode::Leaf {
+                key: leaf_key,
+                value_hash,
+            } => {
+                if leaf_key == *key {
+                    // Found the key: inclusion proof
+                    Ok((SmtProofKind::Inclusion, Some(value_hash), None, depth))
+                } else {
+                    // Different leaf at this position: non-existence
+                    Ok((
+                        SmtProofKind::NonExistence,
+                        Some(value_hash),
+                        Some(leaf_key),
+                        depth,
+                    ))
+                }
+            }
+            SmtNode::Inner { left, right } => {
+                if depth >= TREE_DEPTH {
+                    return Err(Error::State("proof depth exceeded".to_string()));
+                }
+
+                let go_right = get_bit(key, depth);
+                let (child, sibling) = if go_right {
+                    (right, left)
+                } else {
+                    (left, right)
+                };
+
+                // Recurse into the child
+                let result =
+                    self.collect_proof_path(child, key, depth + 1, siblings, directions)?;
+
+                // Add sibling to proof (bottom-up, so we push after recursion)
+                siblings.push(sibling);
+                directions.push(go_right);
+
+                Ok(result)
+            }
+        }
+    }
 }
 
 /// Hash a raw key to the 256-bit key space.
@@ -767,6 +978,232 @@ mod tests {
         let b = H256::from_bytes(b_bytes);
         assert_eq!(first_differing_bit(&a, &b), 8);
     }
+
+    // ========================================================================
+    // Proof Tests
+    // ========================================================================
+
+    #[test]
+    fn proof_empty_tree_non_existence() {
+        let tree: SmTree = SmTree::new();
+        let key = H256::from_bytes([1u8; 32]);
+
+        let proof = tree.prove(&key).unwrap();
+        assert_eq!(proof.kind, SmtProofKind::NonExistence);
+        assert!(proof.siblings.is_empty());
+        assert!(proof.verify(tree.root()));
+    }
+
+    #[test]
+    fn proof_inclusion_single_key() {
+        let mut tree: SmTree = SmTree::new();
+        let key = H256::from_bytes([1u8; 32]);
+        let value = H256::from_bytes([2u8; 32]);
+        tree.update(&key, value);
+
+        let proof = tree.prove(&key).unwrap();
+        assert_eq!(proof.kind, SmtProofKind::Inclusion);
+        assert_eq!(proof.value_hash, Some(value));
+        assert!(proof.verify(tree.root()));
+    }
+
+    #[test]
+    fn proof_non_existence_key_not_present() {
+        let mut tree: SmTree = SmTree::new();
+        let k1 = H256::from_bytes([1u8; 32]);
+        let k2 = H256::from_bytes([2u8; 32]);
+        let v1 = H256::from_bytes([10u8; 32]);
+        tree.update(&k1, v1);
+
+        // Prove k2 doesn't exist
+        let proof = tree.prove(&k2).unwrap();
+        assert_eq!(proof.kind, SmtProofKind::NonExistence);
+        assert!(proof.verify(tree.root()));
+
+        // The original key should still have an inclusion proof
+        let proof_k1 = tree.prove(&k1).unwrap();
+        assert_eq!(proof_k1.kind, SmtProofKind::Inclusion);
+        assert!(proof_k1.verify(tree.root()));
+    }
+
+    #[test]
+    fn proof_with_multiple_keys() {
+        let mut tree: SmTree = SmTree::new();
+        let keys: Vec<H256> = (0..5)
+            .map(|i| {
+                let mut bytes = [0u8; 32];
+                bytes[0] = i;
+                H256::from_bytes(bytes)
+            })
+            .collect();
+        let values: Vec<H256> = (0..5)
+            .map(|i| {
+                let mut bytes = [0u8; 32];
+                bytes[0] = i + 100;
+                H256::from_bytes(bytes)
+            })
+            .collect();
+
+        for (k, v) in keys.iter().zip(values.iter()) {
+            tree.update(k, *v);
+        }
+
+        let root = tree.root();
+
+        // All keys should have valid inclusion proofs
+        for (k, v) in keys.iter().zip(values.iter()) {
+            let proof = tree.prove(k).unwrap();
+            assert_eq!(proof.kind, SmtProofKind::Inclusion);
+            assert_eq!(proof.value_hash, Some(*v));
+            assert!(proof.verify(root), "proof for key {:?} failed", k);
+        }
+
+        // A non-existent key should have a valid non-existence proof
+        let missing = H256::from_bytes([99u8; 32]);
+        let proof = tree.prove(&missing).unwrap();
+        assert_eq!(proof.kind, SmtProofKind::NonExistence);
+        assert!(proof.verify(root));
+    }
+
+    #[test]
+    fn proof_invalid_root_fails() {
+        let mut tree: SmTree = SmTree::new();
+        let key = H256::from_bytes([1u8; 32]);
+        let value = H256::from_bytes([2u8; 32]);
+        tree.update(&key, value);
+
+        let proof = tree.prove(&key).unwrap();
+
+        // Verify against wrong root
+        let wrong_root = H256::from_bytes([99u8; 32]);
+        assert!(!proof.verify(wrong_root));
+    }
+
+    #[test]
+    fn proof_tampered_value_fails() {
+        let mut tree: SmTree = SmTree::new();
+        let key = H256::from_bytes([1u8; 32]);
+        let value = H256::from_bytes([2u8; 32]);
+        tree.update(&key, value);
+
+        let mut proof = tree.prove(&key).unwrap();
+        let root = tree.root();
+
+        // Tamper with the value
+        proof.value_hash = Some(H256::from_bytes([99u8; 32]));
+        assert!(!proof.verify(root));
+    }
+
+    #[test]
+    fn proof_tampered_sibling_fails() {
+        let mut tree: SmTree = SmTree::new();
+        // Insert two keys to create inner nodes
+        let k1 = H256::from_bytes([0u8; 32]);
+        let k2 = H256::from_bytes([
+            0b10000000u8,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]);
+        tree.update(&k1, H256::from_bytes([1u8; 32]));
+        tree.update(&k2, H256::from_bytes([2u8; 32]));
+
+        let mut proof = tree.prove(&k1).unwrap();
+        let root = tree.root();
+
+        // Valid proof
+        assert!(proof.verify(root));
+
+        // Tamper with a sibling
+        if !proof.siblings.is_empty() {
+            proof.siblings[0] = H256::from_bytes([99u8; 32]);
+            assert!(!proof.verify(root));
+        }
+    }
+
+    #[test]
+    fn proof_collision_keys() {
+        // Two keys that share a long prefix
+        let mut k1 = [0u8; 32];
+        let mut k2 = [0u8; 32];
+        k1[31] = 0b00000001;
+        k2[31] = 0b00000000;
+
+        let key1 = H256::from_bytes(k1);
+        let key2 = H256::from_bytes(k2);
+        let v1 = H256::from_bytes([10u8; 32]);
+        let v2 = H256::from_bytes([20u8; 32]);
+
+        let mut tree: SmTree = SmTree::new();
+        tree.update(&key1, v1);
+        tree.update(&key2, v2);
+
+        let root = tree.root();
+
+        // Both should have valid inclusion proofs
+        let p1 = tree.prove(&key1).unwrap();
+        let p2 = tree.prove(&key2).unwrap();
+        assert_eq!(p1.kind, SmtProofKind::Inclusion);
+        assert_eq!(p2.kind, SmtProofKind::Inclusion);
+        assert!(p1.verify(root));
+        assert!(p2.verify(root));
+
+        // Proofs should have siblings (they share a path)
+        assert!(!p1.siblings.is_empty() || !p2.siblings.is_empty());
+    }
+
+    #[test]
+    fn proof_after_delete() {
+        let mut tree: SmTree = SmTree::new();
+        let k1 = H256::from_bytes([1u8; 32]);
+        let k2 = H256::from_bytes([2u8; 32]);
+        let v = H256::from_bytes([10u8; 32]);
+
+        tree.update(&k1, v);
+        tree.update(&k2, v);
+
+        // Delete k1
+        tree.delete(&k1);
+        let root = tree.root();
+
+        // k1 should have non-existence proof
+        let proof = tree.prove(&k1).unwrap();
+        assert_eq!(proof.kind, SmtProofKind::NonExistence);
+        assert!(proof.verify(root));
+
+        // k2 should still have inclusion proof
+        let proof = tree.prove(&k2).unwrap();
+        assert_eq!(proof.kind, SmtProofKind::Inclusion);
+        assert!(proof.verify(root));
+    }
 }
 
 #[cfg(test)]
@@ -869,6 +1306,52 @@ mod proptests {
             tree_b.update(&k, v2);
 
             prop_assert_ne!(tree_a.root(), tree_b.root());
+        }
+
+        #[test]
+        fn inclusion_proof_always_valid(
+            key in arb_h256(),
+            value in arb_h256()
+        ) {
+            let mut tree: SmTree = SmTree::new();
+            tree.update(&key, value);
+
+            let proof = tree.prove(&key).unwrap();
+            prop_assert_eq!(proof.kind, SmtProofKind::Inclusion);
+            prop_assert!(proof.verify(tree.root()));
+        }
+
+        #[test]
+        fn non_existence_proof_for_missing_key(
+            inserted in arb_h256(),
+            missing in arb_h256(),
+            value in arb_h256()
+        ) {
+            prop_assume!(inserted != missing);
+
+            let mut tree: SmTree = SmTree::new();
+            tree.update(&inserted, value);
+
+            let proof = tree.prove(&missing).unwrap();
+            prop_assert_eq!(proof.kind, SmtProofKind::NonExistence);
+            prop_assert!(proof.verify(tree.root()));
+        }
+
+        #[test]
+        fn all_proofs_valid_multi_key(
+            pairs in prop::collection::vec((arb_h256(), arb_h256()), 1..15)
+        ) {
+            let mut tree: SmTree = SmTree::new();
+            for (k, v) in &pairs {
+                tree.update(k, *v);
+            }
+
+            let root = tree.root();
+            for (k, _) in &pairs {
+                let proof = tree.prove(k).unwrap();
+                prop_assert_eq!(proof.kind, SmtProofKind::Inclusion);
+                prop_assert!(proof.verify(root), "proof failed for key {:?}", k);
+            }
         }
     }
 }

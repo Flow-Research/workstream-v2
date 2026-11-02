@@ -10,9 +10,15 @@ license.workspace = true
 name = "sequencer"
 path = "main.rs"
 
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
 workstream-core = { path = "../../../crates/workstream-core" }
+workstream-state = { path = "../../../crates/workstream-state" }
+workstream-stf = { path = "../../../crates/workstream-stf" }
 workstream-tx = { path = "../../../crates/workstream-tx" }
+postcard = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

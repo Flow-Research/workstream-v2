@@ -136,19 +136,23 @@ fn verify_ed25519(message: &[u8], signature: &[u8], public_key: &[u8]) -> Result
 
 /// Legacy verification function for backward compatibility.
 ///
-/// This function assumes secp256k1 by default if algorithm is not specified.
-/// For new code, use the typed `verify()` function.
+/// Requires an explicit algorithm to prevent cross-algorithm attacks.
+/// For new code, use the typed `verify()` function with Signature/PublicKey structs.
 #[deprecated(note = "use verify() with typed Signature and PublicKey")]
-pub fn verify_raw(message: &[u8], signature: &[u8], public_key: &[u8]) -> Result<bool> {
-    // Try to detect algorithm from key size
-    if public_key.len() == 32 {
-        verify_ed25519(message, signature, public_key)
-    } else {
-        verify_secp256k1(message, signature, public_key)
+pub fn verify_raw(
+    message: &[u8],
+    algorithm: SignatureAlgorithm,
+    signature: &[u8],
+    public_key: &[u8],
+) -> Result<bool> {
+    match algorithm {
+        SignatureAlgorithm::Secp256k1 => verify_secp256k1(message, signature, public_key),
+        SignatureAlgorithm::Ed25519 => verify_ed25519(message, signature, public_key),
     }
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey as Ed25519SigningKey;

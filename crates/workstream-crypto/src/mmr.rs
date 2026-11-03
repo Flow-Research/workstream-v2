@@ -309,6 +309,11 @@ impl MmrProof {
 ///
 /// This is a standalone function that doesn't require access to the tree.
 pub fn verify_mmr_proof(root: H256, proof: &MmrProof, payload_hash: H256) -> bool {
+    // Bounds checks: index must be within the claimed size, and size > 0.
+    if proof.size == 0 || proof.index >= proof.size {
+        return false;
+    }
+
     // Recompute the leaf hash
     let mut current = hash_leaf(proof.index, payload_hash);
 
@@ -329,6 +334,12 @@ pub fn verify_mmr_proof(root: H256, proof: &MmrProof, payload_hash: H256) -> boo
     // Current now holds the peak hash. Reconstruct the full peak list.
     let heights = peak_heights(proof.size);
     if proof.peak_idx >= heights.len() {
+        return false;
+    }
+
+    // Validate that the number of other_peaks matches what's expected.
+    let expected_other = heights.len().saturating_sub(1);
+    if proof.other_peaks.len() != expected_other {
         return false;
     }
 

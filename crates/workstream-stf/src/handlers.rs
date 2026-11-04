@@ -27,6 +27,9 @@ const K_SUBMISSION: &[u8] = b"WS:v1:k:submission:";
 /// Per-(account, key_id) replay-protection counter. The stored value is the
 /// NEXT expected sequence number for that account/key (0 when unused).
 const K_NONCE: &[u8] = b"WS:v1:k:nonce:";
+/// Nullifier set: domain-derived commitments recording that a one-time
+/// action has been performed, independent of any mutable record status.
+const K_NULLIFIER: &[u8] = b"WS:v1:k:nullifier:";
 
 fn kv_key(domain: &[u8], id: &H256) -> Vec<u8> {
     let mut key = domain.to_vec();
@@ -41,6 +44,30 @@ fn nonce_key(account: &H256, key_id: u16) -> Vec<u8> {
     key.extend_from_slice(account.as_bytes());
     key.extend_from_slice(&key_id.to_be_bytes());
     key
+}
+
+/// Domain tag that separates nullifier derivations from every other hash
+/// in the system.
+const NULLIFIER_TAG: &[u8] = b"WS:v1:nullifier:";
+
+/// Nullifier family for task claims (`task.claim`): a task can be claimed
+/// exactly once — ever — by anyone.
+pub const NULLIFIER_CLAIM: &[u8] = b"WS:v1:nf:claim:";
+
+/// Nullifier family for final acceptances (`accept.final`): a submission
+/// can be accepted exactly once — ever.
+pub const NULLIFIER_ACCEPT: &[u8] = b"WS:v1:nf:accept:";
+
+/// A nullifier is derived from its family and its target id under the
+/// system-wide nullifier tag, so two different one-time action types can
+/// never collide on the same id.
+fn nullifier_hash(family: &[u8], target: &H256) -> H256 {
+    Hash::sha256_concat(&[NULLIFIER_TAG, family, target.as_bytes()])
+}
+
+/// Nullifier set storage key.
+fn nullifier_key(n: &H256) -> Vec<u8> {
+    kv_key(K_NULLIFIER, n)
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +137,17 @@ pub struct AcceptanceRecord {
     pub submission: SubmissionId,
     pub task: TaskId,
     pub accepted_by: AccountId,
+}
+
+/// The audit record behind a consumed nullifier: which action family
+/// burned it, against which target, performed by whom. The stored key is
+/// derivable from `family` and `target`; keeping both in the record makes
+/// SMT introspection readable without key parsing.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NullifierRecord {
+    pub family: Vec<u8>,
+    pub target: H256,
+    pub by: AccountId,
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +236,26 @@ fn store_actor(state: &mut State, record: &ActorRecord) -> Result<()> {
     state.set(&kv_key(K_ACTOR, &record.account), &bytes)
 }
 
+/// Write a task record under its id. Pub(crate) so tests can simulate
+/// out-of-band state rewrites (e.g. a hypothetical status-regression bug)
+/// when proving nullifier guarantees.
+pub(crate) fn store_task(state: &mut State, task: TaskId, record: &TaskRecord) -> Result<()> {
+    let bytes = postcard::to_allocvec(record)
+        .map_err(|e| Error::Serialization(format!("task record encode: {e}")))?;
+    state.set(&kv_key(K_TASK, &task), &bytes)
+}
+
+/// Write a submission record under its id (see [`store_task`]).
+pub(crate) fn store_submission(
+    state: &mut State,
+    submission: SubmissionId,
+    record: &SubmissionRecord,
+) -> Result<()> {
+    let bytes = postcard::to_allocvec(record)
+        .map_err(|e| Error::Serialization(format!("submission record encode: {e}")))?;
+    state.set(&kv_key(K_SUBMISSION, &submission), &bytes)
+}
+
 fn event(event_type: &str, data: &[u8]) -> Result<Event> {
     Ok(Event {
         event_type: event_type.to_string(),
@@ -269,6 +327,54 @@ pub(crate) fn set_nonce(state: &mut State, account: &H256, key_id: u16, seq: u64
     let bytes = postcard::to_allocvec(&seq)
         .map_err(|e| Error::Serialization(format!("nonce encode: {e}")))?;
     state.set(&nonce_key(account, key_id), &bytes)
+}
+
+/// Read the audit record of a consumed nullifier, if any.
+pub fn get_nullifier(
+    state: &State,
+    family: &[u8],
+    target: &H256,
+) -> Result<Option<NullifierRecord>> {
+    let n = nullifier_hash(family, target);
+    match state.get(&nullifier_key(&n))? {
+        Some(bytes) => postcard::from_bytes::<NullifierRecord>(&bytes)
+            .map(Some)
+            .map_err(|e| Error::Serialization(format!("nullifier decode: {e}"))),
+        None => Ok(None),
+    }
+}
+
+/// Atomically check and commit a nullifier for a one-time action.
+///
+/// The check and its commitment are a single state transition, not two
+/// steps a caller could interleave: a handler that follows this pattern
+/// cannot bind the same nullifier twice (double action), and cannot bind
+/// only under a race-free schedule — this code is deterministic anyway.
+///
+/// Callers must invoke this only after all semantic checks of the action
+/// have passed, so that binding never occurs for an action that then
+/// fails (the nullifier is not undoable).
+pub(crate) fn bind_nullifier(
+    state: &mut State,
+    family: &[u8],
+    target: &H256,
+    by: AccountId,
+) -> Result<()> {
+    let n = nullifier_hash(family, target);
+    if state.get(&nullifier_key(&n))?.is_some() {
+        return Err(Error::InvalidTransition(format!(
+            "one-time action already performed (nullifier {})",
+            n
+        )));
+    }
+    let record = NullifierRecord {
+        family: family.to_vec(),
+        target: *target,
+        by,
+    };
+    let bytes = postcard::to_allocvec(&record)
+        .map_err(|e| Error::Serialization(format!("nullifier encode: {e}")))?;
+    state.set(&nullifier_key(&n), &bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -413,8 +519,7 @@ pub(crate) fn handle_task_create(
         status: TaskStatus::Created,
         assignee: None,
     };
-    let bytes = postcard::to_allocvec(&record).map_err(|e| Error::Serialization(e.to_string()))?;
-    state.set(&kv_key(K_TASK, &task_id), &bytes)?;
+    store_task(state, task_id, &record)?;
 
     event(
         "task.created",
@@ -448,10 +553,16 @@ pub(crate) fn handle_task_claim(state: &mut State, account: H256, payload: &[u8]
             p.task, task.status
         )));
     }
+
+    // One-time claim (issue #21): bind the claim nullifier after all
+    // semantic checks and before any mutation. It is independent of the
+    // status machine — even a future handler that re-opened a task could
+    // not allow a second claim of it.
+    bind_nullifier(state, NULLIFIER_CLAIM, &p.task, account)?;
+
     task.assignee = Some(account);
     task.status = TaskStatus::Claimed;
-    let bytes = postcard::to_allocvec(&task).map_err(|e| Error::Serialization(e.to_string()))?;
-    state.set(&kv_key(K_TASK, &p.task), &bytes)?;
+    store_task(state, p.task, &task)?;
 
     event(
         "task.claimed",
@@ -481,8 +592,7 @@ pub(crate) fn handle_task_start(state: &mut State, account: H256, payload: &[u8]
         )));
     }
     task.status = TaskStatus::Started;
-    let bytes = postcard::to_allocvec(&task).map_err(|e| Error::Serialization(e.to_string()))?;
-    state.set(&kv_key(K_TASK, &p.task), &bytes)?;
+    store_task(state, p.task, &task)?;
 
     event(
         "task.started",
@@ -535,8 +645,7 @@ pub(crate) fn handle_submission_create(
         content_hash: p.content_hash,
         status: SubmissionStatus::Pending,
     };
-    let bytes = postcard::to_allocvec(&record).map_err(|e| Error::Serialization(e.to_string()))?;
-    state.set(&kv_key(K_SUBMISSION, &submission_id), &bytes)?;
+    store_submission(state, submission_id, &record)?;
 
     event(
         "submission.created",
@@ -585,6 +694,12 @@ pub(crate) fn handle_accept_final(
         )));
     }
 
+    // One-time acceptance (issue #21): bind the nullifier after all checks
+    // and before the MMR append and record updates. A submission can be
+    // accepted exactly once — ever — regardless of how the submission or
+    // task status machines evolve in future milestones.
+    bind_nullifier(state, NULLIFIER_ACCEPT, &p.submission, account)?;
+
     // The immutable record goes into the MMR first (its hash depends on
     // the ids only, so ordering above is unchanged).
     let record = AcceptanceRecord {
@@ -597,14 +712,10 @@ pub(crate) fn handle_accept_final(
     let record_index = state.append_record(&record_bytes)? as u64;
 
     submission.status = SubmissionStatus::Accepted;
-    let submission_serialized =
-        postcard::to_allocvec(&submission).map_err(|e| Error::Serialization(e.to_string()))?;
-    state.set(&kv_key(K_SUBMISSION, &p.submission), &submission_serialized)?;
+    store_submission(state, p.submission, &submission)?;
 
     task.status = TaskStatus::Completed;
-    let task_serialized =
-        postcard::to_allocvec(&task).map_err(|e| Error::Serialization(e.to_string()))?;
-    state.set(&kv_key(K_TASK, &submission.task), &task_serialized)?;
+    store_task(state, submission.task, &task)?;
 
     event(
         "accept.finalized",

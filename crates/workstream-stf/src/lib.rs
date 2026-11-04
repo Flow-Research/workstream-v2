@@ -21,8 +21,8 @@ pub use handlers::{
     ActorGrantPayload, ActorRecord, ActorRegisterPayload, ActorRole, Capability, Grant,
     GuideActivatePayload, GuideIngestPayload, GuideRecord, NullifierRecord, ProjectCreatePayload,
     ProjectRecord, SubmissionCreatePayload, SubmissionIdPayload, SubmissionRecord,
-    SubmissionStatus, TaskCreatePayload, TaskIdPayload, TaskRecord, TaskStatus, NULLIFIER_ACCEPT,
-    NULLIFIER_CLAIM,
+    SubmissionStatus, TaskCreatePayload, TaskIdPayload, TaskRecord, TaskReleasePayload,
+    TaskScreenPayload, TaskStatus, NULLIFIER_ACCEPT, NULLIFIER_CLAIM,
 };
 
 /// Encode an action payload for inclusion in a transaction.
@@ -188,6 +188,8 @@ impl StateTransitionFunction {
             ActionType::GuideIngest => decode::<h::GuideIngestPayload>(action),
             ActionType::GuideActivate => decode::<h::GuideActivatePayload>(action),
             ActionType::TaskCreate => decode::<h::TaskCreatePayload>(action),
+            ActionType::TaskScreen => decode::<h::TaskScreenPayload>(action),
+            ActionType::TaskRelease => decode::<h::TaskReleasePayload>(action),
             ActionType::TaskClaim | ActionType::TaskStart => decode::<h::TaskIdPayload>(action),
             ActionType::SubmissionCreate => decode::<h::SubmissionCreatePayload>(action),
             ActionType::AcceptFinal => decode::<h::SubmissionIdPayload>(action),
@@ -213,6 +215,8 @@ impl StateTransitionFunction {
             ActionType::GuideIngest => handlers::handle_guide_ingest(state, account, payload)?,
             ActionType::GuideActivate => handlers::handle_guide_activate(state, account, payload)?,
             ActionType::TaskCreate => handlers::handle_task_create(state, account, payload)?,
+            ActionType::TaskScreen => handlers::handle_task_screen(state, account, payload)?,
+            ActionType::TaskRelease => handlers::handle_task_release(state, account, payload)?,
             ActionType::TaskClaim => handlers::handle_task_claim(state, account, payload)?,
             ActionType::TaskStart => handlers::handle_task_start(state, account, payload)?,
             ActionType::SubmissionCreate => {
@@ -550,6 +554,64 @@ mod mvp_handler_tests {
         handlers::derive_task(&project, "task-one")
     }
 
+    /// Ingest and activate guide v1 for a project from its owner.
+    fn setup_active_guide(
+        stf: &StateTransitionFunction,
+        state: &mut State,
+        book: &mut NonceBook,
+        owner: AccountId,
+        project: ProjectId,
+    ) -> GuideId {
+        run(
+            stf,
+            state,
+            book,
+            owner,
+            ActionType::GuideIngest,
+            guide_ingest_payload(project, 1, content_hash(1)),
+        );
+        let guide = handlers::derive_guide(&project, 1, &content_hash(1));
+        run(
+            stf,
+            state,
+            book,
+            owner,
+            ActionType::GuideActivate,
+            guide_activate_payload(project, guide),
+        );
+        guide
+    }
+
+    /// Screen and release a task from its owner (requires an active guide).
+    fn screen_and_release(
+        stf: &StateTransitionFunction,
+        state: &mut State,
+        book: &mut NonceBook,
+        owner: AccountId,
+        task: TaskId,
+    ) {
+        run(
+            stf,
+            state,
+            book,
+            owner,
+            ActionType::TaskScreen,
+            screen_payload(task),
+        );
+        run(
+            stf,
+            state,
+            book,
+            owner,
+            ActionType::TaskRelease,
+            release_payload(task, "ready for pickup"),
+        );
+    }
+
+    /// Drive the standard setup to the claimable point: both actors
+    /// registered, both capabilities granted (sponsor-scoped), project and
+    /// guide created, guide activated, task screened and released. The
+    /// returned task is `Released` and ready for `TaskClaim`.
     fn setup_task_ready(
         book: &mut NonceBook,
     ) -> (StateTransitionFunction, State, ProjectId, TaskId) {
@@ -610,9 +672,11 @@ mod mvp_handler_tests {
             );
         }
 
-        // Project + task
+        // Project, guide (ingested + activated), task, screen, release
         let project = create_project(&stf, &mut state, book, sponsor());
+        setup_active_guide(&stf, &mut state, book, sponsor(), project);
         let task = create_task(&stf, &mut state, book, sponsor(), project);
+        screen_and_release(&stf, &mut state, book, sponsor(), task);
         (stf, state, project, task)
     }
 
@@ -641,6 +705,18 @@ mod mvp_handler_tests {
 
     fn start_tx(book: &mut NonceBook, task: TaskId) -> Transaction {
         tx(book, worker(), ActionType::TaskStart, id_payload(task))
+    }
+
+    fn screen_payload(task: TaskId) -> Vec<u8> {
+        encode_payload(&TaskScreenPayload { task }).unwrap()
+    }
+
+    fn release_payload(task: TaskId, reason: &str) -> Vec<u8> {
+        encode_payload(&TaskReleasePayload {
+            task,
+            reason: reason.to_string(),
+        })
+        .unwrap()
     }
 
     fn submit_tx(book: &mut NonceBook, task: TaskId, content: H256) -> Transaction {
@@ -753,13 +829,78 @@ mod mvp_handler_tests {
         assert_eq!(events[0].event_type, "task.created");
         let task: TaskId = postcard::from_bytes(&events[0].data).unwrap();
 
-        // Block 3: claim + start
+        // Block 4: guide ingest + activation (owner preparing screening)
         let parent_root = state.root().hash();
         let events = stf
             .execute_block(
                 &mut state,
                 &mvp_block(
                     4,
+                    parent_root,
+                    vec![
+                        tx(
+                            &mut book,
+                            sponsor(),
+                            ActionType::GuideIngest,
+                            guide_ingest_payload(project, 1, content_hash(1)),
+                        ),
+                        tx(
+                            &mut book,
+                            sponsor(),
+                            ActionType::GuideActivate,
+                            guide_activate_payload(project, {
+                                handlers::derive_guide(&project, 1, &content_hash(1))
+                            }),
+                        ),
+                    ],
+                ),
+            )
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, "guide.ingested");
+        assert_eq!(events[1].event_type, "guide.activated");
+
+        // Block 5: screen + release (task becomes claimable)
+        let parent_root = state.root().hash();
+        let events = stf
+            .execute_block(
+                &mut state,
+                &mvp_block(
+                    5,
+                    parent_root,
+                    vec![
+                        tx(
+                            &mut book,
+                            sponsor(),
+                            ActionType::TaskScreen,
+                            screen_payload(task),
+                        ),
+                        tx(
+                            &mut book,
+                            sponsor(),
+                            ActionType::TaskRelease,
+                            release_payload(task, "ready for pickup"),
+                        ),
+                    ],
+                ),
+            )
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, "task.screened");
+        assert_eq!(events[1].event_type, "task.released");
+        let screened = handlers::get_task(&state, &task).unwrap().unwrap();
+        assert_eq!(
+            screened.screened_under,
+            Some(handlers::derive_guide(&project, 1, &content_hash(1)))
+        );
+
+        // Block 6: claim + start
+        let parent_root = state.root().hash();
+        let events = stf
+            .execute_block(
+                &mut state,
+                &mvp_block(
+                    6,
                     parent_root,
                     vec![claim_tx(&mut book, task), start_tx(&mut book, task)],
                 ),
@@ -772,14 +913,14 @@ mod mvp_handler_tests {
         assert_eq!(task_record.status, TaskStatus::Started);
         assert_eq!(task_record.assignee, Some(worker()));
 
-        // Block 4: submission
+        // Block 7: submission
         let submission = submission_id(task, content_hash(9));
         let parent_root = state.root().hash();
         let events = stf
             .execute_block(
                 &mut state,
                 &mvp_block(
-                    5,
+                    7,
                     parent_root,
                     vec![submit_tx(&mut book, task, content_hash(9))],
                 ),
@@ -793,12 +934,12 @@ mod mvp_handler_tests {
         assert_eq!(sub_record.status, SubmissionStatus::Pending);
         assert_eq!(sub_record.task, task);
 
-        // Block 5: accept final => MMR record + completed state
+        // Block 8: accept final => MMR record + completed state
         let parent_root = state.root().hash();
         let events = stf
             .execute_block(
                 &mut state,
-                &mvp_block(6, parent_root, vec![accept_tx(&mut book, submission)]),
+                &mvp_block(8, parent_root, vec![accept_tx(&mut book, submission)]),
             )
             .unwrap();
         assert_eq!(events.len(), 1);
@@ -943,7 +1084,9 @@ mod mvp_handler_tests {
         .unwrap();
 
         let project = create_project(&stf, &mut state, &mut book, sponsor());
+        setup_active_guide(&stf, &mut state, &mut book, sponsor(), project);
         let task = create_task(&stf, &mut state, &mut book, sponsor(), project);
+        screen_and_release(&stf, &mut state, &mut book, sponsor(), task);
 
         // worker2 has NO granted abilities
         let err = attempt(
@@ -956,9 +1099,9 @@ mod mvp_handler_tests {
         )
         .unwrap_err();
         assert!(matches!(err, Error::Unauthorized(_)));
-        // task still Created
+        // task still Released (untouched by the rejected claim)
         let record = handlers::get_task(&state, &task).unwrap().unwrap();
-        assert_eq!(record.status, TaskStatus::Created);
+        assert_eq!(record.status, TaskStatus::Released);
     }
 
     #[test]
@@ -1452,7 +1595,7 @@ mod mvp_handler_tests {
 
         // Revert the task to its pre-claim shape, bypassing the handlers:
         // the status machine alone would now accept a claim.
-        regress_task(&mut state, task, TaskStatus::Created, None);
+        regress_task(&mut state, task, TaskStatus::Released, None);
 
         // The nullifier set — not the status field — is the last line of
         // defense: the second claim still fails.
@@ -1743,6 +1886,7 @@ mod mvp_handler_tests {
             project_payload("sponsor-two"),
         );
         let project2 = handlers::derive_project(&sponsor2(), "sponsor-two");
+        setup_active_guide(&stf, &mut state, &mut book, sponsor2(), project2);
         run(
             &stf,
             &mut state,
@@ -1752,6 +1896,7 @@ mod mvp_handler_tests {
             task_payload(project2, "beta-task", 77),
         );
         let task2 = handlers::derive_task(&project2, "beta-task");
+        screen_and_release(&stf, &mut state, &mut book, sponsor2(), task2);
         run(
             &stf,
             &mut state,
@@ -2131,6 +2276,267 @@ mod mvp_handler_tests {
             Some(v2)
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Task lifecycle (issue #24): Draft → Screened → Released → Claimed.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn screen_requires_active_guide_and_owner() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, project, _) = setup_task_ready(&mut book);
+        // setup_task_ready ends past screening; create a fresh Draft task
+        // on the same project to exercise screening directly.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::TaskCreate,
+            task_payload(project, "second-task", 5),
+        );
+        let draft = handlers::derive_task(&project, "second-task");
+
+        // A non-owner sponsor cannot screen someone else's task.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor2(),
+            ActionType::TaskScreen,
+            screen_payload(draft),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::Unauthorized(ref m) if m.contains("screens")),
+            "expected owner refusal, got {err:?}"
+        );
+
+        // A worker can never screen (role gate).
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::TaskScreen,
+            screen_payload(draft),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
+
+        // The owner can screen: the draft picks up the active guide stamp.
+        let active = handlers::get_active_guide(&state, &project)
+            .unwrap()
+            .unwrap();
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::TaskScreen,
+            screen_payload(draft),
+        );
+        let screened = handlers::get_task(&state, &draft).unwrap().unwrap();
+        assert_eq!(screened.status, TaskStatus::Screened);
+        assert_eq!(screened.screened_under, Some(active));
+    }
+
+    #[test]
+    fn screen_requires_project_active_guide() {
+        let mut book = NonceBook::default();
+        let stf = mvp_stf();
+        let mut state = State::new();
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Sponsor),
+        );
+        let project = create_project(&stf, &mut state, &mut book, sponsor());
+        let task = create_task(&stf, &mut state, &mut book, sponsor(), project);
+
+        // No guide ingested, none active: screening must refuse.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::TaskScreen,
+            screen_payload(task),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidTransition(ref m) if m.contains("no active guide")),
+            "expected missing-guide refusal, got {err:?}"
+        );
+
+        // With the guide active, screening succeeds.
+        setup_active_guide(&stf, &mut state, &mut book, sponsor(), project);
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::TaskScreen,
+            screen_payload(task),
+        );
+    }
+
+    #[test]
+    fn screening_stamp_is_lineage_pinned() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, project, task) = setup_task_ready(&mut book);
+        let v1 = handlers::derive_guide(&project, 1, &content_hash(1));
+        assert_eq!(
+            handlers::get_task(&state, &task)
+                .unwrap()
+                .unwrap()
+                .screened_under,
+            Some(v1)
+        );
+
+        // The owner ships a new guide version and activates it: tasks
+        // already past screening keep their original stamp.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::GuideIngest,
+            guide_ingest_payload(project, 2, content_hash(2)),
+        );
+        let v2 = handlers::derive_guide(&project, 2, &content_hash(2));
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::GuideActivate,
+            guide_activate_payload(project, v2),
+        );
+        assert_eq!(
+            handlers::get_active_guide(&state, &project).unwrap(),
+            Some(v2)
+        );
+        assert_eq!(
+            handlers::get_task(&state, &task)
+                .unwrap()
+                .unwrap()
+                .screened_under,
+            Some(v1),
+            "an existing task's stamp must not follow re-activations"
+        );
+    }
+
+    #[test]
+    fn release_requires_screened_state_and_reason() {
+        let mut book = NonceBook::default();
+        let stf = mvp_stf();
+        let mut state = State::new();
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Sponsor),
+        );
+        let project = create_project(&stf, &mut state, &mut book, sponsor());
+        setup_active_guide(&stf, &mut state, &mut book, sponsor(), project);
+        let task = create_task(&stf, &mut state, &mut book, sponsor(), project);
+
+        // Releasing a Draft (not screened) task is refused.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::TaskRelease,
+            release_payload(task, "ship it"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidTransition(ref m) if m.contains("not releasable")),
+            "expected wrong-state refusal, got {err:?}"
+        );
+
+        // Screening then releasing with an empty reason is refused.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::TaskScreen,
+            screen_payload(task),
+        );
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::TaskRelease,
+            release_payload(task, "   "),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidTransition(ref m) if m.contains("non-empty reason")),
+            "expected reason validation, got {err:?}"
+        );
+
+        // A real reason releases the task.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::TaskRelease,
+            release_payload(task, "scope frozen"),
+        );
+        assert_eq!(
+            handlers::get_task(&state, &task).unwrap().unwrap().status,
+            TaskStatus::Released
+        );
+    }
+
+    #[test]
+    fn claim_requires_released_status() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, project, task) = setup_task_ready(&mut book);
+        let claimed = handlers::get_task(&state, &task).unwrap().unwrap();
+        assert_eq!(claimed.status, TaskStatus::Released);
+
+        // A brand-new draft cannot be claimed even by a fully-empowered
+        // worker: the lifecycle gate (not just grants) blocks it.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::TaskCreate,
+            task_payload(project, "draft-only", 5),
+        );
+        let draft = handlers::derive_task(&project, "draft-only");
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker2(),
+            ActionType::TaskClaim,
+            id_payload(draft),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidTransition(ref m) if m.contains("not claimable")),
+            "expected lifecycle gate, got {err:?}"
+        );
+        // Draft status preserved.
+        assert_eq!(
+            handlers::get_task(&state, &draft).unwrap().unwrap().status,
+            TaskStatus::Draft
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2340,7 +2746,7 @@ mod fork_gating_tests {
         let task = handlers::get_task(&state, &handlers::derive_task(&project_id, "fix-bug"))
             .unwrap()
             .unwrap();
-        assert_eq!(task.status, TaskStatus::Created);
+        assert_eq!(task.status, TaskStatus::Draft);
         assert_eq!(task.award, 100);
     }
 

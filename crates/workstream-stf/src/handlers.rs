@@ -133,7 +133,12 @@ pub struct GuideRecord {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TaskStatus {
-    Created,
+    /// Newly created, not yet reviewed by the project owner.
+    Draft,
+    /// Owner-screened under the project's active guide (stamped).
+    Screened,
+    /// Screened and released for claiming, with a recorded reason.
+    Released,
     Claimed,
     Started,
     Completed,
@@ -147,6 +152,10 @@ pub struct TaskRecord {
     pub award: u128,
     pub status: TaskStatus,
     pub assignee: Option<AccountId>,
+    /// The active guide version stamped by the owner's screening. From
+    /// then on the task is lineage-pinned: later re-activations of the
+    /// project's guide do NOT move this stamp (see `handle_task_screen`).
+    pub screened_under: Option<GuideId>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -228,6 +237,20 @@ pub struct TaskCreatePayload {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskIdPayload {
     pub task: TaskId,
+}
+
+/// task.screen: owner review of a drafted task, stamping the project's
+/// active guide version onto it.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskScreenPayload {
+    pub task: TaskId,
+}
+
+/// task.release: move a screened task to ready, with an audit reason.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskReleasePayload {
+    pub task: TaskId,
+    pub reason: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -737,14 +760,111 @@ pub(crate) fn handle_task_create(
         sponsor: account,
         title: p.title.clone(),
         award: p.award,
-        status: TaskStatus::Created,
+        status: TaskStatus::Draft,
         assignee: None,
+        screened_under: None,
     };
     store_task(state, task_id, &record)?;
 
     event(
         "task.created",
         &postcard::to_allocvec(&(task_id, p.project))
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// task.screen: the task's sponsor reviews a drafted task against their
+/// project's guide.
+///
+/// Screening is what makes a task claimable-work: it requires an active
+/// guide version and stamps that version onto the task. The stamp is
+/// lineage-pinned — a later re-activation of the project's guide does not
+/// move it — so claimants always know which guide a released task was
+/// screened under.
+pub(crate) fn handle_task_screen(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: TaskScreenPayload = decode_payload(payload)?;
+
+    let actor = load_actor(state, &account)?;
+    authz::require_sponsor(&actor, "screen a task")?;
+
+    let task_bytes = state
+        .get(&kv_key(K_TASK, &p.task))?
+        .ok_or_else(|| Error::NotFound(format!("task {}", p.task)))?;
+    let mut task: TaskRecord = postcard::from_bytes(&task_bytes)
+        .map_err(|e| Error::Serialization(format!("task record decode: {e}")))?;
+    if task.sponsor != account {
+        return Err(Error::Unauthorized(
+            "only the task's sponsor screens it".to_string(),
+        ));
+    }
+    if task.status != TaskStatus::Draft {
+        return Err(Error::InvalidTransition(format!(
+            "task {} is not screenable (status {:?})",
+            p.task, task.status
+        )));
+    }
+
+    let guide = get_active_guide(state, &task.project)?.ok_or_else(|| {
+        Error::InvalidTransition("task cannot be screened: project has no active guide".to_string())
+    })?;
+    task.screened_under = Some(guide);
+    task.status = TaskStatus::Screened;
+    store_task(state, p.task, &task)?;
+
+    event(
+        "task.screened",
+        &postcard::to_allocvec(&(p.task, guide))
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// task.release: the task's sponsor moves a screened task to ready.
+///
+/// Rules: only screened tasks can be released, release is always an
+/// explicit owner decision (never automatic), and it records a non-empty
+/// reason that travels with the task record.
+pub(crate) fn handle_task_release(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: TaskReleasePayload = decode_payload(payload)?;
+
+    let actor = load_actor(state, &account)?;
+    authz::require_sponsor(&actor, "release a task")?;
+
+    let task_bytes = state
+        .get(&kv_key(K_TASK, &p.task))?
+        .ok_or_else(|| Error::NotFound(format!("task {}", p.task)))?;
+    let mut task: TaskRecord = postcard::from_bytes(&task_bytes)
+        .map_err(|e| Error::Serialization(format!("task record decode: {e}")))?;
+    if task.sponsor != account {
+        return Err(Error::Unauthorized(
+            "only the task's sponsor releases it".to_string(),
+        ));
+    }
+    if task.status != TaskStatus::Screened {
+        return Err(Error::InvalidTransition(format!(
+            "task {} is not releasable (status {:?})",
+            p.task, task.status
+        )));
+    }
+    if p.reason.trim().is_empty() {
+        return Err(Error::InvalidTransition(
+            "release requires a non-empty reason".to_string(),
+        ));
+    }
+
+    task.status = TaskStatus::Released;
+    store_task(state, p.task, &task)?;
+
+    event(
+        "task.released",
+        &postcard::to_allocvec(&(p.task, p.reason.clone()))
             .map_err(|e| Error::Serialization(e.to_string()))?,
     )
 }
@@ -768,7 +888,7 @@ pub(crate) fn handle_task_claim(state: &mut State, account: H256, payload: &[u8]
     // sponsor does not reach this task.
     authz::require_grant(&actor, Capability::ClaimWork, &task.sponsor, "claim a task")?;
 
-    if task.status != TaskStatus::Created || task.assignee.is_some() {
+    if task.status != TaskStatus::Released || task.assignee.is_some() {
         return Err(Error::InvalidTransition(format!(
             "task {} is not claimable (status {:?})",
             p.task, task.status

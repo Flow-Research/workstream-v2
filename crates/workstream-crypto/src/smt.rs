@@ -1264,7 +1264,10 @@ mod tests {
 
         // The verifier must reject this because k1's path does not share the
         // first `depth` bits with k2 (they diverge at bit 0).
-        assert!(!verify_smt_proof(root, &forged), "forged non-existence proof must be rejected");
+        assert!(
+            !verify_smt_proof(root, &forged),
+            "forged non-existence proof must be rejected"
+        );
     }
 
     #[test]
@@ -1294,7 +1297,10 @@ mod tests {
         };
 
         // The verifier must reject this because directions don't match k2's bits.
-        assert!(!verify_smt_proof(root, &forged), "forged empty non-existence must be rejected");
+        assert!(
+            !verify_smt_proof(root, &forged),
+            "forged empty non-existence must be rejected"
+        );
     }
 
     #[test]
@@ -1309,7 +1315,10 @@ mod tests {
 
         // Tamper with depth to mismatch sibling count
         proof.depth += 1;
-        assert!(!verify_smt_proof(root, &proof), "tampered depth must be rejected");
+        assert!(
+            !verify_smt_proof(root, &proof),
+            "tampered depth must be rejected"
+        );
     }
 
     #[test]
@@ -1318,8 +1327,38 @@ mod tests {
         // Insert two keys to create inner nodes (so proof has siblings)
         let k1 = H256::from_bytes([0u8; 32]);
         let k2 = H256::from_bytes([
-            0b10000000u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0b10000000u8,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
         ]);
         tree.update(&k1, H256::from_bytes([1u8; 32]));
         tree.update(&k2, H256::from_bytes([2u8; 32]));
@@ -1330,7 +1369,10 @@ mod tests {
         // Tamper with a direction bit
         if !proof.directions.is_empty() {
             proof.directions[0] = !proof.directions[0];
-            assert!(!verify_smt_proof(root, &proof), "tampered direction must be rejected");
+            assert!(
+                !verify_smt_proof(root, &proof),
+                "tampered direction must be rejected"
+            );
         }
     }
 }

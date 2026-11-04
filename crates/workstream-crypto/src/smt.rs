@@ -1247,7 +1247,7 @@ mod tests {
         let root = tree.root();
 
         // Get the valid inclusion proof for k1
-        let mut inclusion_proof = tree.prove(&k1).unwrap();
+        let inclusion_proof = tree.prove(&k1).unwrap();
         assert_eq!(inclusion_proof.kind, SmtProofKind::Inclusion);
 
         // Forge a non-existence proof: claim k2 doesn't exist by reusing k1's path

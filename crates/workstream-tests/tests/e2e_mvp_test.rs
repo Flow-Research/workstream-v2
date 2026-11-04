@@ -251,8 +251,15 @@ fn e2e_mvp_happy_path() {
 
     let worker_record = get_actor(state, &worker()).unwrap().unwrap();
     assert_eq!(worker_record.role, ActorRole::Worker);
-    assert!(worker_record.capabilities.contains(&Capability::ClaimWork));
-    assert!(worker_record.capabilities.contains(&Capability::SubmitWork));
+    // Sponsor-scoped grants: both capabilities issued by the sponsor.
+    assert!(worker_record
+        .grants
+        .iter()
+        .any(|g| g.capability == Capability::ClaimWork && g.grantor == sponsor()));
+    assert!(worker_record
+        .grants
+        .iter()
+        .any(|g| g.capability == Capability::SubmitWork && g.grantor == sponsor()));
 
     // Project exists
     let project_record = get_project(state, &project_id()).unwrap().unwrap();

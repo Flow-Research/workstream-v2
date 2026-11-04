@@ -12,12 +12,13 @@ use workstream_core::{types::*, Error, Result};
 use workstream_state::State;
 use workstream_tx::TxValidator;
 
+pub(crate) mod authz;
 pub mod handlers;
 
 pub use handlers::{
     derive_project, derive_submission, derive_task, get_actor, get_nonce, get_nullifier,
     get_project, get_submission, get_task, AcceptanceRecord, ActorGrantPayload, ActorRecord,
-    ActorRegisterPayload, ActorRole, Capability, NullifierRecord, ProjectCreatePayload,
+    ActorRegisterPayload, ActorRole, Capability, Grant, NullifierRecord, ProjectCreatePayload,
     ProjectRecord, SubmissionCreatePayload, SubmissionIdPayload, SubmissionRecord,
     SubmissionStatus, TaskCreatePayload, TaskIdPayload, TaskRecord, TaskStatus, NULLIFIER_ACCEPT,
     NULLIFIER_CLAIM,
@@ -1531,6 +1532,337 @@ mod mvp_handler_tests {
         assert_eq!(record.family, handlers::NULLIFIER_ACCEPT.to_vec());
         assert_eq!(record.target, submission);
         assert_eq!(record.by, sponsor());
+    }
+
+    // -----------------------------------------------------------------------
+    // Authorization (issue #22): role gating, sponsor-scoped grants, and
+    // the actor-record invariants behind them.
+    // -----------------------------------------------------------------------
+
+    /// An account with no actor record may execute nothing: every handler
+    /// begins by resolving the actor through the policy gate.
+    #[test]
+    fn unregistered_account_denied_every_action() {
+        let mut book = NonceBook::default();
+        let mut state = State::new();
+        let stf = mvp_stf();
+
+        // A real worker record is needed so grant payloads resolve past the
+        // payload stage; the *caller* stays unregistered.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Worker),
+        );
+
+        let stranger = || H256::from_bytes([0xE1; 32]);
+        // Note: ActorRegister is intentionally NOT on this list — it is
+        // the open entry point into the identity layer.
+        let cases: Vec<(ActionType, Vec<u8>)> = vec![
+            (
+                ActionType::ActorGrant,
+                grant_payload(worker(), Capability::ClaimWork),
+            ),
+            (ActionType::ProjectCreate, project_payload("stranger-p")),
+            (
+                ActionType::TaskCreate,
+                task_payload(H256::from_bytes([1; 32]), "t", 1),
+            ),
+            (ActionType::TaskClaim, id_payload(H256::from_bytes([2; 32]))),
+            (ActionType::TaskStart, id_payload(H256::from_bytes([2; 32]))),
+            (
+                ActionType::SubmissionCreate,
+                submit_payload(H256::from_bytes([2; 32]), content_hash(9)),
+            ),
+            (
+                ActionType::AcceptFinal,
+                submission_payload(H256::from_bytes([3; 32])),
+            ),
+        ];
+        for (i, (action, payload)) in cases.into_iter().enumerate() {
+            // Modeled as sequential attempts from one unknown account: the
+            // first failure exposes its nonce (the STF does not burn
+            // nonces on failure), so each attempt reuses seq 0.
+            let tx = raw_tx(stranger(), 0, 0, action, payload);
+            let err = stf.execute_tx(&mut state, &tx).unwrap_err();
+            assert!(
+                matches!(err, Error::NotFound(_) | Error::Unauthorized(_)),
+                "case {i} ({action:?}) denied: expected NotFound/Unauthorized, got {err:?}"
+            );
+        }
+
+        // Nothing was created for the stranger: no actor, no nonce burn.
+        assert!(handlers::get_actor(&state, &stranger()).unwrap().is_none());
+        assert_eq!(handlers::get_nonce(&state, &stranger(), 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn sponsor_denies_worker_actions_and_holds_no_grants() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, project, task) = setup_task_ready(&mut book);
+
+        // A sponsor cannot perform worker actions.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::TaskClaim,
+            id_payload(task),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(ref m) if m.contains("Worker")));
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::TaskStart,
+            id_payload(task),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::SubmissionCreate,
+            submit_payload(task, content_hash(3)),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
+
+        // Invariant: an actor record can only carry grants from the
+        // worker-only grant path — the sponsor's record stays empty.
+        assert!(handlers::get_actor(&state, &sponsor())
+            .unwrap()
+            .unwrap()
+            .grants
+            .is_empty());
+        let _ = project;
+    }
+
+    #[test]
+    fn worker_denies_sponsor_actions() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, task) = setup_task_ready(&mut book);
+
+        // Grants flow only from sponsors.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::ActorGrant,
+            grant_payload(worker2(), Capability::ClaimWork),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
+
+        // Projects and tasks are sponsor territory.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::ProjectCreate,
+            project_payload("worker-p"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::TaskCreate,
+            task_payload(H256::from_bytes([1; 32]), "t", 1),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
+        let _ = task;
+    }
+
+    #[test]
+    fn grant_is_sponsor_scoped() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, project, task) = setup_task_ready(&mut book);
+
+        // A third worker, granted ClaimWork by sponsor2 ONLY — it holds no
+        // grant from the task's sponsor at all.
+        let worker3 = H256::from_bytes([0xE2; 32]);
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker3,
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Worker),
+        );
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor2(),
+            ActionType::ActorGrant,
+            grant_payload(worker3, Capability::ClaimWork),
+        );
+
+        // Claiming the sponsor()-owned task must be refused even though
+        // worker3 generally holds the ClaimWork capability.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker3,
+            ActionType::TaskClaim,
+            id_payload(task),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::Unauthorized(ref m) if m.contains("granted by")),
+            "expected sponsor-scoping denial, got {err:?}"
+        );
+
+        // The same worker CAN claim a task owned by its own grantor.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor2(),
+            ActionType::ProjectCreate,
+            project_payload("sponsor-two"),
+        );
+        let project2 = handlers::derive_project(&sponsor2(), "sponsor-two");
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor2(),
+            ActionType::TaskCreate,
+            task_payload(project2, "beta-task", 77),
+        );
+        let task2 = handlers::derive_task(&project2, "beta-task");
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker3,
+            ActionType::TaskClaim,
+            id_payload(task2),
+        );
+        assert_eq!(
+            handlers::get_task(&state, &task2)
+                .unwrap()
+                .unwrap()
+                .assignee,
+            Some(worker3)
+        );
+
+        // The existing sponsor/worker flow is unaffected.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::TaskClaim,
+            id_payload(task),
+        );
+        assert_eq!(
+            handlers::get_task(&state, &task).unwrap().unwrap().assignee,
+            Some(worker())
+        );
+        let _ = project;
+    }
+
+    #[test]
+    fn grant_invariants_sponsor_grantee_and_duplicates() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, _) = setup_task_ready(&mut book);
+
+        // Grantee must be a worker: granting to another sponsor is denied.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::ActorGrant,
+            grant_payload(sponsor2(), Capability::ClaimWork),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::Unauthorized(ref m) if m.contains("Worker")),
+            "expected grantee-role denial, got {err:?}"
+        );
+        // And the sponsor record remains grant-free (invariant preserved).
+        assert!(handlers::get_actor(&state, &sponsor2())
+            .unwrap()
+            .unwrap()
+            .grants
+            .is_empty());
+
+        // Duplicate grant from the same sponsor is rejected (setup_task_ready
+        // already issued ClaimWork from sponsor()): the capability set does
+        // not grow.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::ActorGrant,
+            grant_payload(worker(), Capability::ClaimWork),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)));
+        // ClaimWork (from the setup) + SubmitWork (from the setup): the
+        // duplicate attempt added nothing.
+        assert_eq!(
+            handlers::get_actor(&state, &worker())
+                .unwrap()
+                .unwrap()
+                .grants
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn grants_record_their_grantor_and_coexist_per_sponsor() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, _) = setup_task_ready(&mut book);
+
+        // A second sponsor may grant the same capability: both grants
+        // coexist, each carrying its issuer. (The worker already holds
+        // ClaimWork + SubmitWork from sponsor() via the setup, hence 3.)
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor2(),
+            ActionType::ActorGrant,
+            grant_payload(worker(), Capability::ClaimWork),
+        );
+        let grants = handlers::get_actor(&state, &worker())
+            .unwrap()
+            .unwrap()
+            .grants;
+        assert_eq!(grants.len(), 3);
+        assert!(grants.contains(&handlers::Grant {
+            capability: Capability::ClaimWork,
+            grantor: sponsor(),
+        }));
+        assert!(grants.contains(&handlers::Grant {
+            capability: Capability::ClaimWork,
+            grantor: sponsor2(),
+        }));
+        assert!(grants.contains(&handlers::Grant {
+            capability: Capability::SubmitWork,
+            grantor: sponsor(),
+        }));
     }
 }
 

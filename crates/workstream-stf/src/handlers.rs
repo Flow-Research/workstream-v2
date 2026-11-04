@@ -26,6 +26,13 @@ const K_ACTOR: &[u8] = b"WS:v1:k:actor:";
 const K_PROJECT: &[u8] = b"WS:v1:k:project:";
 const K_TASK: &[u8] = b"WS:v1:k:task:";
 const K_SUBMISSION: &[u8] = b"WS:v1:k:submission:";
+/// Guide versions of a project: documents whose versions carry the
+/// project's operating instructions and (via activation) its policies.
+const K_GUIDE: &[u8] = b"WS:v1:k:guide:";
+/// Per-project pointer to the exactly-one active guide version.
+const K_GUIDE_ACTIVE: &[u8] = b"WS:v1:k:guide-active:";
+/// Per-project head of the ingested guide version lineage (latest u32).
+const K_GUIDE_HEAD: &[u8] = b"WS:v1:k:guide-head:";
 /// Per-(account, key_id) replay-protection counter. The stored value is the
 /// NEXT expected sequence number for that account/key (0 when unused).
 const K_NONCE: &[u8] = b"WS:v1:k:nonce:";
@@ -113,6 +120,17 @@ pub struct ProjectRecord {
     pub title: String,
 }
 
+/// One ingested guide version of a project. Guides are content-addressed
+/// (the record lives under the version's derived id) and immutable once
+/// ingested; activation is tracked by a separate per-project pointer.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuideRecord {
+    pub project: ProjectId,
+    pub version: u32,
+    pub content_hash: H256,
+    pub ingested_by: AccountId,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TaskStatus {
     Created,
@@ -184,6 +202,22 @@ pub struct ProjectCreatePayload {
     pub title: String,
 }
 
+/// guide.ingest: attach one new, strictly increasing guide version
+/// (content-committed) to a project.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuideIngestPayload {
+    pub project: ProjectId,
+    pub version: u32,
+    pub content_hash: H256,
+}
+
+/// guide.activate: point a project at one of its ingested guide versions.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuideActivatePayload {
+    pub project: ProjectId,
+    pub guide: GuideId,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskCreatePayload {
     pub project: ProjectId,
@@ -214,6 +248,7 @@ pub struct SubmissionIdPayload {
 const D_PROJECT: &[u8] = b"WS:v1:id:project:";
 const D_TASK: &[u8] = b"WS:v1:id:task:";
 const D_SUBMISSION: &[u8] = b"WS:v1:id:submission:";
+const D_GUIDE: &[u8] = b"WS:v1:id:guide:";
 
 /// Deterministic project id: H(tag ‖ owner ‖ title).
 pub fn derive_project(owner: &H256, title: &str) -> ProjectId {
@@ -228,6 +263,21 @@ pub fn derive_task(project: &H256, title: &str) -> TaskId {
 /// Deterministic submission id: H(tag ‖ task ‖ content_hash).
 pub fn derive_submission(task: &H256, content_hash: &H256) -> SubmissionId {
     Hash::sha256_concat(&[D_SUBMISSION, task.as_bytes(), content_hash.as_bytes()])
+}
+
+/// Deterministic guide version id: H(tag ‖ project ‖ version ‖ content_hash).
+///
+/// Content-addressed: the id commits to the exact version bytes' hash, so
+/// a re-ingest of the same version with different content is detectable by
+/// id alone.
+pub fn derive_guide(project: &H256, version: u32, content_hash: &H256) -> GuideId {
+    let version_bytes = version.to_be_bytes();
+    Hash::sha256_concat(&[
+        D_GUIDE,
+        project.as_bytes(),
+        &version_bytes,
+        content_hash.as_bytes(),
+    ])
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +348,40 @@ fn decode_from_state<T: serde::de::DeserializeOwned>(
         .transpose()
 }
 
+/// Write a guide version record under its id (see [`store_task`]).
+pub(crate) fn store_guide(state: &mut State, guide: GuideId, record: &GuideRecord) -> Result<()> {
+    let bytes = postcard::to_allocvec(record)
+        .map_err(|e| Error::Serialization(format!("guide record encode: {e}")))?;
+    state.set(&kv_key(K_GUIDE, &guide), &bytes)
+}
+
+/// The highest ingested guide version of a project (`None` when it has no
+/// guides yet). Guide lineage is strictly ordered, so this doubles as the
+/// "versions must arrive in order" bookkeeping.
+pub(crate) fn latest_guide_version(state: &State, project: &H256) -> Result<Option<u32>> {
+    let head_key = {
+        let mut key = K_GUIDE_HEAD.to_vec();
+        key.extend_from_slice(project.as_bytes());
+        key
+    };
+    match state.get(&head_key)? {
+        Some(bytes) => postcard::from_bytes::<u32>(&bytes)
+            .map(Some)
+            .map_err(|e| Error::Serialization(format!("guide head decode: {e}"))),
+        None => Ok(None),
+    }
+}
+
+/// Advance (or initialize) a project's guide head after a successful
+/// ingest. `pub(crate)` like the other store helpers.
+pub(crate) fn set_guide_head(state: &mut State, project: &H256, version: u32) -> Result<()> {
+    let bytes = postcard::to_allocvec(&version)
+        .map_err(|e| Error::Serialization(format!("guide head encode: {e}")))?;
+    let mut key = K_GUIDE_HEAD.to_vec();
+    key.extend_from_slice(project.as_bytes());
+    state.set(&key, &bytes)
+}
+
 /// Read an actor record.
 pub fn get_actor(state: &State, account: &H256) -> Result<Option<ActorRecord>> {
     decode_from_state(state, K_ACTOR, account, "actor")
@@ -316,6 +400,21 @@ pub fn get_task(state: &State, task: &H256) -> Result<Option<TaskRecord>> {
 /// Read a submission record.
 pub fn get_submission(state: &State, submission: &H256) -> Result<Option<SubmissionRecord>> {
     decode_from_state(state, K_SUBMISSION, submission, "submission")
+}
+
+/// Read a guide version record.
+pub fn get_guide(state: &State, guide: &H256) -> Result<Option<GuideRecord>> {
+    decode_from_state(state, K_GUIDE, guide, "guide")
+}
+
+/// Read the active guide version id of a project, if any was activated.
+pub fn get_active_guide(state: &State, project: &H256) -> Result<Option<GuideId>> {
+    match state.get(&kv_key(K_GUIDE_ACTIVE, project))? {
+        Some(bytes) => postcard::from_bytes::<GuideId>(&bytes)
+            .map(Some)
+            .map_err(|e| Error::Serialization(format!("active guide decode: {e}"))),
+        None => Ok(None),
+    }
 }
 
 /// The next expected sequence number for `(account, key_id)`.
@@ -484,6 +583,122 @@ pub(crate) fn handle_project_create(
     event(
         "project.created",
         &postcard::to_allocvec(&(project_id, account))
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// guide.ingest: the project owner attaches a new guide version.
+///
+/// Lineage rules (deterministic):
+/// - versions strictly increase: the first version of a project is 1 and
+///   every later one is previous + 1 (no skips, no re-ordering),
+/// - a (project, version) pair is committed once; re-ingesting the same
+///   version (with same or different content) is an invalid transition,
+/// - the record is immutable once written.
+pub(crate) fn handle_guide_ingest(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: GuideIngestPayload = decode_payload(payload)?;
+
+    let actor = load_actor(state, &account)?;
+    authz::require_sponsor(&actor, "ingest a guide")?;
+
+    let project_bytes = state
+        .get(&kv_key(K_PROJECT, &p.project))?
+        .ok_or_else(|| Error::NotFound(format!("project {}", p.project)))?;
+    let project: ProjectRecord = postcard::from_bytes(&project_bytes)
+        .map_err(|e| Error::Serialization(format!("project record decode: {e}")))?;
+    if project.owner != account {
+        return Err(Error::Unauthorized(
+            "only the project owner ingests guides".to_string(),
+        ));
+    }
+
+    // p.version must be exactly `latest + 1` (1 when none ingested yet).
+    let latest = latest_guide_version(state, &p.project)?;
+    let expected = match latest {
+        None => 1,
+        Some(v) => v
+            .checked_add(1)
+            .ok_or_else(|| Error::InvalidTransition("guide version exhausted".to_string()))?,
+    };
+    if p.version != expected {
+        return Err(Error::InvalidTransition(format!(
+            "guide version must be {expected} (project has versions up to {latest:?})"
+        )));
+    }
+
+    let guide_id = derive_guide(&p.project, p.version, &p.content_hash);
+    if state.get(&kv_key(K_GUIDE, &guide_id))?.is_some() {
+        return Err(Error::InvalidTransition(
+            "guide version already ingested".to_string(),
+        ));
+    }
+    let record = GuideRecord {
+        project: p.project,
+        version: p.version,
+        content_hash: p.content_hash,
+        ingested_by: account,
+    };
+    store_guide(state, guide_id, &record)?;
+    set_guide_head(state, &p.project, p.version)?;
+
+    event(
+        "guide.ingested",
+        &postcard::to_allocvec(&(guide_id, p.project, p.version))
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// guide.activate: the project owner points the project at one of its
+/// ingested guide versions.
+///
+/// The "exactly one active guide per project" invariant is enforced by the
+/// pointer itself — activation replaces the previous pointer atomically;
+/// at most one version is ever active, and none is until first activation.
+pub(crate) fn handle_guide_activate(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: GuideActivatePayload = decode_payload(payload)?;
+
+    let actor = load_actor(state, &account)?;
+    authz::require_sponsor(&actor, "activate a guide")?;
+
+    let project_bytes = state
+        .get(&kv_key(K_PROJECT, &p.project))?
+        .ok_or_else(|| Error::NotFound(format!("project {}", p.project)))?;
+    let project: ProjectRecord = postcard::from_bytes(&project_bytes)
+        .map_err(|e| Error::Serialization(format!("project record decode: {e}")))?;
+    if project.owner != account {
+        return Err(Error::Unauthorized(
+            "only the project owner activates guides".to_string(),
+        ));
+    }
+
+    let guide: GuideRecord = match get_guide(state, &p.guide)? {
+        Some(g) => g,
+        None => {
+            return Err(Error::NotFound(format!("guide {}", p.guide)));
+        }
+    };
+    if guide.project != p.project {
+        return Err(Error::InvalidTransition(format!(
+            "guide {} does not belong to project {}",
+            p.guide, p.project
+        )));
+    }
+
+    let bytes = postcard::to_allocvec(&p.guide)
+        .map_err(|e| Error::Serialization(format!("active guide encode: {e}")))?;
+    state.set(&kv_key(K_GUIDE_ACTIVE, &p.project), &bytes)?;
+
+    event(
+        "guide.activated",
+        &postcard::to_allocvec(&(p.project, p.guide, guide.version))
             .map_err(|e| Error::Serialization(e.to_string()))?,
     )
 }

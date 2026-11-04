@@ -8,6 +8,9 @@ pub type AccountId = H256;
 pub type ProjectId = H256;
 pub type TaskId = H256;
 pub type SubmissionId = H256;
+pub type GuideId = H256;
+pub type BundleId = H256;
+pub type LeaseId = H256;
 pub type RecordId = H256;
 pub type PolicyId = H256;
 

@@ -16,6 +16,8 @@ use workstream_core::types::*;
 use workstream_core::{Error, Result};
 use workstream_state::State;
 
+use crate::authz;
+
 // ---------------------------------------------------------------------------
 // Storage keys
 // ---------------------------------------------------------------------------
@@ -86,11 +88,23 @@ pub enum Capability {
     SubmitWork,
 }
 
+/// A capability grant issued to a worker, recording the sponsor that
+/// authorized it. The `grantor` scopes the grant: it authorizes work only
+/// under the granting sponsor's projects and tasks (see `authz`).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Grant {
+    pub capability: Capability,
+    pub grantor: AccountId,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActorRecord {
     pub account: AccountId,
     pub role: ActorRole,
-    pub capabilities: Vec<Capability>,
+    /// Capabilities granted to this actor, each bound to its granting
+    /// sponsor. Invariant: non-empty only when `role == Worker` — the
+    /// grant path (`actor.grant`) refuses all other targets.
+    pub grants: Vec<Grant>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -265,14 +279,6 @@ fn event(event_type: &str, data: &[u8]) -> Result<Event> {
     })
 }
 
-fn is_sponsor(record: &ActorRecord) -> bool {
-    record.role == ActorRole::Sponsor
-}
-
-fn has_capability(record: &ActorRecord, capability: Capability) -> bool {
-    record.capabilities.contains(&capability)
-}
-
 // ---------------------------------------------------------------------------
 // Record readers (used by the sequencer #16, node #32, and e2e tests #33)
 // ---------------------------------------------------------------------------
@@ -397,7 +403,7 @@ pub(crate) fn handle_actor_register(
     let record = ActorRecord {
         account,
         role: p.role,
-        capabilities: Vec::new(),
+        grants: Vec::new(),
     };
     store_actor(state, &record)?;
     event(
@@ -408,6 +414,11 @@ pub(crate) fn handle_actor_register(
 }
 
 /// actor.grant: a sponsor grants a capability to a worker.
+///
+/// Grants are sponsor-scoped (issue #22): the record stores the granting
+/// sponsor, so the capability authorizes work only under that sponsor's
+/// tasks. A different sponsor may grant the same capability again — the
+/// grants coexist as separate entries.
 pub(crate) fn handle_actor_grant(
     state: &mut State,
     account: H256,
@@ -416,24 +427,27 @@ pub(crate) fn handle_actor_grant(
     let p: ActorGrantPayload = decode_payload(payload)?;
 
     let grantor = load_actor(state, &account)?;
-    if !is_sponsor(&grantor) {
-        return Err(Error::Unauthorized("only sponsors can grant".to_string()));
-    }
+    authz::require_sponsor(&grantor, "grant a capability")?;
 
-    let mut grantee = load_actor(state, &p.grantee)?;
-    if grantee.role != ActorRole::Worker {
-        return Err(Error::InvalidTransition(
-            "grants target workers".to_string(),
-        ));
-    }
-    if has_capability(&grantee, p.capability) {
+    let grantee = load_actor(state, &p.grantee)?;
+    authz::require_grantable_grantee(&grantee)?;
+
+    let already = grantee
+        .grants
+        .iter()
+        .any(|g| g.capability == p.capability && g.grantor == account);
+    if already {
         return Err(Error::InvalidTransition(format!(
-            "worker {} already has {:?}",
+            "worker {} already holds {:?} granted by {account}",
             p.grantee, p.capability
         )));
     }
-    grantee.capabilities.push(p.capability);
-    store_actor(state, &grantee)?;
+    let mut granted = grantee;
+    granted.grants.push(Grant {
+        capability: p.capability,
+        grantor: account,
+    });
+    store_actor(state, &granted)?;
 
     event(
         "actor.granted",
@@ -451,11 +465,7 @@ pub(crate) fn handle_project_create(
     let p: ProjectCreatePayload = decode_payload(payload)?;
 
     let actor = load_actor(state, &account)?;
-    if !is_sponsor(&actor) {
-        return Err(Error::Unauthorized(
-            "only sponsors create projects".to_string(),
-        ));
-    }
+    authz::require_sponsor(&actor, "create a project")?;
 
     let project_id = derive_project(&account, &p.title);
     if state.get(&kv_key(K_PROJECT, &project_id))?.is_some() {
@@ -487,11 +497,7 @@ pub(crate) fn handle_task_create(
     let p: TaskCreatePayload = decode_payload(payload)?;
 
     let actor = load_actor(state, &account)?;
-    if !is_sponsor(&actor) {
-        return Err(Error::Unauthorized(
-            "only sponsors create tasks".to_string(),
-        ));
-    }
+    authz::require_sponsor(&actor, "create a task")?;
 
     let project_bytes = state
         .get(&kv_key(K_PROJECT, &p.project))?
@@ -528,25 +534,25 @@ pub(crate) fn handle_task_create(
     )
 }
 
-/// task.claim: a worker with the ClaimWork capability claims a created task.
+/// task.claim: a worker claims a created task, authorized by that task's
+/// own sponsor (sponsor-scoped grant — issue #22).
 pub(crate) fn handle_task_claim(state: &mut State, account: H256, payload: &[u8]) -> Result<Event> {
     let p: TaskIdPayload = decode_payload(payload)?;
 
     let actor = load_actor(state, &account)?;
-    if actor.role != ActorRole::Worker {
-        return Err(Error::Unauthorized("only workers claim tasks".to_string()));
-    }
-    if !has_capability(&actor, Capability::ClaimWork) {
-        return Err(Error::Unauthorized(
-            "missing ClaimWork capability".to_string(),
-        ));
-    }
+    authz::require_worker(&actor, "claim a task")?;
 
     let task_bytes = state
         .get(&kv_key(K_TASK, &p.task))?
         .ok_or_else(|| Error::NotFound(format!("task {}", p.task)))?;
     let mut task: TaskRecord = postcard::from_bytes(&task_bytes)
         .map_err(|e| Error::Serialization(format!("task record decode: {e}")))?;
+
+    // The claim is only valid if the task's own sponsor delegated the
+    // ClaimWork capability to this worker — a grant from any other
+    // sponsor does not reach this task.
+    authz::require_grant(&actor, Capability::ClaimWork, &task.sponsor, "claim a task")?;
+
     if task.status != TaskStatus::Created || task.assignee.is_some() {
         return Err(Error::InvalidTransition(format!(
             "task {} is not claimable (status {:?})",
@@ -575,6 +581,12 @@ pub(crate) fn handle_task_claim(state: &mut State, account: H256, payload: &[u8]
 pub(crate) fn handle_task_start(state: &mut State, account: H256, payload: &[u8]) -> Result<Event> {
     let p: TaskIdPayload = decode_payload(payload)?;
 
+    // Even though the assignee-match below is the real authority, every
+    // action routes through the policy: the actor must exist and be a
+    // worker (uniform RBAC, issue #22).
+    let actor = load_actor(state, &account)?;
+    authz::require_worker(&actor, "start a task")?;
+
     let task_bytes = state
         .get(&kv_key(K_TASK, &p.task))?
         .ok_or_else(|| Error::NotFound(format!("task {}", p.task)))?;
@@ -601,7 +613,8 @@ pub(crate) fn handle_task_start(state: &mut State, account: H256, payload: &[u8]
     )
 }
 
-/// submission.create: the assigned worker submits finished work.
+/// submission.create: the assigned worker submits finished work, under a
+/// `SubmitWork` grant issued by that task's own sponsor (issue #22).
 pub(crate) fn handle_submission_create(
     state: &mut State,
     account: H256,
@@ -610,17 +623,21 @@ pub(crate) fn handle_submission_create(
     let p: SubmissionCreatePayload = decode_payload(payload)?;
 
     let author = load_actor(state, &account)?;
-    if !has_capability(&author, Capability::SubmitWork) {
-        return Err(Error::Unauthorized(
-            "missing SubmitWork capability".to_string(),
-        ));
-    }
+    authz::require_worker(&author, "submit work")?;
 
     let task_bytes = state
         .get(&kv_key(K_TASK, &p.task))?
         .ok_or_else(|| Error::NotFound(format!("task {}", p.task)))?;
     let task: TaskRecord = postcard::from_bytes(&task_bytes)
         .map_err(|e| Error::Serialization(format!("task record decode: {e}")))?;
+
+    authz::require_grant(
+        &author,
+        Capability::SubmitWork,
+        &task.sponsor,
+        "submit work",
+    )?;
+
     if task.assignee != Some(account) {
         return Err(Error::Unauthorized(
             "only the assigned worker submits".to_string(),
@@ -658,12 +675,19 @@ pub(crate) fn handle_submission_create(
 ///
 /// Effects: submission -> Accepted, task -> Completed, and an
 /// `AcceptanceRecord` appended to the MMR (the immutable audit record).
+///
+/// Authority: the accepting account must be a registered sponsor acting
+/// as the task's sponsor (identity check below) — payments are authorized
+/// by task ownership, not capabilities (issue #22).
 pub(crate) fn handle_accept_final(
     state: &mut State,
     account: H256,
     payload: &[u8],
 ) -> Result<Event> {
     let p: SubmissionIdPayload = decode_payload(payload)?;
+
+    let actor = load_actor(state, &account)?;
+    authz::require_sponsor(&actor, "accept final")?;
 
     let submission_bytes = state
         .get(&kv_key(K_SUBMISSION, &p.submission))?

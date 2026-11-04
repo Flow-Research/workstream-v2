@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use workstream_core::hash::{Hash, H256};
+use workstream_core::hash::H256;
 use workstream_core::Result;
 
 use crate::smt::{hash_key, hash_value, MemoryNodeStore, SmTree};
@@ -107,58 +107,50 @@ impl Default for SparseMerkleTree {
 
 /// Merkle Mountain Range for append-only immutable records.
 ///
-/// Placeholder implementation storing leaf hashes with a size-bound root.
-/// The real MMR (#36) will implement peaks and proper proofs per the design.
+/// Wraps the core `MmrTree` to provide the API expected by workstream-state.
+/// The underlying implementation uses proper peaks and size-bound root hashing
+/// per `docs/design/smt-mmr.md`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MerkleMountainRange {
-    /// Leaf hashes in append order.
-    leaves: Vec<H256>,
-    /// Current root (recomputed on each append).
-    root: H256,
-}
-
-/// Domain tags for MMR (from design doc).
-const MMR_EMPTY: &[u8] = b"WSMMR:v1:EMPTY";
-const MMR_PEAKS: &[u8] = b"WSMMR:v1:PEAKS";
-
-/// Compute MMR root as H(tag ‖ size ‖ leaves...).
-fn mmr_root(leaves: &[H256]) -> H256 {
-    if leaves.is_empty() {
-        return Hash::sha256(MMR_EMPTY);
-    }
-    let mut data = Vec::with_capacity(8 + leaves.len() * 32);
-    data.extend_from_slice(&(leaves.len() as u64).to_le_bytes());
-    for leaf in leaves {
-        data.extend_from_slice(leaf.as_bytes());
-    }
-    Hash::sha256_concat(&[MMR_PEAKS, &data])
+    tree: crate::mmr::MmrTree,
 }
 
 impl MerkleMountainRange {
     pub fn new() -> Self {
         MerkleMountainRange {
-            leaves: Vec::new(),
-            root: mmr_root(&[]),
+            tree: crate::mmr::MmrTree::new(),
         }
     }
 
     /// Get the current root.
     pub fn root(&self) -> H256 {
-        self.root
+        self.tree.root()
     }
 
     /// Number of records in the log.
     pub fn size(&self) -> u64 {
-        self.leaves.len() as u64
+        self.tree.size()
+    }
+
+    /// Check if the MMR is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.tree.is_empty()
     }
 
     /// Append a record and return its index.
     pub fn append(&mut self, record: &[u8]) -> Result<u64> {
-        let leaf_hash = Hash::sha256(record);
-        let index = self.leaves.len() as u64;
-        self.leaves.push(leaf_hash);
-        self.root = mmr_root(&self.leaves);
-        Ok(index)
+        Ok(self.tree.append(record))
+    }
+
+    /// Generate a proof for the record at the given index.
+    pub fn prove(&self, index: u64) -> Result<crate::mmr::MmrProof> {
+        self.tree.prove(index)
+    }
+
+    /// Access the underlying tree (for advanced operations).
+    pub fn tree(&self) -> &crate::mmr::MmrTree {
+        &self.tree
     }
 }
 

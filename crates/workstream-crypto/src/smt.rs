@@ -91,15 +91,40 @@ impl SmtProof {
 pub fn verify_smt_proof(root: H256, proof: &SmtProof) -> bool {
     let empty = empty_hash();
 
+    // Depth must not exceed the tree's fixed depth.
+    if proof.depth > TREE_DEPTH {
+        return false;
+    }
+
+    // Siblings and directions must have the same length.
+    if proof.siblings.len() != proof.directions.len() {
+        return false;
+    }
+
+    // The number of siblings/directions equals the number of inner nodes traversed,
+    // which is exactly proof.depth (the depth at which the path terminates).
+    if proof.siblings.len() != proof.depth {
+        return false;
+    }
+
+    // Directions are stored bottom-up by collect_proof_path: index 0 is the deepest
+    // inner node (depth = proof.depth - 1), and index len-1 is the root (depth = 0).
+    // Validate each direction matches the key's bit at that depth.
+    for (i, &went_right) in proof.directions.iter().enumerate() {
+        let bit_depth = proof.depth - 1 - i;
+        if went_right != get_bit(&proof.key, bit_depth) {
+            return false;
+        }
+    }
+
     // Compute the hash at the termination point
     let mut current = match proof.kind {
         SmtProofKind::Inclusion => {
-            // Must have a value hash for inclusion proofs
+            // Must have a value hash for inclusion proofs.
             let value_hash = match proof.value_hash {
                 Some(vh) => vh,
                 None => return false,
             };
-            // Compute leaf hash
             SmtNode::Leaf {
                 key: proof.key,
                 value_hash,
@@ -108,13 +133,18 @@ pub fn verify_smt_proof(root: H256, proof: &SmtProof) -> bool {
         }
         SmtProofKind::NonExistence => {
             match (proof.leaf_key, proof.value_hash) {
-                // Path ends at empty subtree
+                // Path ends at empty subtree.
                 (None, None) => empty,
-                // Path ends at a different leaf
+                // Path ends at a different leaf: the conflicting key must share the
+                // first proof.depth bits with the query key (the path prefix).
                 (Some(leaf_key), Some(value_hash)) => {
-                    // The leaf key must be different from the query key
                     if leaf_key == proof.key {
                         return false;
+                    }
+                    for i in 0..proof.depth {
+                        if get_bit(&leaf_key, i) != get_bit(&proof.key, i) {
+                            return false;
+                        }
                     }
                     SmtNode::Leaf {
                         key: leaf_key,
@@ -122,20 +152,16 @@ pub fn verify_smt_proof(root: H256, proof: &SmtProof) -> bool {
                     }
                     .hash()
                 }
-                // Invalid combination
+                // Invalid combination.
                 _ => return false,
             }
         }
     };
 
-    // Walk up the tree using siblings
-    if proof.siblings.len() != proof.directions.len() {
-        return false;
-    }
-
+    // Walk up the tree using siblings (bottom-up order).
     for (sibling, &went_right) in proof.siblings.iter().zip(proof.directions.iter()) {
         // went_right indicates which direction we took at this level.
-        // If we went right, we're on the right side, sibling is on left.
+        // If we went right, we're on the right side; sibling is on left.
         let (left, right) = if went_right {
             (*sibling, current)
         } else {
@@ -1203,6 +1229,109 @@ mod tests {
         let proof = tree.prove(&k2).unwrap();
         assert_eq!(proof.kind, SmtProofKind::Inclusion);
         assert!(proof.verify(root));
+    }
+
+    #[test]
+    fn forged_non_existence_proof_rejected() {
+        // An attacker takes a valid inclusion proof for key L and tries to use it
+        // as a non-existence proof for a different key K. The verifier must reject this.
+        let mut tree: SmTree = SmTree::new();
+        let k1 = H256::from_bytes([1u8; 32]);
+        let k2 = H256::from_bytes([2u8; 32]);
+        let v1 = H256::from_bytes([10u8; 32]);
+        let v2 = H256::from_bytes([20u8; 32]);
+
+        tree.update(&k1, v1);
+        tree.update(&k2, v2);
+
+        let root = tree.root();
+
+        // Get the valid inclusion proof for k1
+        let mut inclusion_proof = tree.prove(&k1).unwrap();
+        assert_eq!(inclusion_proof.kind, SmtProofKind::Inclusion);
+
+        // Forge a non-existence proof: claim k2 doesn't exist by reusing k1's path
+        // with leaf_key = Some(k1) and value_hash = Some(v1).
+        let forged = SmtProof {
+            kind: SmtProofKind::NonExistence,
+            key: k2, // query for a different key
+            value_hash: Some(v1),
+            leaf_key: Some(k1), // point to k1 as the conflicting leaf
+            siblings: inclusion_proof.siblings.clone(),
+            directions: inclusion_proof.directions.clone(),
+            depth: inclusion_proof.depth,
+        };
+
+        // The verifier must reject this because k1's path does not share the
+        // first `depth` bits with k2 (they diverge at bit 0).
+        assert!(!verify_smt_proof(root, &forged), "forged non-existence proof must be rejected");
+    }
+
+    #[test]
+    fn forged_empty_non_existence_rejected() {
+        // An attacker tries to forge an (None, None) non-existence proof using
+        // siblings/directions from a valid inclusion path for a different key.
+        let mut tree: SmTree = SmTree::new();
+        let k1 = H256::from_bytes([1u8; 32]);
+        let k2 = H256::from_bytes([2u8; 32]);
+        let v1 = H256::from_bytes([10u8; 32]);
+
+        tree.update(&k1, v1);
+        let root = tree.root();
+
+        // Get the valid inclusion proof for k1
+        let inclusion_proof = tree.prove(&k1).unwrap();
+
+        // Forge an empty non-existence proof for k2 using k1's path
+        let forged = SmtProof {
+            kind: SmtProofKind::NonExistence,
+            key: k2, // query for a different key
+            value_hash: None,
+            leaf_key: None,
+            siblings: inclusion_proof.siblings.clone(),
+            directions: inclusion_proof.directions.clone(),
+            depth: inclusion_proof.depth,
+        };
+
+        // The verifier must reject this because directions don't match k2's bits.
+        assert!(!verify_smt_proof(root, &forged), "forged empty non-existence must be rejected");
+    }
+
+    #[test]
+    fn tampered_depth_rejected() {
+        let mut tree: SmTree = SmTree::new();
+        let key = H256::from_bytes([1u8; 32]);
+        let value = H256::from_bytes([2u8; 32]);
+        tree.update(&key, value);
+
+        let mut proof = tree.prove(&key).unwrap();
+        let root = tree.root();
+
+        // Tamper with depth to mismatch sibling count
+        proof.depth += 1;
+        assert!(!verify_smt_proof(root, &proof), "tampered depth must be rejected");
+    }
+
+    #[test]
+    fn tampered_direction_rejected() {
+        let mut tree: SmTree = SmTree::new();
+        // Insert two keys to create inner nodes (so proof has siblings)
+        let k1 = H256::from_bytes([0u8; 32]);
+        let k2 = H256::from_bytes([
+            0b10000000u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        tree.update(&k1, H256::from_bytes([1u8; 32]));
+        tree.update(&k2, H256::from_bytes([2u8; 32]));
+
+        let mut proof = tree.prove(&k1).unwrap();
+        let root = tree.root();
+
+        // Tamper with a direction bit
+        if !proof.directions.is_empty() {
+            proof.directions[0] = !proof.directions[0];
+            assert!(!verify_smt_proof(root, &proof), "tampered direction must be rejected");
+        }
     }
 }
 

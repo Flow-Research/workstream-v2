@@ -16,13 +16,15 @@ pub(crate) mod authz;
 pub mod handlers;
 
 pub use handlers::{
-    derive_guide, derive_project, derive_submission, derive_task, get_active_guide, get_actor,
-    get_guide, get_nonce, get_nullifier, get_project, get_submission, get_task, AcceptanceRecord,
-    ActorGrantPayload, ActorRecord, ActorRegisterPayload, ActorRole, Capability, Grant,
-    GuideActivatePayload, GuideIngestPayload, GuideRecord, NullifierRecord, ProjectCreatePayload,
-    ProjectRecord, SubmissionCreatePayload, SubmissionIdPayload, SubmissionRecord,
-    SubmissionStatus, TaskCreatePayload, TaskIdPayload, TaskRecord, TaskReleasePayload,
-    TaskScreenPayload, TaskStatus, NULLIFIER_ACCEPT, NULLIFIER_CLAIM,
+    derive_bundle, derive_guide, derive_lease, derive_project, derive_submission, derive_task,
+    get_active_guide, get_actor, get_bundle, get_guide, get_lease, get_nonce, get_nullifier,
+    get_project, get_submission, get_task, AcceptanceRecord, ActorGrantPayload, ActorRecord,
+    ActorRegisterPayload, ActorRole, BundleAdmitPayload, BundleRecord, BundleStatus, Capability,
+    Grant, GuideActivatePayload, GuideIngestPayload, GuideRecord, LeaseRecord, LeaseStatus,
+    NullifierRecord, ProjectCreatePayload, ProjectRecord, ReviewDecidePayload, ReviewDecision,
+    ReviewLeasePayload, ReviewRecord, SubmissionCreatePayload, SubmissionIdPayload,
+    SubmissionRecord, SubmissionStatus, TaskCreatePayload, TaskIdPayload, TaskRecord,
+    TaskReleasePayload, TaskScreenPayload, TaskStatus, NULLIFIER_ACCEPT, NULLIFIER_CLAIM,
 };
 
 /// Encode an action payload for inclusion in a transaction.
@@ -184,6 +186,9 @@ impl StateTransitionFunction {
             ActionType::TaskRelease => decode::<h::TaskReleasePayload>(action),
             ActionType::TaskClaim | ActionType::TaskStart => decode::<h::TaskIdPayload>(action),
             ActionType::SubmissionCreate => decode::<h::SubmissionCreatePayload>(action),
+            ActionType::BundleAdmit => decode::<h::BundleAdmitPayload>(action),
+            ActionType::ReviewLease => decode::<h::ReviewLeasePayload>(action),
+            ActionType::ReviewDecide => decode::<h::ReviewDecidePayload>(action),
             ActionType::AcceptFinal => decode::<h::SubmissionIdPayload>(action),
             // Types without MVP handlers yet: no payload preview is possible;
             // their (not-yet-supported) execution errors below.
@@ -214,6 +219,9 @@ impl StateTransitionFunction {
             ActionType::SubmissionCreate => {
                 handlers::handle_submission_create(state, account, payload)?
             }
+            ActionType::BundleAdmit => handlers::handle_bundle_admit(state, account, payload)?,
+            ActionType::ReviewLease => handlers::handle_review_lease(state, account, payload)?,
+            ActionType::ReviewDecide => handlers::handle_review_decide(state, account, payload)?,
             ActionType::AcceptFinal => handlers::handle_accept_final(state, account, payload)?,
             other => {
                 return Err(Error::Transaction(format!(
@@ -729,6 +737,80 @@ mod mvp_handler_tests {
         )
     }
 
+    /// The reviewer of choice in these tests: a registered worker that is
+    /// neither the author (worker) nor the sponsor (who pays).
+    fn reviewer() -> AccountId {
+        worker2()
+    }
+
+    fn bundle_admit_payload(task: TaskId, content: H256) -> Vec<u8> {
+        encode_payload(&BundleAdmitPayload {
+            task,
+            content_hash: content,
+        })
+        .unwrap()
+    }
+
+    fn review_lease_payload(submission: SubmissionId) -> Vec<u8> {
+        encode_payload(&ReviewLeasePayload { submission }).unwrap()
+    }
+
+    fn review_decide_payload(submission: SubmissionId, decision: ReviewDecision) -> Vec<u8> {
+        encode_payload(&ReviewDecidePayload {
+            submission,
+            decision,
+        })
+        .unwrap()
+    }
+
+    /// Drive the Started task to a review-gated submission: the assignee
+    /// admits its bundle, the submission consumes it, and the reviewer
+    /// leases + records an `Accept`. Leaves the submission `Pending` with
+    /// `accept_reviews == 1` — ready for `accept.final` by the sponsor.
+    fn admit_submit_and_review(
+        book: &mut NonceBook,
+        stf: &StateTransitionFunction,
+        state: &mut State,
+        task: TaskId,
+        content: H256,
+    ) -> SubmissionId {
+        // The task's assignee (single-worker flows) admits and submits.
+        run(
+            stf,
+            state,
+            book,
+            worker(),
+            ActionType::BundleAdmit,
+            bundle_admit_payload(task, content),
+        );
+        run(
+            stf,
+            state,
+            book,
+            worker(),
+            ActionType::SubmissionCreate,
+            submit_payload(task, content),
+        );
+        let submission = submission_id(task, content);
+        run(
+            stf,
+            state,
+            book,
+            reviewer(),
+            ActionType::ReviewLease,
+            review_lease_payload(submission),
+        );
+        run(
+            stf,
+            state,
+            book,
+            reviewer(),
+            ActionType::ReviewDecide,
+            review_decide_payload(submission, ReviewDecision::Accept),
+        );
+        submission
+    }
+
     fn submission_id(task: TaskId, content: H256) -> SubmissionId {
         handlers::derive_submission(&task, &content)
     }
@@ -740,7 +822,7 @@ mod mvp_handler_tests {
         let initial_root = state.root().hash();
         let mut book = NonceBook::default();
 
-        // Block 0: identity
+        // Block 0: identity (the reviewer is a third registered actor)
         let events = stf
             .execute_block(
                 &mut state,
@@ -750,11 +832,12 @@ mod mvp_handler_tests {
                     vec![
                         register(&mut book, sponsor(), ActorRole::Sponsor),
                         register(&mut book, worker(), ActorRole::Worker),
+                        register(&mut book, reviewer(), ActorRole::Worker),
                     ],
                 ),
             )
             .unwrap();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert_eq!(&events[0].event_type, "actor.registered");
         assert_eq!(&events[1].event_type, "actor.registered");
         assert_eq!(events[0].block_number, 0);
@@ -905,7 +988,8 @@ mod mvp_handler_tests {
         assert_eq!(task_record.status, TaskStatus::Started);
         assert_eq!(task_record.assignee, Some(worker()));
 
-        // Block 7: submission
+        // Block 7: bundle admission + submission (submission consumes the
+        // bundle atomically)
         let submission = submission_id(task, content_hash(9));
         let parent_root = state.root().hash();
         let events = stf
@@ -914,31 +998,85 @@ mod mvp_handler_tests {
                 &mvp_block(
                     7,
                     parent_root,
-                    vec![submit_tx(&mut book, task, content_hash(9))],
+                    vec![
+                        tx(
+                            &mut book,
+                            worker(),
+                            ActionType::BundleAdmit,
+                            bundle_admit_payload(task, content_hash(9)),
+                        ),
+                        submit_tx(&mut book, task, content_hash(9)),
+                    ],
                 ),
             )
             .unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, "submission.created");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, "bundle.admitted");
+        assert_eq!(events[1].event_type, "submission.created");
+        let (sub_id, sub_task, bundle_id): (SubmissionId, TaskId, H256) =
+            postcard::from_bytes(&events[1].data).unwrap();
+        assert_eq!(sub_id, submission);
+        assert_eq!(sub_task, task);
+        assert_eq!(
+            handlers::derive_bundle(&task, &worker(), &content_hash(9)),
+            bundle_id
+        );
         let sub_record = handlers::get_submission(&state, &submission)
             .unwrap()
             .unwrap();
         assert_eq!(sub_record.status, SubmissionStatus::Pending);
         assert_eq!(sub_record.task, task);
+        assert_eq!(sub_record.accept_reviews, 0);
+        // The bundle is consumed: a second submission cannot reuse it.
+        let bundle_record = handlers::get_bundle(&state, &bundle_id).unwrap().unwrap();
+        assert_eq!(bundle_record.status, BundleStatus::Consumed);
 
-        // Block 8: accept final => MMR record + completed state
+        // Block 8: review lease + decision (Accept gates the payout)
         let parent_root = state.root().hash();
         let events = stf
             .execute_block(
                 &mut state,
-                &mvp_block(8, parent_root, vec![accept_tx(&mut book, submission)]),
+                &mvp_block(
+                    8,
+                    parent_root,
+                    vec![
+                        tx(
+                            &mut book,
+                            reviewer(),
+                            ActionType::ReviewLease,
+                            review_lease_payload(submission),
+                        ),
+                        tx(
+                            &mut book,
+                            reviewer(),
+                            ActionType::ReviewDecide,
+                            review_decide_payload(submission, ReviewDecision::Accept),
+                        ),
+                    ],
+                ),
+            )
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, "review.leased");
+        assert_eq!(events[1].event_type, "review.decided");
+        let sub_record = handlers::get_submission(&state, &submission)
+            .unwrap()
+            .unwrap();
+        assert_eq!(sub_record.accept_reviews, 1);
+
+        // Block 9: accept final => MMR record + completed state
+        let parent_root = state.root().hash();
+        let events = stf
+            .execute_block(
+                &mut state,
+                &mvp_block(9, parent_root, vec![accept_tx(&mut book, submission)]),
             )
             .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "accept.finalized");
         let (_, _, record_index): (SubmissionId, TaskId, u64) =
             postcard::from_bytes(&events[0].data).unwrap();
-        assert_eq!(record_index, 0);
+        assert_eq!(record_index, 1); // the review records live in the MMR too
 
         let task_record = handlers::get_task(&state, &task).unwrap().unwrap();
         assert_eq!(task_record.status, TaskStatus::Completed);
@@ -946,7 +1084,7 @@ mod mvp_handler_tests {
             .unwrap()
             .unwrap();
         assert_eq!(sub_record.status, SubmissionStatus::Accepted);
-        assert_eq!(state.mmr.size(), 1); // one immutable acceptance record
+        assert_eq!(state.mmr.size(), 2); // 1 review + 1 acceptance record
 
         // Final root differs from start and is deterministic
         assert_ne!(state.root().hash(), initial_root);
@@ -1197,9 +1335,8 @@ mod mvp_handler_tests {
             .unwrap();
         stf.execute_tx(&mut state, &start_tx(&mut book, task))
             .unwrap();
-        stf.execute_tx(&mut state, &submit_tx(&mut book, task, content_hash(1)))
-            .unwrap();
-        let submission = submission_id(task, content_hash(1));
+        let submission =
+            admit_submit_and_review(&mut book, &stf, &mut state, task, content_hash(1));
 
         // a different sponsor cannot accept (not the task sponsor)
         let err = attempt(
@@ -1229,7 +1366,7 @@ mod mvp_handler_tests {
 
         let record = handlers::get_task(&state, &task).unwrap().unwrap();
         assert_eq!(record.status, TaskStatus::Completed);
-        assert_eq!(state.mmr.size(), 1);
+        assert_eq!(state.mmr.size(), 2); // 1 review + 1 acceptance record
     }
 
     #[test]
@@ -1256,7 +1393,7 @@ mod mvp_handler_tests {
             &mut state,
             &mut book,
             sponsor(),
-            ActionType::ReviewDecide,
+            ActionType::AwardFulfill,
             vec![],
         )
         .unwrap_err();
@@ -1568,9 +1705,8 @@ mod mvp_handler_tests {
             .unwrap();
         stf.execute_tx(&mut state, &start_tx(&mut book, task))
             .unwrap();
-        stf.execute_tx(&mut state, &submit_tx(&mut book, task, content_hash(1)))
-            .unwrap();
-        let submission = submission_id(task, content_hash(1));
+        let submission =
+            admit_submit_and_review(&mut book, &stf, &mut state, task, content_hash(1));
         stf.execute_tx(&mut state, &accept_tx(&mut book, submission))
             .unwrap();
         let mmr_size = state.mmr.size();

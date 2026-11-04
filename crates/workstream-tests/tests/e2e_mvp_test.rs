@@ -4,7 +4,7 @@
 //! - Sequencer builds blocks from submitted transactions
 //! - Node syncs blocks and verifies state
 //! - Full task lifecycle: register → grant → project → guide → screen →
-//!   release → claim → start → submit → accept
+//!   release → claim → start → admit → submit → review → accept
 //!
 //! This test verifies the core consensus property: sequencer and node
 //! arrive at identical state after processing the same transactions.
@@ -14,12 +14,13 @@ use workstream_core::types::*;
 use workstream_node::{MemoryBlockSource, Node};
 use workstream_sequencer::Sequencer;
 use workstream_stf::{
-    derive_guide, derive_project, derive_submission, derive_task, encode_payload, get_active_guide,
-    get_actor, get_project, get_submission, get_task, mvp_genesis_schedule, ActorGrantPayload,
-    ActorRegisterPayload, ActorRole, Capability, GuideActivatePayload, GuideIngestPayload,
-    ProjectCreatePayload, StateTransitionFunction, SubmissionCreatePayload, SubmissionIdPayload,
-    SubmissionStatus, TaskCreatePayload, TaskIdPayload, TaskReleasePayload, TaskScreenPayload,
-    TaskStatus,
+    derive_bundle, derive_guide, derive_project, derive_submission, derive_task, encode_payload,
+    get_active_guide, get_actor, get_bundle, get_project, get_submission, get_task,
+    mvp_genesis_schedule, ActorGrantPayload, ActorRegisterPayload, ActorRole, BundleAdmitPayload,
+    BundleStatus, Capability, GuideActivatePayload, GuideIngestPayload, ProjectCreatePayload,
+    ReviewDecidePayload, ReviewDecision, ReviewLeasePayload, StateTransitionFunction,
+    SubmissionCreatePayload, SubmissionIdPayload, SubmissionStatus, TaskCreatePayload,
+    TaskIdPayload, TaskReleasePayload, TaskScreenPayload, TaskStatus,
 };
 use workstream_tx::TxBuilder;
 
@@ -30,6 +31,12 @@ fn sponsor() -> AccountId {
 
 fn worker() -> AccountId {
     H256::from_bytes([0x22; 32])
+}
+
+/// A second worker acting as an independent reviewer. The review policy
+/// forbids the submission's author and the task's sponsor from reviewing.
+fn reviewer() -> AccountId {
+    H256::from_bytes([0x33; 32])
 }
 
 fn content_hash() -> H256 {
@@ -67,6 +74,18 @@ fn register_sponsor() -> Transaction {
 fn register_worker() -> Transaction {
     tx(
         worker(),
+        0,
+        ActionType::ActorRegister,
+        encode_payload(&ActorRegisterPayload {
+            role: ActorRole::Worker,
+        })
+        .unwrap(),
+    )
+}
+
+fn register_reviewer() -> Transaction {
+    tx(
+        reviewer(),
         0,
         ActionType::ActorRegister,
         encode_payload(&ActorRegisterPayload {
@@ -209,10 +228,27 @@ fn start_task() -> Transaction {
     )
 }
 
-fn submit_work() -> Transaction {
+fn admit_bundle() -> Transaction {
     tx(
         worker(),
         3,
+        ActionType::BundleAdmit,
+        encode_payload(&BundleAdmitPayload {
+            task: task_id(),
+            content_hash: content_hash(),
+        })
+        .unwrap(),
+    )
+}
+
+fn bundle_id() -> H256 {
+    derive_bundle(&task_id(), &worker(), &content_hash())
+}
+
+fn submit_work() -> Transaction {
+    tx(
+        worker(),
+        4,
         ActionType::SubmissionCreate,
         encode_payload(&SubmissionCreatePayload {
             task: task_id(),
@@ -224,6 +260,31 @@ fn submit_work() -> Transaction {
 
 fn submission_id() -> SubmissionId {
     derive_submission(&task_id(), &content_hash())
+}
+
+fn review_lease() -> Transaction {
+    tx(
+        reviewer(),
+        1,
+        ActionType::ReviewLease,
+        encode_payload(&ReviewLeasePayload {
+            submission: submission_id(),
+        })
+        .unwrap(),
+    )
+}
+
+fn review_decide() -> Transaction {
+    tx(
+        reviewer(),
+        2,
+        ActionType::ReviewDecide,
+        encode_payload(&ReviewDecidePayload {
+            submission: submission_id(),
+            decision: ReviewDecision::Accept,
+        })
+        .unwrap(),
+    )
 }
 
 fn accept_final() -> Transaction {
@@ -250,49 +311,59 @@ fn e2e_mvp_happy_path() {
 
     // === Phase 2: Submit transactions to sequencer ===
 
-    // Block 1: Actor registration
+    // Block 1: Actor registration (sponsor + worker)
     sequencer.submit_tx(register_sponsor()).unwrap();
     sequencer.submit_tx(register_worker()).unwrap();
 
-    // Block 2: Capability grants
+    // Block 2: Reviewer registration + first capability grant
+    sequencer.submit_tx(register_reviewer()).unwrap();
     sequencer.submit_tx(grant_claim()).unwrap();
+
+    // Block 3: Second capability grant + project creation
     sequencer.submit_tx(grant_submit()).unwrap();
-
-    // Block 3: Project creation + guide ingestion
     sequencer.submit_tx(create_project()).unwrap();
+
+    // Block 4: Guide ingestion + activation
     sequencer.submit_tx(ingest_guide(4)).unwrap();
-
-    // Block 4: Guide activation + task creation
     sequencer.submit_tx(activate_guide(5)).unwrap();
+
+    // Block 5: Task creation + screening
     sequencer.submit_tx(create_task()).unwrap();
-
-    // Block 5: Owner screens and releases the task
     sequencer.submit_tx(screen_task(7)).unwrap();
+
+    // Block 6: Task release + worker claim
     sequencer.submit_tx(release_task(8)).unwrap();
-
-    // Block 6: Worker claims and starts
     sequencer.submit_tx(claim_task()).unwrap();
-    sequencer.submit_tx(start_task()).unwrap();
 
-    // Block 7: Submission + acceptance
+    // Block 7: Worker starts + admits the work bundle
+    sequencer.submit_tx(start_task()).unwrap();
+    sequencer.submit_tx(admit_bundle()).unwrap();
+
+    // Block 8: Submission + review lease
     sequencer.submit_tx(submit_work()).unwrap();
+    sequencer.submit_tx(review_lease()).unwrap();
+
+    // Block 9: Review decision + sponsor acceptance
+    sequencer.submit_tx(review_decide()).unwrap();
     sequencer.submit_tx(accept_final()).unwrap();
 
     // === Phase 3: Build blocks ===
     let mut blocks = Vec::new();
-    for _ in 0..7 {
+    for _ in 0..9 {
         blocks.push(sequencer.build_block(Some(2)).unwrap());
     }
 
-    // Verify sequencer built 7 blocks with expected tx counts
-    assert_eq!(blocks.len(), 7);
-    assert_eq!(blocks[0].transactions.len(), 2); // register sponsor + worker
-    assert_eq!(blocks[1].transactions.len(), 2); // grant claim + submit
-    assert_eq!(blocks[2].transactions.len(), 2); // project + guide ingest
-    assert_eq!(blocks[3].transactions.len(), 2); // guide activate + task
-    assert_eq!(blocks[4].transactions.len(), 2); // screen + release
-    assert_eq!(blocks[5].transactions.len(), 2); // claim + start
-    assert_eq!(blocks[6].transactions.len(), 2); // submit + accept
+    // Verify sequencer built 9 blocks with expected tx counts
+    assert_eq!(blocks.len(), 9);
+    assert_eq!(blocks[0].transactions.len(), 2); // sponsor + worker register
+    assert_eq!(blocks[1].transactions.len(), 2); // reviewer register + claim grant
+    assert_eq!(blocks[2].transactions.len(), 2); // submit grant + project
+    assert_eq!(blocks[3].transactions.len(), 2); // guide ingest + activate
+    assert_eq!(blocks[4].transactions.len(), 2); // task create + screen
+    assert_eq!(blocks[5].transactions.len(), 2); // release + claim
+    assert_eq!(blocks[6].transactions.len(), 2); // start + bundle admit
+    assert_eq!(blocks[7].transactions.len(), 2); // submit + review lease
+    assert_eq!(blocks[8].transactions.len(), 2); // review decide + accept
 
     // === Phase 4: Node syncs blocks ===
     let mut source = MemoryBlockSource::new();
@@ -304,8 +375,8 @@ fn e2e_mvp_happy_path() {
     let results = node.sync().unwrap();
 
     // Verify all blocks applied
-    assert_eq!(results.len(), 7);
-    assert_eq!(node.tip(), 7);
+    assert_eq!(results.len(), 9);
+    assert_eq!(node.tip(), 9);
 
     // === Phase 5: Verify state convergence ===
     assert_eq!(node.state_root(), sequencer.state().root());
@@ -348,14 +419,24 @@ fn e2e_mvp_happy_path() {
     assert_eq!(task_record.award, 1000);
     assert_eq!(task_record.screened_under, Some(expected_guide));
 
-    // Submission is accepted
+    // Reviewer is an independent registered actor (not author, not sponsor)
+    let reviewer_record = get_actor(state, &reviewer()).unwrap().unwrap();
+    assert_eq!(reviewer_record.role, ActorRole::Worker);
+
+    // The admitted bundle was consumed by the submission
+    let bundle_record = get_bundle(state, &bundle_id()).unwrap().unwrap();
+    assert_eq!(bundle_record.status, BundleStatus::Consumed);
+    assert_eq!(bundle_record.author, worker());
+
+    // Submission is accepted after a positive review
     let submission_record = get_submission(state, &submission_id()).unwrap().unwrap();
     assert_eq!(submission_record.status, SubmissionStatus::Accepted);
     assert_eq!(submission_record.author, worker());
     assert_eq!(submission_record.content_hash, content_hash());
+    assert_eq!(submission_record.accept_reviews, 1);
 
-    // MMR has the acceptance record
-    assert_eq!(state.mmr.size(), 1);
+    // MMR has the review record and the acceptance record
+    assert_eq!(state.mmr.size(), 2);
 
     // === Phase 7: Verify events ===
     let all_events: Vec<&Event> = results.iter().flat_map(|r| &r.events).collect();
@@ -366,6 +447,7 @@ fn e2e_mvp_happy_path() {
         vec![
             "actor.registered", // sponsor
             "actor.registered", // worker
+            "actor.registered", // reviewer
             "actor.granted",    // claim
             "actor.granted",    // submit
             "project.created",
@@ -376,13 +458,16 @@ fn e2e_mvp_happy_path() {
             "task.released",
             "task.claimed",
             "task.started",
+            "bundle.admitted",
             "submission.created",
+            "review.leased",
+            "review.decided",
             "accept.finalized",
         ]
     );
 
     // Events have correct block numbers
-    for (idx, expected_block) in [1u64, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7]
+    for (idx, expected_block) in [1u64, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9]
         .into_iter()
         .enumerate()
     {
@@ -390,10 +475,13 @@ fn e2e_mvp_happy_path() {
     }
 
     println!("✓ E2E MVP happy path completed successfully!");
-    println!("  - Sequencer built 7 blocks with 14 transactions");
+    println!("  - Sequencer built 9 blocks with 18 transactions");
     println!("  - Node verified and synced all blocks");
     println!("  - State roots converged: {}", node.state_root().hash());
-    println!("  - Full lifecycle: Draft → Screened → Released → Claimed → Started → Completed");
+    println!(
+        "  - Full lifecycle: Draft → Screened → Released → Claimed → Started → \
+         Submitted → Reviewed → Completed"
+    );
 }
 
 /// Verify deterministic replay: two independent runs produce identical state.
@@ -406,6 +494,7 @@ fn e2e_deterministic_replay() {
         for tx in [
             register_sponsor(),
             register_worker(),
+            register_reviewer(),
             grant_claim(),
             grant_submit(),
             create_project(),
@@ -416,7 +505,10 @@ fn e2e_deterministic_replay() {
             release_task(8),
             claim_task(),
             start_task(),
+            admit_bundle(),
             submit_work(),
+            review_lease(),
+            review_decide(),
             accept_final(),
         ] {
             sequencer.submit_tx(tx).unwrap();
@@ -429,7 +521,7 @@ fn e2e_deterministic_replay() {
             let block = sequencer.build_block(Some(2)).unwrap();
             header_hashes.push(workstream_sequencer::header_hash(&block.header));
             blocks.push(block);
-            if blocks.len() >= 7 {
+            if blocks.len() >= 9 {
                 break;
             }
         }
@@ -471,6 +563,7 @@ fn e2e_varying_block_sizes() {
     for tx in [
         register_sponsor(),
         register_worker(),
+        register_reviewer(),
         grant_claim(),
         grant_submit(),
         create_project(),
@@ -481,15 +574,18 @@ fn e2e_varying_block_sizes() {
         release_task(8),
         claim_task(),
         start_task(),
+        admit_bundle(),
         submit_work(),
+        review_lease(),
+        review_decide(),
         accept_final(),
     ] {
         sequencer.submit_tx(tx).unwrap();
     }
 
-    // Build with varying batch sizes: 1, 3, 4, 2
+    // Build with varying batch sizes summing to all 18 transactions
     let mut blocks = Vec::new();
-    for batch_size in [1, 3, 4, 2] {
+    for batch_size in [1, 3, 4, 2, 5, 3] {
         if sequencer.pending() > 0 {
             blocks.push(sequencer.build_block(Some(batch_size)).unwrap());
         }
@@ -509,7 +605,8 @@ fn e2e_varying_block_sizes() {
 
     // Verify block tx counts
     let tx_counts: Vec<usize> = blocks.iter().map(|b| b.transactions.len()).collect();
-    assert_eq!(tx_counts, vec![1, 3, 4, 2]);
+    assert_eq!(tx_counts, vec![1, 3, 4, 2, 5, 3]);
+    assert_eq!(tx_counts.iter().sum::<usize>(), 18);
 
     println!("✓ Varying block sizes: {:?} → state converged", tx_counts);
 }

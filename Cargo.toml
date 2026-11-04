@@ -36,8 +36,11 @@ sha2 = "0.11"
 sha3 = "0.12"
 blake3 = "1.5"
 hex = "0.4"
-rand = "0.10"
+rand = { version = "0.10", features = ["thread_rng"] }
 rand_core = "0.10"
+# Signatures
+k256 = { version = "0.14", features = ["ecdsa", "sha256"] }
+ed25519-dalek = { version = "3.0", features = ["rand_core"] }
 
 # Types & utils
 toml = "0.8"

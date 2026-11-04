@@ -15,6 +15,9 @@ blake3 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
+# Signatures
+k256 = { workspace = true }
+ed25519-dalek = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

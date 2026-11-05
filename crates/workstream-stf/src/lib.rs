@@ -15,11 +15,12 @@ use workstream_tx::TxValidator;
 pub mod handlers;
 
 pub use handlers::{
-    derive_project, derive_submission, derive_task, get_actor, get_nonce, get_project,
-    get_submission, get_task, AcceptanceRecord, ActorGrantPayload, ActorRecord,
-    ActorRegisterPayload, ActorRole, Capability, ProjectCreatePayload, ProjectRecord,
-    SubmissionCreatePayload, SubmissionIdPayload, SubmissionRecord, SubmissionStatus,
-    TaskCreatePayload, TaskIdPayload, TaskRecord, TaskStatus,
+    derive_project, derive_submission, derive_task, get_actor, get_nonce, get_nullifier,
+    get_project, get_submission, get_task, AcceptanceRecord, ActorGrantPayload, ActorRecord,
+    ActorRegisterPayload, ActorRole, Capability, NullifierRecord, ProjectCreatePayload,
+    ProjectRecord, SubmissionCreatePayload, SubmissionIdPayload, SubmissionRecord,
+    SubmissionStatus, TaskCreatePayload, TaskIdPayload, TaskRecord, TaskStatus, NULLIFIER_ACCEPT,
+    NULLIFIER_CLAIM,
 };
 
 /// Encode an action payload for inclusion in a transaction.
@@ -1355,6 +1356,181 @@ mod mvp_handler_tests {
 
         assert_eq!(handlers::get_nonce(&state, &sponsor(), 0).unwrap(), 1);
         assert_eq!(handlers::get_nonce(&state, &sponsor(), 1).unwrap(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Nullifiers (issue #21): one-time actions are committed to a permanent
+    // set independent of the mutable status machines.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn claim_nullifier_is_bound_once_with_audit_details() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, project, task) = setup_task_ready(&mut book);
+
+        stf.execute_tx(&mut state, &claim_tx(&mut book, task))
+            .unwrap();
+
+        // The audit record names the family, the target id, and the claimant.
+        let record = handlers::get_nullifier(&state, handlers::NULLIFIER_CLAIM, &task)
+            .unwrap()
+            .expect("claim must bind its nullifier");
+        assert_eq!(record.family, handlers::NULLIFIER_CLAIM.to_vec());
+        assert_eq!(record.target, task);
+        assert_eq!(record.by, worker());
+
+        // Domain separation: other families and other targets were not
+        // consumed by this action.
+        assert!(
+            handlers::get_nullifier(&state, handlers::NULLIFIER_ACCEPT, &task)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            handlers::get_nullifier(&state, handlers::NULLIFIER_CLAIM, &project)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn second_claim_rejected_without_state_change() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, task) = setup_task_ready(&mut book);
+        stf.execute_tx(&mut state, &claim_tx(&mut book, task))
+            .unwrap();
+        let root_after_claim = state.root();
+
+        // worker2 holds the same ClaimWork capability. The status machine
+        // rejects here, with the nullifier backing it up (see the
+        // regression tests below for the nullifier-only paths).
+        let second = tx(
+            &mut book,
+            worker2(),
+            ActionType::TaskClaim,
+            id_payload(task),
+        );
+        let err = stf.execute_tx(&mut state, &second).unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)));
+        assert_eq!(
+            state.root(),
+            root_after_claim,
+            "rejected claim must not mutate state"
+        );
+        assert_eq!(
+            handlers::get_task(&state, &task).unwrap().unwrap().assignee,
+            Some(worker())
+        );
+    }
+
+    /// Out-of-band rewrite of a task record, simulating a (hypothetical)
+    /// future bug or migration that reverts status fields.
+    fn regress_task(
+        state: &mut State,
+        task: TaskId,
+        status: TaskStatus,
+        assignee: Option<AccountId>,
+    ) {
+        let mut record = handlers::get_task(state, &task).unwrap().unwrap();
+        record.status = status;
+        record.assignee = assignee;
+        handlers::store_task(state, task, &record).unwrap();
+    }
+
+    #[test]
+    fn claim_nullifier_survives_status_regression() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, task) = setup_task_ready(&mut book);
+        stf.execute_tx(&mut state, &claim_tx(&mut book, task))
+            .unwrap();
+
+        // Revert the task to its pre-claim shape, bypassing the handlers:
+        // the status machine alone would now accept a claim.
+        regress_task(&mut state, task, TaskStatus::Created, None);
+
+        // The nullifier set — not the status field — is the last line of
+        // defense: the second claim still fails.
+        let retry = tx(
+            &mut book,
+            worker2(),
+            ActionType::TaskClaim,
+            id_payload(task),
+        );
+        let err = stf.execute_tx(&mut state, &retry).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidTransition(ref msg) if msg.contains("nullifier")),
+            "expected the nullifier check, got {err:?}"
+        );
+        assert!(
+            handlers::get_task(&state, &task)
+                .unwrap()
+                .unwrap()
+                .assignee
+                .is_none(),
+            "the nullifier rejection must not mutate the task"
+        );
+    }
+
+    #[test]
+    fn accept_nullifier_survives_status_regression() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, task) = setup_task_ready(&mut book);
+        stf.execute_tx(&mut state, &claim_tx(&mut book, task))
+            .unwrap();
+        stf.execute_tx(&mut state, &start_tx(&mut book, task))
+            .unwrap();
+        stf.execute_tx(&mut state, &submit_tx(&mut book, task, content_hash(1)))
+            .unwrap();
+        let submission = submission_id(task, content_hash(1));
+        stf.execute_tx(&mut state, &accept_tx(&mut book, submission))
+            .unwrap();
+        let mmr_size = state.mmr.size();
+
+        // Out-of-band revert of both the submission and the task, making
+        // the status machine accept again. The acceptance nullifier must
+        // refuse the payout's re-execution regardless.
+        let mut regressed = handlers::get_submission(&state, &submission)
+            .unwrap()
+            .unwrap();
+        regressed.status = SubmissionStatus::Pending;
+        handlers::store_submission(&mut state, submission, &regressed).unwrap();
+        regress_task(&mut state, task, TaskStatus::Started, Some(worker()));
+
+        // Baseline for the no-mutation check: after the out-of-band
+        // reverts, before the rejected re-acceptance.
+        let root_before_retry = state.root();
+
+        let re_accept = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::AcceptFinal,
+            submission_payload(submission),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(re_accept, Error::InvalidTransition(ref msg) if msg.contains("nullifier")),
+            "expected the nullifier check, got {re_accept:?}"
+        );
+        assert_eq!(
+            state.root(),
+            root_before_retry,
+            "rejected re-acceptance must not mutate state"
+        );
+        assert_eq!(
+            state.mmr.size(),
+            mmr_size,
+            "the immutable acceptance trail grows only on real acceptance"
+        );
+
+        // The audit record exists exactly once, attributed to the sponsor.
+        let record = handlers::get_nullifier(&state, handlers::NULLIFIER_ACCEPT, &submission)
+            .unwrap()
+            .expect("acceptance must bind its nullifier");
+        assert_eq!(record.family, handlers::NULLIFIER_ACCEPT.to_vec());
+        assert_eq!(record.target, submission);
+        assert_eq!(record.by, sponsor());
     }
 }
 

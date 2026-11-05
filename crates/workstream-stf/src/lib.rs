@@ -16,9 +16,10 @@ pub(crate) mod authz;
 pub mod handlers;
 
 pub use handlers::{
-    derive_project, derive_submission, derive_task, get_actor, get_nonce, get_nullifier,
-    get_project, get_submission, get_task, AcceptanceRecord, ActorGrantPayload, ActorRecord,
-    ActorRegisterPayload, ActorRole, Capability, Grant, NullifierRecord, ProjectCreatePayload,
+    derive_guide, derive_project, derive_submission, derive_task, get_active_guide, get_actor,
+    get_guide, get_nonce, get_nullifier, get_project, get_submission, get_task, AcceptanceRecord,
+    ActorGrantPayload, ActorRecord, ActorRegisterPayload, ActorRole, Capability, Grant,
+    GuideActivatePayload, GuideIngestPayload, GuideRecord, NullifierRecord, ProjectCreatePayload,
     ProjectRecord, SubmissionCreatePayload, SubmissionIdPayload, SubmissionRecord,
     SubmissionStatus, TaskCreatePayload, TaskIdPayload, TaskRecord, TaskStatus, NULLIFIER_ACCEPT,
     NULLIFIER_CLAIM,
@@ -184,6 +185,8 @@ impl StateTransitionFunction {
             ActionType::ActorRegister => decode::<h::ActorRegisterPayload>(action),
             ActionType::ActorGrant => decode::<h::ActorGrantPayload>(action),
             ActionType::ProjectCreate => decode::<h::ProjectCreatePayload>(action),
+            ActionType::GuideIngest => decode::<h::GuideIngestPayload>(action),
+            ActionType::GuideActivate => decode::<h::GuideActivatePayload>(action),
             ActionType::TaskCreate => decode::<h::TaskCreatePayload>(action),
             ActionType::TaskClaim | ActionType::TaskStart => decode::<h::TaskIdPayload>(action),
             ActionType::SubmissionCreate => decode::<h::SubmissionCreatePayload>(action),
@@ -207,6 +210,8 @@ impl StateTransitionFunction {
             ActionType::ActorRegister => handlers::handle_actor_register(state, account, payload)?,
             ActionType::ActorGrant => handlers::handle_actor_grant(state, account, payload)?,
             ActionType::ProjectCreate => handlers::handle_project_create(state, account, payload)?,
+            ActionType::GuideIngest => handlers::handle_guide_ingest(state, account, payload)?,
+            ActionType::GuideActivate => handlers::handle_guide_activate(state, account, payload)?,
             ActionType::TaskCreate => handlers::handle_task_create(state, account, payload)?,
             ActionType::TaskClaim => handlers::handle_task_claim(state, account, payload)?,
             ActionType::TaskStart => handlers::handle_task_start(state, account, payload)?,
@@ -1863,6 +1868,268 @@ mod mvp_handler_tests {
             capability: Capability::SubmitWork,
             grantor: sponsor(),
         }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Guides (issue #23): content-addressed, strictly lineage-ordered
+    // project guides with an exactly-one active-version pointer.
+    // -----------------------------------------------------------------------
+
+    fn guide_ingest_payload(project: ProjectId, version: u32, content: H256) -> Vec<u8> {
+        encode_payload(&GuideIngestPayload {
+            project,
+            version,
+            content_hash: content,
+        })
+        .unwrap()
+    }
+
+    fn guide_activate_payload(project: ProjectId, guide: GuideId) -> Vec<u8> {
+        encode_payload(&GuideActivatePayload { project, guide }).unwrap()
+    }
+
+    #[test]
+    fn guide_lineage_is_strictly_ordered() {
+        let mut book = NonceBook::default();
+        let stf = mvp_stf();
+        let mut state = State::new();
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Sponsor),
+        );
+        let project = create_project(&stf, &mut state, &mut book, sponsor());
+
+        // Version 1 first.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::GuideIngest,
+            guide_ingest_payload(project, 1, content_hash(1)),
+        );
+        // Version 2 next; version 4 (a skip) is refused.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::GuideIngest,
+            guide_ingest_payload(project, 2, content_hash(2)),
+        );
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::GuideIngest,
+            guide_ingest_payload(project, 4, content_hash(3)),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidTransition(ref m) if m.contains("must be")),
+            "expected version-ordering refusal, got {err:?}"
+        );
+
+        // Continuing the chain works: v3 follows v2.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::GuideIngest,
+            guide_ingest_payload(project, 3, content_hash(4)),
+        );
+        assert_eq!(
+            handlers::latest_guide_version(&state, &project).unwrap(),
+            Some(3)
+        );
+
+        // A (project, version) pair can never be re-ingested — even with
+        // different content.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::GuideIngest,
+            guide_ingest_payload(project, 2, content_hash(9)),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(ref m) if m.contains("must be")));
+    }
+
+    #[test]
+    fn guide_ingest_requires_project_owner() {
+        let mut book = NonceBook::default();
+        let stf = mvp_stf();
+        let mut state = State::new();
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Sponsor),
+        );
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor2(),
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Sponsor),
+        );
+        let project = create_project(&stf, &mut state, &mut book, sponsor());
+
+        // A different sponsor cannot ingest into the project.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor2(),
+            ActionType::GuideIngest,
+            guide_ingest_payload(project, 1, content_hash(1)),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(ref m) if m.contains("owner")));
+
+        // A worker can never ingest.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Worker),
+        );
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::GuideIngest,
+            guide_ingest_payload(project, 1, content_hash(1)),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)));
+
+        // The owner can.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::GuideIngest,
+            guide_ingest_payload(project, 1, content_hash(1)),
+        );
+    }
+
+    #[test]
+    fn guide_activation_flow() {
+        let mut book = NonceBook::default();
+        let stf = mvp_stf();
+        let mut state = State::new();
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Sponsor),
+        );
+        let project = create_project(&stf, &mut state, &mut book, sponsor());
+
+        // No active guide exists before the first activation.
+        assert_eq!(handlers::get_active_guide(&state, &project).unwrap(), None);
+
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::GuideIngest,
+            guide_ingest_payload(project, 1, content_hash(1)),
+        );
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::GuideIngest,
+            guide_ingest_payload(project, 2, content_hash(2)),
+        );
+        let v1 = handlers::derive_guide(&project, 1, &content_hash(1));
+        let v2 = handlers::derive_guide(&project, 2, &content_hash(2));
+
+        // Activate v1.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::GuideActivate,
+            guide_activate_payload(project, v1),
+        );
+        assert_eq!(
+            handlers::get_active_guide(&state, &project).unwrap(),
+            Some(v1)
+        );
+
+        // A project's guide cannot activate another project's version.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::ProjectCreate,
+            project_payload("other-project"),
+        );
+        let other = handlers::derive_project(&sponsor(), "other-project");
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::GuideActivate,
+            guide_activate_payload(other, v2),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(ref m) if m.contains("does not belong")));
+
+        // Re-activation replaces the pointer (still exactly one active).
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::GuideActivate,
+            guide_activate_payload(project, v2),
+        );
+        assert_eq!(
+            handlers::get_active_guide(&state, &project).unwrap(),
+            Some(v2)
+        );
+
+        // An unknown guide id is a NotFound, not a state change.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::GuideActivate,
+            guide_activate_payload(project, content_hash(0xEE)),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)));
+        assert_eq!(
+            handlers::get_active_guide(&state, &project).unwrap(),
+            Some(v2)
+        );
     }
 }
 

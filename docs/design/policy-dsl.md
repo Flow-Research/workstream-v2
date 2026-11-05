@@ -60,7 +60,7 @@ The textual form is for humans and off-chain tooling. Consensus operates on
 bytecode only.
 
 ```ebnf
-policy      = "policy", string, "{", oracle*, "allow", expr, "}" ;
+policy      = "policy", string, "{", oracle*, "allow", expr, [ ";" ], "}" ;
 oracle      = "oracle", ident, ":", type, ";" ;
 type        = "int" | "bool" | "bytes" ;
 
@@ -102,7 +102,7 @@ list        = "[", expr, { ",", expr }, "]" ;
 | `int` | `i64` | Checked arithmetic; overflow is an evaluation error. |
 | `bool` | `bool` | Result of comparisons and boolean operators. |
 | `bytes` | `Vec<u8>` (≤ 64) | Equality only; no ordering in v1. |
-| `list<T>` | homogeneous, non-empty, ≤ 256 elements | Internal only: list literals, `in`, `count`. Cannot be an oracle type or the final result. |
+| `list<T>` | homogeneous, non-empty, ≤ 256 elements; lists do not nest | Internal only: list literals, `in`, `count`. Cannot be an oracle type or the final result. |
 
 The `allow` expression must have type `bool`. A policy that produces any other
 type is rejected at compile time.

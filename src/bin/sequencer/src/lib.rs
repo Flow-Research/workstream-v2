@@ -414,10 +414,12 @@ mod tests {
         )
     }
 
-    fn project_tx() -> Transaction {
+    /// Project-create tx for the sponsor. The `seq` must match the account's
+    /// next expected nonce (0 register, 1 grant, 2 project in the full flow).
+    fn project_tx(seq: u64) -> Transaction {
         seq_tx(
             account(0x11),
-            2,
+            seq,
             ActionType::ProjectCreate,
             encode_payload(&ProjectCreatePayload {
                 title: "chain-project".to_string(),
@@ -461,11 +463,12 @@ mod tests {
         sequencer
             .submit_tx(grant_tx(Capability::ClaimWork))
             .unwrap();
-        // well-formed but references a nonexistent task: dropped at execution
+        // well-formed with a valid next nonce (0x22 consumed seq 0 in this
+        // block) but references a nonexistent task: dropped at execution
         sequencer
             .submit_tx(seq_tx(
                 account(0x22),
-                9,
+                1,
                 ActionType::TaskClaim,
                 encode_payload(&workstream_stf::TaskIdPayload { task: H256::ZERO }).unwrap(),
             ))
@@ -496,7 +499,9 @@ mod tests {
         // and equals the committed state's root
         assert_eq!(with_tx.header.state_root, sequencer.state().root());
 
-        sequencer.submit_tx(project_tx()).unwrap();
+        // the sponsor has consumed seq 0 (register); the next valid nonce
+        // under replay protection is exactly 1 — a gap must not be accepted.
+        sequencer.submit_tx(project_tx(1)).unwrap();
         let project_block = sequencer.build_block(None).unwrap();
         assert_ne!(
             project_block.header.state_root.hash(),

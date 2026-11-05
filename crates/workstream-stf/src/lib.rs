@@ -15,10 +15,11 @@ use workstream_tx::TxValidator;
 pub mod handlers;
 
 pub use handlers::{
-    derive_project, derive_submission, derive_task, get_actor, get_project, get_submission,
-    get_task, AcceptanceRecord, ActorGrantPayload, ActorRecord, ActorRegisterPayload, ActorRole,
-    Capability, ProjectCreatePayload, ProjectRecord, SubmissionCreatePayload, SubmissionIdPayload,
-    SubmissionRecord, SubmissionStatus, TaskCreatePayload, TaskIdPayload, TaskRecord, TaskStatus,
+    derive_project, derive_submission, derive_task, get_actor, get_nonce, get_project,
+    get_submission, get_task, AcceptanceRecord, ActorGrantPayload, ActorRecord,
+    ActorRegisterPayload, ActorRole, Capability, ProjectCreatePayload, ProjectRecord,
+    SubmissionCreatePayload, SubmissionIdPayload, SubmissionRecord, SubmissionStatus,
+    TaskCreatePayload, TaskIdPayload, TaskRecord, TaskStatus,
 };
 
 /// Encode an action payload for inclusion in a transaction.
@@ -87,33 +88,61 @@ impl StateTransitionFunction {
     /// Execute a single transaction under the given fork context
     ///
     /// Contract: the caller (sequencer #16 / node #32) must only supply
-    /// transactions that are valid for the current state. Handlers apply
-    /// actions sequentially without rollback; a mid-transaction failure
-    /// leaves earlier actions applied and must not occur inside executed
-    /// blocks. Payload well-formedness is pre-checked here so malformed
-    /// payloads abort before any state mutation.
+    /// transactions that are valid for the current state. Execution is atomic:
+    /// actions run against an isolated draft of the state, and the shared
+    /// state is replaced only when every action succeeds — a mid-transaction
+    /// failure discards the draft, so no partial changes leak into live state
+    /// while the transaction's nonce stays reusable for a retry. Payload
+    /// well-formedness is pre-checked here so malformed payloads abort before
+    /// any state mutation.
     pub fn execute_tx(&self, state: &mut State, tx: &Transaction) -> Result<Vec<Event>> {
         debug!("Executing transaction for account {:?}", tx.account);
 
-        // Validate transaction
+        // Validate transaction (structural checks: non-empty actions, fee).
         self.tx_validator.validate(tx)?;
 
-        // Check nonce (simplified)
-        // TODO: Implement nonce tracking
+        // Replay protection: the nonce sequence must be exactly the next one
+        // expected for this (account, key_id). A lower value is a replay of an
+        // already-executed transaction; a higher value leaves a gap that would
+        // permit out-of-order execution. Both are rejected before any mutation.
+        let expected = handlers::get_nonce(state, &tx.account, tx.nonce.key_id)?;
+        if tx.nonce.seq != expected {
+            return Err(Error::Transaction(format!(
+                "nonce mismatch for account {:?} key {}: got seq {}, expected {}",
+                tx.account, tx.nonce.key_id, tx.nonce.seq, expected
+            )));
+        }
 
         // Pre-check: every action payload must decode for its action type
         for action in &tx.actions {
             self.decode_action_payload(action)?;
         }
 
-        // Execute all actions atomically
+        // Execute all actions atomically against an isolated draft. If any
+        // action fails, the draft is dropped and the shared state — including
+        // the nonce — is left exactly as it was: no partial changes are
+        // committed and the transaction's nonce remains reusable.
+        let mut draft = state.clone();
         let mut events = Vec::new();
         for (idx, action) in tx.actions.iter().enumerate() {
             debug!("Executing action {}: {:?}", idx, action.action_type);
-            let action_events = self.execute_action(state, tx, action)?;
+            let action_events = self.execute_action(&mut draft, tx, action)?;
             events.extend(action_events);
         }
 
+        // All actions succeeded: advance the nonce so this exact transaction can
+        // never be replayed. Done last (and only on success) so a failed
+        // transaction does not burn its nonce — no DoS via nonce exhaustion.
+        let next = expected.checked_add(1).ok_or_else(|| {
+            Error::Transaction(format!(
+                "nonce exhausted for account {:?} key {}",
+                tx.account, tx.nonce.key_id
+            ))
+        })?;
+        handlers::set_nonce(&mut draft, &tx.account, tx.nonce.key_id, next)?;
+
+        // Commit: replace the shared state only after full success.
+        *state = draft;
         Ok(events)
     }
 
@@ -337,11 +366,35 @@ mod mvp_handler_tests {
         StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap()).unwrap()
     }
 
-    fn tx(acct: AccountId, seq: u64, t: ActionType, payload: Vec<u8>) -> Transaction {
+    /// Hands out strictly-increasing nonces per account so tests build valid,
+    /// replay-free transactions without manual bookkeeping. A fresh book models
+    /// a fresh chain (every account starts at seq 0).
+    #[derive(Default)]
+    struct NonceBook {
+        map: std::collections::HashMap<AccountId, u64>,
+    }
+
+    impl NonceBook {
+        fn next(&mut self, acct: AccountId) -> u64 {
+            let seq = *self.map.get(&acct).unwrap_or(&0);
+            self.map.insert(acct, seq + 1);
+            seq
+        }
+    }
+
+    /// Build a transaction with an explicit (key_id, seq) nonce. Used by the
+    /// nonce-specific tests that need precise control over the sequence value.
+    fn raw_tx(
+        acct: AccountId,
+        key_id: u16,
+        seq: u64,
+        t: ActionType,
+        payload: Vec<u8>,
+    ) -> Transaction {
         TxBuilder::new()
             .chain_id(1)
             .account(acct)
-            .nonce(0, seq)
+            .nonce(key_id, seq)
             .add_action(t, payload)
             .fee(FeeSpec {
                 payer: FeePayer::Self_,
@@ -352,78 +405,207 @@ mod mvp_handler_tests {
             .unwrap()
     }
 
-    fn register(acct: AccountId, role: ActorRole) -> Transaction {
-        let payload = encode_payload(&ActorRegisterPayload { role }).unwrap();
-        tx(acct, 0, ActionType::ActorRegister, payload)
+    /// Build a transaction with the next valid nonce for `acct` (key_id 0).
+    fn tx(book: &mut NonceBook, acct: AccountId, t: ActionType, payload: Vec<u8>) -> Transaction {
+        raw_tx(acct, 0, book.next(acct), t, payload)
     }
 
-    fn grant(to: AccountId, cap: Capability) -> Transaction {
-        let payload = encode_payload(&ActorGrantPayload {
-            grantee: to,
-            capability: cap,
+    /// Execute a transaction with the next valid nonce for `acct`.
+    ///
+    /// The STF does not consume a nonce when execution fails (no DoS via nonce
+    /// exhaustion), so on error we roll the book back to stay in sync — a retry
+    /// can reuse the same sequence value. Returns the events or the error.
+    fn attempt(
+        stf: &StateTransitionFunction,
+        state: &mut State,
+        book: &mut NonceBook,
+        acct: AccountId,
+        t: ActionType,
+        payload: Vec<u8>,
+    ) -> Result<Vec<Event>> {
+        let seq = book.next(acct);
+        let tx = raw_tx(acct, 0, seq, t, payload);
+        match stf.execute_tx(state, &tx) {
+            Ok(events) => Ok(events),
+            Err(e) => {
+                *book.map.get_mut(&acct).unwrap() = seq; // nonce not consumed on failure
+                Err(e)
+            }
+        }
+    }
+
+    /// Execute a transaction and return its events (panics on error).
+    fn run(
+        stf: &StateTransitionFunction,
+        state: &mut State,
+        book: &mut NonceBook,
+        acct: AccountId,
+        t: ActionType,
+        payload: Vec<u8>,
+    ) -> Vec<Event> {
+        attempt(stf, state, book, acct, t, payload).unwrap()
+    }
+
+    fn register_payload(role: ActorRole) -> Vec<u8> {
+        encode_payload(&ActorRegisterPayload { role }).unwrap()
+    }
+
+    fn grant_payload(grantee: AccountId, capability: Capability) -> Vec<u8> {
+        encode_payload(&ActorGrantPayload {
+            grantee,
+            capability,
         })
-        .unwrap();
-        tx(sponsor(), 0, ActionType::ActorGrant, payload)
+        .unwrap()
+    }
+
+    fn project_payload(title: &str) -> Vec<u8> {
+        encode_payload(&ProjectCreatePayload {
+            title: title.to_string(),
+        })
+        .unwrap()
+    }
+
+    fn task_payload(project: ProjectId, title: &str, award: u128) -> Vec<u8> {
+        encode_payload(&TaskCreatePayload {
+            project,
+            title: title.to_string(),
+            award,
+        })
+        .unwrap()
+    }
+
+    fn id_payload(task: TaskId) -> Vec<u8> {
+        encode_payload(&TaskIdPayload { task }).unwrap()
+    }
+
+    fn submit_payload(task: TaskId, content: H256) -> Vec<u8> {
+        encode_payload(&SubmissionCreatePayload {
+            task,
+            content_hash: content,
+        })
+        .unwrap()
+    }
+
+    fn submission_payload(submission: SubmissionId) -> Vec<u8> {
+        encode_payload(&SubmissionIdPayload { submission }).unwrap()
+    }
+
+    fn register(book: &mut NonceBook, acct: AccountId, role: ActorRole) -> Transaction {
+        tx(
+            book,
+            acct,
+            ActionType::ActorRegister,
+            register_payload(role),
+        )
+    }
+
+    fn grant(book: &mut NonceBook, to: AccountId, cap: Capability) -> Transaction {
+        tx(
+            book,
+            sponsor(),
+            ActionType::ActorGrant,
+            grant_payload(to, cap),
+        )
     }
 
     fn create_project(
         stf: &StateTransitionFunction,
         state: &mut State,
+        book: &mut NonceBook,
         acct: AccountId,
     ) -> ProjectId {
-        let payload = encode_payload(&ProjectCreatePayload {
-            title: TITLE.to_string(),
-        })
-        .unwrap();
-        let project_tx = tx(acct, 1, ActionType::ProjectCreate, payload);
-        stf.execute_tx(state, &project_tx).unwrap();
+        run(
+            stf,
+            state,
+            book,
+            acct,
+            ActionType::ProjectCreate,
+            project_payload(TITLE),
+        );
         handlers::derive_project(&acct, TITLE)
     }
 
     fn create_task(
         stf: &StateTransitionFunction,
         state: &mut State,
+        book: &mut NonceBook,
         acct: AccountId,
         project: ProjectId,
     ) -> TaskId {
-        let payload = encode_payload(&TaskCreatePayload {
-            project,
-            title: "task-one".to_string(),
-            award: 100,
-        })
-        .unwrap();
-        let task_tx = tx(acct, 2, ActionType::TaskCreate, payload);
-        stf.execute_tx(state, &task_tx).unwrap();
+        run(
+            stf,
+            state,
+            book,
+            acct,
+            ActionType::TaskCreate,
+            task_payload(project, "task-one", 100),
+        );
         handlers::derive_task(&project, "task-one")
     }
 
-    fn setup_task_ready() -> (StateTransitionFunction, State, ProjectId, TaskId) {
+    fn setup_task_ready(
+        book: &mut NonceBook,
+    ) -> (StateTransitionFunction, State, ProjectId, TaskId) {
         let stf = mvp_stf();
         let mut state = State::new();
 
         // Sponsors + workers
-        stf.execute_tx(&mut state, &register(sponsor(), ActorRole::Sponsor))
-            .unwrap();
-        stf.execute_tx(&mut state, &register(sponsor2(), ActorRole::Sponsor))
-            .unwrap();
-        stf.execute_tx(&mut state, &register(worker(), ActorRole::Worker))
-            .unwrap();
-        stf.execute_tx(&mut state, &register(worker2(), ActorRole::Worker))
-            .unwrap();
+        run(
+            &stf,
+            &mut state,
+            book,
+            sponsor(),
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Sponsor),
+        );
+        run(
+            &stf,
+            &mut state,
+            book,
+            sponsor2(),
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Sponsor),
+        );
+        run(
+            &stf,
+            &mut state,
+            book,
+            worker(),
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Worker),
+        );
+        run(
+            &stf,
+            &mut state,
+            book,
+            worker2(),
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Worker),
+        );
 
-        // Grant the worker capabilities
-        stf.execute_tx(&mut state, &grant(worker(), Capability::ClaimWork))
-            .unwrap();
-        stf.execute_tx(&mut state, &grant(worker(), Capability::SubmitWork))
-            .unwrap();
-        stf.execute_tx(&mut state, &grant(worker2(), Capability::ClaimWork))
-            .unwrap();
-        stf.execute_tx(&mut state, &grant(worker2(), Capability::SubmitWork))
-            .unwrap();
+        // Grant both workers their capabilities (the sponsor issues all grants)
+        for grantee in [worker(), worker2()] {
+            run(
+                &stf,
+                &mut state,
+                book,
+                sponsor(),
+                ActionType::ActorGrant,
+                grant_payload(grantee, Capability::ClaimWork),
+            );
+            run(
+                &stf,
+                &mut state,
+                book,
+                sponsor(),
+                ActionType::ActorGrant,
+                grant_payload(grantee, Capability::SubmitWork),
+            );
+        }
 
         // Project + task
-        let project = create_project(&stf, &mut state, sponsor());
-        let task = create_task(&stf, &mut state, sponsor(), project);
+        let project = create_project(&stf, &mut state, book, sponsor());
+        let task = create_task(&stf, &mut state, book, sponsor(), project);
         (stf, state, project, task)
     }
 
@@ -446,43 +628,29 @@ mod mvp_handler_tests {
         }
     }
 
-    fn claim_tx(task: TaskId) -> Transaction {
-        tx(
-            worker(),
-            1,
-            ActionType::TaskClaim,
-            encode_payload(&TaskIdPayload { task }).unwrap(),
-        )
+    fn claim_tx(book: &mut NonceBook, task: TaskId) -> Transaction {
+        tx(book, worker(), ActionType::TaskClaim, id_payload(task))
     }
 
-    fn start_tx(task: TaskId) -> Transaction {
-        tx(
-            worker(),
-            2,
-            ActionType::TaskStart,
-            encode_payload(&TaskIdPayload { task }).unwrap(),
-        )
+    fn start_tx(book: &mut NonceBook, task: TaskId) -> Transaction {
+        tx(book, worker(), ActionType::TaskStart, id_payload(task))
     }
 
-    fn submit_tx(task: TaskId, content: H256) -> Transaction {
+    fn submit_tx(book: &mut NonceBook, task: TaskId, content: H256) -> Transaction {
         tx(
+            book,
             worker(),
-            3,
             ActionType::SubmissionCreate,
-            encode_payload(&SubmissionCreatePayload {
-                task,
-                content_hash: content,
-            })
-            .unwrap(),
+            submit_payload(task, content),
         )
     }
 
-    fn accept_tx(submission: SubmissionId) -> Transaction {
+    fn accept_tx(book: &mut NonceBook, submission: SubmissionId) -> Transaction {
         tx(
+            book,
             sponsor(),
-            3,
             ActionType::AcceptFinal,
-            encode_payload(&SubmissionIdPayload { submission }).unwrap(),
+            submission_payload(submission),
         )
     }
 
@@ -495,6 +663,7 @@ mod mvp_handler_tests {
         let stf = mvp_stf();
         let mut state = State::new();
         let initial_root = state.root().hash();
+        let mut book = NonceBook::default();
 
         // Block 0: identity
         let events = stf
@@ -504,8 +673,8 @@ mod mvp_handler_tests {
                     0,
                     H256::ZERO,
                     vec![
-                        register(sponsor(), ActorRole::Sponsor),
-                        register(worker(), ActorRole::Worker),
+                        register(&mut book, sponsor(), ActorRole::Sponsor),
+                        register(&mut book, worker(), ActorRole::Worker),
                     ],
                 ),
             )
@@ -525,8 +694,8 @@ mod mvp_handler_tests {
                     1,
                     initial_root,
                     vec![
-                        grant(worker(), Capability::ClaimWork),
-                        grant(worker(), Capability::SubmitWork),
+                        grant(&mut book, worker(), Capability::ClaimWork),
+                        grant(&mut book, worker(), Capability::SubmitWork),
                     ],
                 ),
             )
@@ -545,13 +714,10 @@ mod mvp_handler_tests {
                     2,
                     root_after_grants,
                     vec![tx(
+                        &mut book,
                         sponsor(),
-                        0,
                         ActionType::ProjectCreate,
-                        encode_payload(&ProjectCreatePayload {
-                            title: TITLE.to_string(),
-                        })
-                        .unwrap(),
+                        project_payload(TITLE),
                     )],
                 ),
             )
@@ -568,15 +734,10 @@ mod mvp_handler_tests {
                     3,
                     parent_root,
                     vec![tx(
+                        &mut book,
                         sponsor(),
-                        1,
                         ActionType::TaskCreate,
-                        encode_payload(&TaskCreatePayload {
-                            project,
-                            title: "task-one".to_string(),
-                            award: 100,
-                        })
-                        .unwrap(),
+                        task_payload(project, "task-one", 100),
                     )],
                 ),
             )
@@ -590,7 +751,11 @@ mod mvp_handler_tests {
         let events = stf
             .execute_block(
                 &mut state,
-                &mvp_block(4, parent_root, vec![claim_tx(task), start_tx(task)]),
+                &mvp_block(
+                    4,
+                    parent_root,
+                    vec![claim_tx(&mut book, task), start_tx(&mut book, task)],
+                ),
             )
             .unwrap();
         assert_eq!(events.len(), 2);
@@ -606,7 +771,11 @@ mod mvp_handler_tests {
         let events = stf
             .execute_block(
                 &mut state,
-                &mvp_block(5, parent_root, vec![submit_tx(task, content_hash(9))]),
+                &mvp_block(
+                    5,
+                    parent_root,
+                    vec![submit_tx(&mut book, task, content_hash(9))],
+                ),
             )
             .unwrap();
         assert_eq!(events.len(), 1);
@@ -622,7 +791,7 @@ mod mvp_handler_tests {
         let events = stf
             .execute_block(
                 &mut state,
-                &mvp_block(6, parent_root, vec![accept_tx(submission)]),
+                &mvp_block(6, parent_root, vec![accept_tx(&mut book, submission)]),
             )
             .unwrap();
         assert_eq!(events.len(), 1);
@@ -649,6 +818,7 @@ mod mvp_handler_tests {
         // same schedule must yield identical roots and events (no drift).
         let stf = mvp_stf();
         let mut state = State::new();
+        let mut book = NonceBook::default();
         let _ = stf
             .execute_block(
                 &mut state,
@@ -656,19 +826,23 @@ mod mvp_handler_tests {
                     0,
                     H256::ZERO,
                     vec![
-                        register(sponsor(), ActorRole::Sponsor),
-                        register(worker(), ActorRole::Worker),
+                        register(&mut book, sponsor(), ActorRole::Sponsor),
+                        register(&mut book, worker(), ActorRole::Worker),
                     ],
                 ),
             )
             .unwrap();
         let events_a = stf
-            .execute_tx(&mut state, &grant(worker(), Capability::ClaimWork))
+            .execute_tx(
+                &mut state,
+                &grant(&mut book, worker(), Capability::ClaimWork),
+            )
             .unwrap();
         let root_a = state.root().hash();
 
         let stf2 = mvp_stf();
         let mut state2 = State::new();
+        let mut book2 = NonceBook::default();
         let _ = stf2
             .execute_block(
                 &mut state2,
@@ -676,14 +850,17 @@ mod mvp_handler_tests {
                     0,
                     H256::ZERO,
                     vec![
-                        register(sponsor(), ActorRole::Sponsor),
-                        register(worker(), ActorRole::Worker),
+                        register(&mut book2, sponsor(), ActorRole::Sponsor),
+                        register(&mut book2, worker(), ActorRole::Worker),
                     ],
                 ),
             )
             .unwrap();
         let events_b = stf2
-            .execute_tx(&mut state2, &grant(worker(), Capability::ClaimWork))
+            .execute_tx(
+                &mut state2,
+                &grant(&mut book2, worker(), Capability::ClaimWork),
+            )
             .unwrap();
         let root_b = state2.root().hash();
 
@@ -693,8 +870,12 @@ mod mvp_handler_tests {
 
     #[test]
     fn register_twice_rejected() {
-        let (stf, mut state, ..) = setup_task_ready();
-        let result = stf.execute_tx(&mut state, &register(sponsor(), ActorRole::Sponsor));
+        let mut book = NonceBook::default();
+        let (stf, mut state, ..) = setup_task_ready(&mut book);
+        let result = stf.execute_tx(
+            &mut state,
+            &register(&mut book, sponsor(), ActorRole::Sponsor),
+        );
         let err = result.unwrap_err();
         assert!(matches!(err, Error::InvalidTransition(_)), "got {err:?}");
     }
@@ -703,37 +884,38 @@ mod mvp_handler_tests {
     fn worker_cannot_create_project() {
         let mut state = State::new();
         let stf = mvp_stf();
-        stf.execute_tx(&mut state, &register(worker(), ActorRole::Worker))
-            .unwrap();
-        let payload = encode_payload(&ProjectCreatePayload {
-            title: TITLE.to_string(),
-        })
+        let mut book = NonceBook::default();
+        stf.execute_tx(
+            &mut state,
+            &register(&mut book, worker(), ActorRole::Worker),
+        )
         .unwrap();
-        let err = stf
-            .execute_tx(
-                &mut state,
-                &tx(worker(), 1, ActionType::ProjectCreate, payload),
-            )
-            .unwrap_err();
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::ProjectCreate,
+            project_payload(TITLE),
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::Unauthorized(_)));
     }
 
     #[test]
     fn non_owner_sponsor_cannot_create_task() {
-        let (stf, mut state, project, _) = setup_task_ready();
+        let mut book = NonceBook::default();
+        let (stf, mut state, project, _) = setup_task_ready(&mut book);
         // sponsor2 did not create the project
-        let payload = encode_payload(&TaskCreatePayload {
-            project,
-            title: "hostile".to_string(),
-            award: 1,
-        })
-        .unwrap();
-        let err = stf
-            .execute_tx(
-                &mut state,
-                &tx(sponsor2(), 0, ActionType::TaskCreate, payload),
-            )
-            .unwrap_err();
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor2(),
+            ActionType::TaskCreate,
+            task_payload(project, "hostile", 1),
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::Unauthorized(_)));
     }
 
@@ -741,22 +923,31 @@ mod mvp_handler_tests {
     fn claim_requires_capability() {
         let mut state = State::new();
         let stf = mvp_stf();
-        stf.execute_tx(&mut state, &register(sponsor(), ActorRole::Sponsor))
-            .unwrap();
-        stf.execute_tx(&mut state, &register(worker2(), ActorRole::Worker))
-            .unwrap();
+        let mut book = NonceBook::default();
+        stf.execute_tx(
+            &mut state,
+            &register(&mut book, sponsor(), ActorRole::Sponsor),
+        )
+        .unwrap();
+        stf.execute_tx(
+            &mut state,
+            &register(&mut book, worker2(), ActorRole::Worker),
+        )
+        .unwrap();
 
-        let project = create_project(&stf, &mut state, sponsor());
-        let task = create_task(&stf, &mut state, sponsor(), project);
+        let project = create_project(&stf, &mut state, &mut book, sponsor());
+        let task = create_task(&stf, &mut state, &mut book, sponsor(), project);
 
         // worker2 has NO granted abilities
-        let payload = encode_payload(&TaskIdPayload { task }).unwrap();
-        let err = stf
-            .execute_tx(
-                &mut state,
-                &tx(worker2(), 0, ActionType::TaskClaim, payload),
-            )
-            .unwrap_err();
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker2(),
+            ActionType::TaskClaim,
+            id_payload(task),
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::Unauthorized(_)));
         // task still Created
         let record = handlers::get_task(&state, &task).unwrap().unwrap();
@@ -765,28 +956,38 @@ mod mvp_handler_tests {
 
     #[test]
     fn claim_nonexistent_task_fails() {
-        let (stf, mut state, _, _) = setup_task_ready();
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, _) = setup_task_ready(&mut book);
         let ghost = H256::from_bytes([9u8; 32]);
-        let payload = encode_payload(&TaskIdPayload { task: ghost }).unwrap();
-        let err = stf
-            .execute_tx(&mut state, &tx(worker(), 9, ActionType::TaskClaim, payload))
-            .unwrap_err();
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::TaskClaim,
+            id_payload(ghost),
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::NotFound(_)));
     }
 
     #[test]
     fn claim_twice_single_assignee() {
-        let (stf, mut state, _, task) = setup_task_ready();
-        stf.execute_tx(&mut state, &claim_tx(task)).unwrap();
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, task) = setup_task_ready(&mut book);
+        stf.execute_tx(&mut state, &claim_tx(&mut book, task))
+            .unwrap();
 
         // second worker with the capability, but the task is now claimed
-        let payload = encode_payload(&TaskIdPayload { task }).unwrap();
-        let err = stf
-            .execute_tx(
-                &mut state,
-                &tx(worker2(), 5, ActionType::TaskClaim, payload),
-            )
-            .unwrap_err();
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker2(),
+            ActionType::TaskClaim,
+            id_payload(task),
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::InvalidTransition(_)));
         let record = handlers::get_task(&state, &task).unwrap().unwrap();
         assert_eq!(record.assignee, Some(worker()));
@@ -794,71 +995,94 @@ mod mvp_handler_tests {
 
     #[test]
     fn start_requires_assignee() {
-        let (stf, mut state, _, task) = setup_task_ready();
-        stf.execute_tx(&mut state, &claim_tx(task)).unwrap();
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, task) = setup_task_ready(&mut book);
+        stf.execute_tx(&mut state, &claim_tx(&mut book, task))
+            .unwrap();
 
         // worker2 starts => not the assignee
-        let payload = encode_payload(&TaskIdPayload { task }).unwrap();
-        let err = stf
-            .execute_tx(
-                &mut state,
-                &tx(worker2(), 6, ActionType::TaskStart, payload),
-            )
-            .unwrap_err();
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker2(),
+            ActionType::TaskStart,
+            id_payload(task),
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::Unauthorized(_)));
     }
 
     #[test]
     fn submit_requires_started_task_and_right_worker() {
-        let (stf, mut state, _, task) = setup_task_ready();
-        stf.execute_tx(&mut state, &claim_tx(task)).unwrap();
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, task) = setup_task_ready(&mut book);
+        stf.execute_tx(&mut state, &claim_tx(&mut book, task))
+            .unwrap();
 
-        // not started yet
-        let err = stf
-            .execute_tx(&mut state, &submit_tx(task, content_hash(1)))
-            .unwrap_err();
+        // not started yet — fails at the handler stage, so worker's nonce is NOT consumed
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::SubmissionCreate,
+            submit_payload(task, content_hash(1)),
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::InvalidTransition(_)));
 
         // started, but submitted by a worker that is not the assignee
-        stf.execute_tx(&mut state, &start_tx(task)).unwrap();
-        let payload = encode_payload(&SubmissionCreatePayload {
-            task,
-            content_hash: content_hash(1),
-        })
-        .unwrap();
-        let err = stf
-            .execute_tx(
-                &mut state,
-                &tx(worker2(), 7, ActionType::SubmissionCreate, payload),
-            )
-            .unwrap_err();
+        stf.execute_tx(&mut state, &start_tx(&mut book, task))
+            .unwrap();
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker2(),
+            ActionType::SubmissionCreate,
+            submit_payload(task, content_hash(1)),
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::Unauthorized(_)));
     }
 
     #[test]
     fn accept_requires_sponsor_and_pending_submission() {
-        let (stf, mut state, _, task) = setup_task_ready();
-        stf.execute_tx(&mut state, &claim_tx(task)).unwrap();
-        stf.execute_tx(&mut state, &start_tx(task)).unwrap();
-        stf.execute_tx(&mut state, &submit_tx(task, content_hash(1)))
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, task) = setup_task_ready(&mut book);
+        stf.execute_tx(&mut state, &claim_tx(&mut book, task))
+            .unwrap();
+        stf.execute_tx(&mut state, &start_tx(&mut book, task))
+            .unwrap();
+        stf.execute_tx(&mut state, &submit_tx(&mut book, task, content_hash(1)))
             .unwrap();
         let submission = submission_id(task, content_hash(1));
 
         // a different sponsor cannot accept (not the task sponsor)
-        let payload = encode_payload(&SubmissionIdPayload { submission }).unwrap();
-        let err = stf
-            .execute_tx(
-                &mut state,
-                &tx(sponsor2(), 0, ActionType::AcceptFinal, payload),
-            )
-            .unwrap_err();
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor2(),
+            ActionType::AcceptFinal,
+            submission_payload(submission),
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::Unauthorized(_)));
 
         // the sponsor accepts; a second accept is invalid
-        stf.execute_tx(&mut state, &accept_tx(submission)).unwrap();
-        let err = stf
-            .execute_tx(&mut state, &accept_tx(submission))
-            .unwrap_err();
+        stf.execute_tx(&mut state, &accept_tx(&mut book, submission))
+            .unwrap();
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::AcceptFinal,
+            submission_payload(submission),
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::InvalidTransition(_)));
 
         let record = handlers::get_task(&state, &task).unwrap().unwrap();
@@ -871,34 +1095,266 @@ mod mvp_handler_tests {
         let mut state = State::new();
         let stf = mvp_stf();
         let root_before = state.root();
-        let err = stf
-            .execute_tx(
-                &mut state,
-                &tx(sponsor(), 0, ActionType::ActorRegister, vec![0xff]),
-            )
-            .unwrap_err();
+        // Same nonce (seq 0) both times: a failed transaction must not consume
+        // its nonce, so the retry still reaches the decode stage.
+        let bad = raw_tx(sponsor(), 0, 0, ActionType::ActorRegister, vec![0xff]);
+        let err = stf.execute_tx(&mut state, &bad).unwrap_err();
         assert!(matches!(err, Error::Serialization(_)));
         assert_eq!(state.root(), root_before, "no state mutation before decode");
-        assert!(stf
-            .execute_tx(
-                &mut state,
-                &tx(sponsor(), 0, ActionType::ActorRegister, vec![0xff])
+        assert_eq!(handlers::get_nonce(&state, &sponsor(), 0).unwrap(), 0);
+        assert!(stf.execute_tx(&mut state, &bad).is_err());
+    }
+
+    #[test]
+    fn failed_multi_action_tx_leaves_no_partial_changes() {
+        let stf = mvp_stf();
+        let mut state = State::new();
+        let root_before = state.root();
+
+        // A two-action transaction whose first action succeeds and second
+        // fails: registering the same account twice. Atomic execution must
+        // discard the draft on failure — no actor record may leak into live
+        // state while the nonce stays reusable for a retry.
+        let bad = TxBuilder::new()
+            .chain_id(1)
+            .account(sponsor())
+            .nonce(0, 0)
+            .add_action(
+                ActionType::ActorRegister,
+                register_payload(ActorRole::Sponsor),
             )
-            .is_err());
+            .add_action(
+                ActionType::ActorRegister,
+                register_payload(ActorRole::Sponsor),
+            )
+            .fee(FeeSpec {
+                payer: FeePayer::Self_,
+                asset_id: 0,
+                max_fee: 1000,
+            })
+            .build()
+            .unwrap();
+
+        let err = stf.execute_tx(&mut state, &bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)), "got {err:?}");
+        assert_eq!(
+            state.root(),
+            root_before,
+            "failed tx must not commit partial changes"
+        );
+        assert!(handlers::get_actor(&state, &sponsor()).unwrap().is_none());
+        assert_eq!(handlers::get_nonce(&state, &sponsor(), 0).unwrap(), 0);
+
+        // The nonce was never burned: a clean single-action retry succeeds.
+        let retry = raw_tx(
+            sponsor(),
+            0,
+            0,
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Sponsor),
+        );
+        stf.execute_tx(&mut state, &retry).unwrap();
+        assert!(handlers::get_actor(&state, &sponsor()).unwrap().is_some());
     }
 
     #[test]
     fn unsupported_action_rejected() {
-        let (stf, mut state, ..) = setup_task_ready();
-        let err = stf
-            .execute_tx(
-                &mut state,
-                &tx(sponsor(), 0, ActionType::ReviewDecide, vec![]),
-            )
-            .unwrap_err();
+        let mut book = NonceBook::default();
+        let (stf, mut state, ..) = setup_task_ready(&mut book);
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::ReviewDecide,
+            vec![],
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::Transaction(_)), "got {err:?}");
         let msg = format!("{err}");
         assert!(msg.contains("not enabled in the MVP era"), "got {msg}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Nonce enforcement (issue #20): replay protection, gap rejection, and
+    // per-(account, key_id) independence. These use explicit nonces so they
+    // exercise exact sequence values rather than the auto-incrementing book.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn replay_same_nonce_rejected() {
+        let stf = mvp_stf();
+        let mut state = State::new();
+
+        // First use of seq 0 succeeds and advances the stored nonce to 1.
+        let first = raw_tx(
+            sponsor(),
+            0,
+            0,
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Sponsor),
+        );
+        stf.execute_tx(&mut state, &first).unwrap();
+        assert_eq!(handlers::get_nonce(&state, &sponsor(), 0).unwrap(), 1);
+        let root_after = state.root().hash();
+
+        // Replaying the identical transaction (same seq) is rejected before any
+        // mutation — this is the replay-protection guarantee.
+        let err = stf.execute_tx(&mut state, &first).unwrap_err();
+        assert!(matches!(err, Error::Transaction(_)), "got {err:?}");
+        assert!(
+            format!("{err}").contains("nonce"),
+            "expected a nonce error, got {err}"
+        );
+        assert_eq!(
+            state.root().hash(),
+            root_after,
+            "rejected replay must not mutate state"
+        );
+    }
+
+    #[test]
+    fn future_nonce_gap_rejected() {
+        let stf = mvp_stf();
+        let mut state = State::new();
+
+        // Skipping ahead (seq 3 when seq 0 is expected) leaves a gap that would
+        // allow out-of-order execution — reject it.
+        let err = stf
+            .execute_tx(
+                &mut state,
+                &raw_tx(
+                    sponsor(),
+                    0,
+                    3,
+                    ActionType::ActorRegister,
+                    register_payload(ActorRole::Sponsor),
+                ),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::Transaction(_)), "got {err:?}");
+        assert!(
+            format!("{err}").contains("nonce"),
+            "expected a nonce error, got {err}"
+        );
+        // No actor was created and the nonce was not advanced.
+        assert!(handlers::get_actor(&state, &sponsor()).unwrap().is_none());
+        assert_eq!(handlers::get_nonce(&state, &sponsor(), 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn nonce_increments_after_success() {
+        let stf = mvp_stf();
+        let mut state = State::new();
+
+        // seq 0 → stored becomes 1
+        stf.execute_tx(
+            &mut state,
+            &raw_tx(
+                sponsor(),
+                0,
+                0,
+                ActionType::ActorRegister,
+                register_payload(ActorRole::Sponsor),
+            ),
+        )
+        .unwrap();
+        assert_eq!(handlers::get_nonce(&state, &sponsor(), 0).unwrap(), 1);
+
+        // seq 1 → stored becomes 2 (the next expected value is always last-used + 1)
+        stf.execute_tx(
+            &mut state,
+            &raw_tx(
+                sponsor(),
+                0,
+                1,
+                ActionType::ProjectCreate,
+                project_payload(TITLE),
+            ),
+        )
+        .unwrap();
+        assert_eq!(handlers::get_nonce(&state, &sponsor(), 0).unwrap(), 2);
+
+        // The exact next value is accepted; anything else is not.
+        stf.execute_tx(
+            &mut state,
+            &raw_tx(
+                sponsor(),
+                0,
+                2,
+                ActionType::TaskCreate,
+                task_payload(handlers::derive_project(&sponsor(), TITLE), "t", 1),
+            ),
+        )
+        .unwrap();
+        assert_eq!(handlers::get_nonce(&state, &sponsor(), 0).unwrap(), 3);
+    }
+
+    #[test]
+    fn independent_accounts_share_seq() {
+        let stf = mvp_stf();
+        let mut state = State::new();
+
+        // Two distinct accounts each start at seq 0 — they do not interfere.
+        stf.execute_tx(
+            &mut state,
+            &raw_tx(
+                sponsor(),
+                0,
+                0,
+                ActionType::ActorRegister,
+                register_payload(ActorRole::Sponsor),
+            ),
+        )
+        .unwrap();
+        stf.execute_tx(
+            &mut state,
+            &raw_tx(
+                worker(),
+                0,
+                0,
+                ActionType::ActorRegister,
+                register_payload(ActorRole::Worker),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(handlers::get_nonce(&state, &sponsor(), 0).unwrap(), 1);
+        assert_eq!(handlers::get_nonce(&state, &worker(), 0).unwrap(), 1);
+    }
+
+    #[test]
+    fn independent_key_ids() {
+        let stf = mvp_stf();
+        let mut state = State::new();
+
+        // key_id 0 and key_id 1 are tracked independently for the same account.
+        stf.execute_tx(
+            &mut state,
+            &raw_tx(
+                sponsor(),
+                0,
+                0,
+                ActionType::ActorRegister,
+                register_payload(ActorRole::Sponsor),
+            ),
+        )
+        .unwrap();
+        // A different key starts its own sequence at seq 0.
+        stf.execute_tx(
+            &mut state,
+            &raw_tx(
+                sponsor(),
+                1,
+                0,
+                ActionType::ProjectCreate,
+                project_payload(TITLE),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(handlers::get_nonce(&state, &sponsor(), 0).unwrap(), 1);
+        assert_eq!(handlers::get_nonce(&state, &sponsor(), 1).unwrap(), 1);
     }
 }
 
@@ -1127,7 +1583,7 @@ mod fork_gating_tests {
         let tx = TxBuilder::new()
             .chain_id(1)
             .account(account)
-            .nonce(0, 2)
+            .nonce(0, 0)
             .add_action(ActionType::ActorRegister, payload)
             .fee(FeeSpec {
                 payer: FeePayer::Self_,

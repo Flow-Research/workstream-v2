@@ -24,10 +24,22 @@ const K_ACTOR: &[u8] = b"WS:v1:k:actor:";
 const K_PROJECT: &[u8] = b"WS:v1:k:project:";
 const K_TASK: &[u8] = b"WS:v1:k:task:";
 const K_SUBMISSION: &[u8] = b"WS:v1:k:submission:";
+/// Per-(account, key_id) replay-protection counter. The stored value is the
+/// NEXT expected sequence number for that account/key (0 when unused).
+const K_NONCE: &[u8] = b"WS:v1:k:nonce:";
 
 fn kv_key(domain: &[u8], id: &H256) -> Vec<u8> {
     let mut key = domain.to_vec();
     key.extend_from_slice(id.as_bytes());
+    key
+}
+
+/// Nonce counter is keyed by both the account and its signing-key id so that
+/// distinct keys (e.g. a hot vs. cold key) advance independent sequences.
+fn nonce_key(account: &H256, key_id: u16) -> Vec<u8> {
+    let mut key = K_NONCE.to_vec();
+    key.extend_from_slice(account.as_bytes());
+    key.extend_from_slice(&key_id.to_be_bytes());
     key
 }
 
@@ -240,6 +252,23 @@ pub fn get_task(state: &State, task: &H256) -> Result<Option<TaskRecord>> {
 /// Read a submission record.
 pub fn get_submission(state: &State, submission: &H256) -> Result<Option<SubmissionRecord>> {
     decode_from_state(state, K_SUBMISSION, submission, "submission")
+}
+
+/// The next expected sequence number for `(account, key_id)`.
+/// Returns 0 when the account has not yet used this key.
+pub fn get_nonce(state: &State, account: &H256, key_id: u16) -> Result<u64> {
+    match state.get(&nonce_key(account, key_id))? {
+        Some(bytes) => postcard::from_bytes::<u64>(&bytes)
+            .map_err(|e| Error::Serialization(format!("nonce decode: {e}"))),
+        None => Ok(0),
+    }
+}
+
+/// Persist the next expected sequence number for `(account, key_id)`.
+pub(crate) fn set_nonce(state: &mut State, account: &H256, key_id: u16, seq: u64) -> Result<()> {
+    let bytes = postcard::to_allocvec(&seq)
+        .map_err(|e| Error::Serialization(format!("nonce encode: {e}")))?;
+    state.set(&nonce_key(account, key_id), &bytes)
 }
 
 // ---------------------------------------------------------------------------

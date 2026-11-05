@@ -1119,8 +1119,14 @@ mod mvp_handler_tests {
             .chain_id(1)
             .account(sponsor())
             .nonce(0, 0)
-            .add_action(ActionType::ActorRegister, register_payload(ActorRole::Sponsor))
-            .add_action(ActionType::ActorRegister, register_payload(ActorRole::Sponsor))
+            .add_action(
+                ActionType::ActorRegister,
+                register_payload(ActorRole::Sponsor),
+            )
+            .add_action(
+                ActionType::ActorRegister,
+                register_payload(ActorRole::Sponsor),
+            )
             .fee(FeeSpec {
                 payer: FeePayer::Self_,
                 asset_id: 0,
@@ -1131,7 +1137,11 @@ mod mvp_handler_tests {
 
         let err = stf.execute_tx(&mut state, &bad).unwrap_err();
         assert!(matches!(err, Error::InvalidTransition(_)), "got {err:?}");
-        assert_eq!(state.root(), root_before, "failed tx must not commit partial changes");
+        assert_eq!(
+            state.root(),
+            root_before,
+            "failed tx must not commit partial changes"
+        );
         assert!(handlers::get_actor(&state, &sponsor()).unwrap().is_none());
         assert_eq!(handlers::get_nonce(&state, &sponsor(), 0).unwrap(), 0);
 

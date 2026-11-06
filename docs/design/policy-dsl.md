@@ -48,7 +48,7 @@ validation rules, and test plan. It is the contract for
 | Consensus drift | Integer-only, no floats/maps/iteration order; canonical encoding; evaluation depends only on `(bytecode, oracle input)`. |
 | Panic in the STF | No indexing without bounds checks, no `unwrap` on untrusted data, checked arithmetic, explicit stack-underflow errors. |
 | Oracle confusion | Oracle names are declared, sorted, index-bound at compile time, and type-checked at evaluation. |
-| Policy substitution | Policy id is the SHA-256 of canonical bytecode, domain-separated (`WS:v1:policy:`). |
+| Policy substitution | Policy id is the SHA-256 of canonical bytecode, domain-separated with the existing `POLICY_V1:` tag. |
 | Resource blow-up via inputs | Hard caps on source size, oracle count, list length, byte-string length, stack depth, and instructions. |
 | Malformed bytecode | Decoder validates magic/version/lengths, re-runs the type checker, and rejects trailing bytes. |
 
@@ -60,7 +60,7 @@ The textual form is for humans and off-chain tooling. Consensus operates on
 bytecode only.
 
 ```ebnf
-policy      = "policy", string, "{", oracle*, "allow", expr, "}" ;
+policy      = "policy", string, "{", oracle*, "allow", expr, ";", "}" ;
 oracle      = "oracle", ident, ":", type, ";" ;
 type        = "int" | "bool" | "bytes" ;
 
@@ -102,7 +102,7 @@ list        = "[", expr, { ",", expr }, "]" ;
 | `int` | `i64` | Checked arithmetic; overflow is an evaluation error. |
 | `bool` | `bool` | Result of comparisons and boolean operators. |
 | `bytes` | `Vec<u8>` (≤ 64) | Equality only; no ordering in v1. |
-| `list<T>` | homogeneous, non-empty, ≤ 256 elements | Internal only: list literals, `in`, `count`. Cannot be an oracle type or the final result. |
+| `list<T>` | homogeneous, non-empty, ≤ 256 elements; `T` ∈ {`int`,`bool`,`bytes`} | Internal only: list literals, `in`, `count`. Nested lists are rejected. Cannot be an oracle type or the final result. |
 
 The `allow` expression must have type `bool`. A policy that produces any other
 type is rejected at compile time.
@@ -155,15 +155,18 @@ push a result. `HALT` returns the single boolean on the stack.
 - `in` requires the right side to be a list literal and the left side to have
   the list's element type.
 - `count(list<bool>)` returns the number of `true` elements as an `int`.
-- Lists are non-empty and homogeneous. Empty list literals are rejected
-  because they have no inferable element type.
+- Lists are non-empty, homogeneous, and scalar-element only. Empty list
+  literals are rejected because they have no inferable element type; nested
+  list literals (e.g. `[[1], [2]]`) are rejected as `TypeMismatch`.
 
 ### 4.2 Oracles
 
 An oracle is a named, typed external value. At evaluation:
 
 1. Every declared oracle must be present in the input map.
-2. Its value must match the declared type (`int`/`bool`/`bytes`).
+2. Its value must match the declared type (`int`/`bool`/`bytes`) and satisfy
+   that type's bounds; in particular, `bytes` values longer than 64 bytes are
+   rejected with `PolicyError::OracleBytesTooLong`.
 3. Extra input entries are ignored so a host can pass a shared fact set; they
    are never observable by the policy.
 
@@ -205,7 +208,9 @@ The encoding is canonical:
 - oracle names sorted and unique (decoder rejects duplicates/unsorted);
 - minimal-length names/strings (no padding);
 - trailing bytes rejected;
-- policy id = `SHA-256("WS:v1:policy:" ‖ bytecode)`.
+- policy id = `SHA-256("POLICY_V1:" ‖ bytecode)`, matching
+  `workstream_crypto::hash_policy`; #27 should reuse that helper rather than
+  introduce a second policy hash.
 
 ### 5.2 Instruction encoding
 
@@ -248,9 +253,9 @@ a typed stack:
    tags, no duplicates.
 3. Instruction checks: opcode known, operands in range, `HALT` exactly once and
    last, `code_len ≤ 4096`.
-4. Stack simulation: no underflow at any instruction; `LIST(n)` leaves exactly
-   `n` typed elements; both operands of every binary op have the required
-   types; final stack is exactly `[bool]`.
+4. Stack simulation: no underflow at any instruction; `LIST(n)` consumes
+   exactly `n` same-typed scalar values and pushes one `list<T>`; both operands
+   of every binary op have the required types; final stack is exactly `[bool]`.
 5. Limits: stack depth ≤ 256, list length ≤ 256, byte literal ≤ 64 bytes.
 
 A program that fails any check is rejected; it is never partially executed.
@@ -297,10 +302,11 @@ On `HALT`, the stack must contain exactly one `Bool`.
 
 ### 6.5 Eager boolean operators
 
-`&&` and `||` do not short-circuit. A policy author who needs conditional
-evaluation of a potentially overflowing expression must restructure it with
-comparisons; v1 intentionally omits branches to keep the verifier trivial. This
-is documented behavior, not an optimization gap.
+`&&` and `||` do not short-circuit. Because both operands are always evaluated,
+an overflowing subexpression cannot be hidden behind a guard; authors must
+choose operand ranges and expression shapes that stay in range. Conditional
+evaluation is deferred to a future version with branching. This is documented
+behavior, not an optimization gap.
 
 ---
 
@@ -312,7 +318,7 @@ is documented behavior, not an optimization gap.
 | Limit | `SourceTooLong`, `NameTooLong`, `TooManyOracles`, `TooManyInstructions`, `ListTooLong`, `BytesTooLong` | A declared bound is exceeded. |
 | Name/type | `DuplicateOracle`, `UndeclaredOracle`, `UnknownFunction`, `EmptyList`, `TypeMismatch`, `NonBoolResult` | Static rejection. |
 | Bytecode | `BadMagic`, `UnsupportedVersion`, `TrailingBytes`, `InvalidOpcode`, `CorruptBytecode`, `StackUnderflow`, `StackNotEmpty` | Decoding hostile or corrupted bytes. |
-| Evaluation | `MissingOracle`, `OracleTypeMismatch`, `ArithmeticOverflow`, `TypeMismatch` | Runtime facts do not match the declared interface. |
+| Evaluation | `MissingOracle`, `OracleTypeMismatch`, `OracleBytesTooLong`, `ArithmeticOverflow`, `TypeMismatch` | Runtime facts do not match the declared interface or bounds. |
 
 Compilation and decoding both return `Result<Policy, PolicyError>`.
 Evaluation returns `Result<bool, PolicyError>`.
@@ -343,8 +349,9 @@ Evaluation returns `Result<bool, PolicyError>`.
    checked; decoding validates lengths before allocation; list/bytes/oracle
    counts are capped. Recursive descent is guarded by `MAX_NESTING`.
 3. **Determinism.** No iteration over unordered containers, no clock, no
-   randomness, no floats, no string comparison (policy names are not part of
-   evaluation), no environment access.
+   randomness, no floats, no locale-dependent string comparison or hash-map
+   iteration order (oracle lookup is byte-lexicographically ordered and policy
+   names are not part of evaluation), no environment access.
 4. **Oracle isolation.** A policy can only read declared names. Missing and
    mistyped inputs are errors. Extra host facts are invisible.
 5. **Hash locking.** A task/guide stores `PolicyId`; any mutation of source or
@@ -365,8 +372,8 @@ Evaluation returns `Result<bool, PolicyError>`.
 - Comments/whitespace do not change the policy id.
 - Oracle declaration reordering produces identical bytecode and id.
 - Type errors: non-bool `allow`, mixed-type comparisons, ordered `bytes`,
-  heterogeneous lists, empty lists, `count` on non-bool lists, undeclared
-  oracle, unknown function.
+  heterogeneous or nested lists, empty lists, `count` on non-bool lists,
+  undeclared oracle, unknown function.
 - Parse errors: bad token, EOF, malformed string/hex, invalid identifier,
   reserved word as oracle, nesting overflow.
 - Limit tests: oversize source/name/oracle/list/byte literal/instruction count.
@@ -385,7 +392,8 @@ Evaluation returns `Result<bool, PolicyError>`.
 - All operators produce expected values; boolean operators are eager.
 - Checked arithmetic: `i64::MAX + 1`, `i64::MIN`-adjacent subtraction, `NEG`
   overflow, `MUL` overflow return `ArithmeticOverflow`.
-- Missing oracle, mistyped oracle, and extra oracle handling.
+- Missing oracle, mistyped oracle, oversized oracle bytes, and extra oracle
+  handling.
 - Byte and integer membership; threshold counting.
 - Evaluation is repeatable and independent of oracle insertion order.
 
@@ -440,7 +448,7 @@ policy "quorum" {
 ```
 
 ```text
-// Arithmetic and nested lists.
+// Arithmetic and membership lists.
 policy "budget" {
     oracle base: int;
     oracle bonus: int;
@@ -496,13 +504,12 @@ impl Policy {
 - Oracle declarations are sorted for canonical bytecode.
 - `PolicyId` commits to bytecode, not source text.
 - Arithmetic is `i64` with checked overflow.
+- The policy name is opaque metadata but remains part of the bytecode id.
+- Extra oracle inputs are ignored for composability.
+- List elements are scalars only; nested lists are rejected.
 
 ### Open (deferred, non-blocking for v1)
 
-- Should `from_bytecode` preserve the exact source name or treat it as opaque
-  metadata? (Chosen: opaque, part of the id.)
-- Should extra oracle inputs be rejected in a stricter host mode? (Chosen:
-  ignored for composability.)
 - Future opcodes for short-circuit selection or field access, gated by a
   version bump.
 - Wiring `policy.compile` / `policy.approve` and storing policies in state is a

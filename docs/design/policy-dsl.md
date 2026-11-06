@@ -152,8 +152,9 @@ push a result. `HALT` returns the single boolean on the stack.
 - `<`, `<=`, `>`, `>=` are defined for `int` only.
 - `+`, `-`, `*` are defined for `int` only and use checked operations. Overflow
   is an error, never a wrap or panic.
-- `in` requires the right side to be a list literal and the left side to have
-  the list's element type.
+- `in` requires the right side to be a non-empty list literal of scalars and
+  the left side to have the list's scalar element type; nested-list membership
+  (e.g. `[true] in [[true]]`) is rejected.
 - `count(list<bool>)` returns the number of `true` elements as an `int`.
 - Lists are non-empty, homogeneous, and scalar-element only. Empty list
   literals are rejected because they have no inferable element type; nested
@@ -168,7 +169,9 @@ An oracle is a named, typed external value. At evaluation:
    that type's bounds; in particular, `bytes` values longer than 64 bytes are
    rejected with `PolicyError::OracleBytesTooLong`.
 3. Extra input entries are ignored so a host can pass a shared fact set; they
-   are never observable by the policy.
+   are never observable by the policy. To bound lookup work, the input map is
+   capped at 1024 entries (declared plus extra); larger maps return
+   `PolicyError::TooManyInputs`.
 
 Oracle declarations are semantically an unordered set. The compiler sorts them
 by name and binds `LOAD_ORACLE` to the sorted index. Reordering declarations
@@ -279,6 +282,7 @@ Because there are no jumps, the static stack simulation is exact.
 | Source text | 16 KiB |
 | Policy name | 128 bytes |
 | Oracle count | 64 |
+| Oracle input entries (declared plus extra) | 1024 |
 | Oracle name | 64 bytes |
 | Instructions per policy | 4096 |
 | List length | 256 |
@@ -318,7 +322,7 @@ behavior, not an optimization gap.
 | Limit | `SourceTooLong`, `NameTooLong`, `TooManyOracles`, `TooManyInstructions`, `ListTooLong`, `BytesTooLong` | A declared bound is exceeded. |
 | Name/type | `DuplicateOracle`, `UndeclaredOracle`, `UnknownFunction`, `EmptyList`, `TypeMismatch`, `NonBoolResult` | Static rejection. |
 | Bytecode | `BadMagic`, `UnsupportedVersion`, `TrailingBytes`, `InvalidOpcode`, `CorruptBytecode`, `StackUnderflow`, `StackNotEmpty` | Decoding hostile or corrupted bytes. |
-| Evaluation | `MissingOracle`, `OracleTypeMismatch`, `OracleBytesTooLong`, `ArithmeticOverflow`, `TypeMismatch` | Runtime facts do not match the declared interface or bounds. |
+| Evaluation | `MissingOracle`, `OracleTypeMismatch`, `OracleBytesTooLong`, `TooManyInputs`, `ArithmeticOverflow`, `TypeMismatch` | Runtime facts do not match the declared interface or bounds. |
 
 Compilation and decoding both return `Result<Policy, PolicyError>`.
 Evaluation returns `Result<bool, PolicyError>`.
@@ -367,13 +371,15 @@ Evaluation returns `Result<bool, PolicyError>`.
 ### Compiler and parser
 
 - Happy-path compile/evaluate for eligibility, allowlists, and thresholds.
+- Parser accepts the required `allow expr;` terminator and rejects a missing
+  semicolon.
 - Every operator and precedence level, including `!`, unary `-`, `&&`, `||`,
   comparisons, arithmetic, `in`, `count`, parentheses.
 - Comments/whitespace do not change the policy id.
 - Oracle declaration reordering produces identical bytecode and id.
 - Type errors: non-bool `allow`, mixed-type comparisons, ordered `bytes`,
-  heterogeneous or nested lists, empty lists, `count` on non-bool lists,
-  undeclared oracle, unknown function.
+  heterogeneous or nested lists (including `[true] in [[true]]`), empty lists,
+  `count` on non-bool lists, undeclared oracle, unknown function.
 - Parse errors: bad token, EOF, malformed string/hex, invalid identifier,
   reserved word as oracle, nesting overflow.
 - Limit tests: oversize source/name/oracle/list/byte literal/instruction count.
@@ -392,8 +398,8 @@ Evaluation returns `Result<bool, PolicyError>`.
 - All operators produce expected values; boolean operators are eager.
 - Checked arithmetic: `i64::MAX + 1`, `i64::MIN`-adjacent subtraction, `NEG`
   overflow, `MUL` overflow return `ArithmeticOverflow`.
-- Missing oracle, mistyped oracle, oversized oracle bytes, and extra oracle
-  handling.
+- Missing oracle, mistyped oracle, oversized oracle bytes, oversized input map,
+  and extra oracle handling.
 - Byte and integer membership; threshold counting.
 - Evaluation is repeatable and independent of oracle insertion order.
 

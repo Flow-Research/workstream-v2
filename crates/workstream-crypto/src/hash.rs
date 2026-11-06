@@ -19,7 +19,10 @@ impl ContentId {
     }
 }
 
-/// Hash a policy body
+/// Hash canonical policy bytecode.
+///
+/// Uses the `POLICY_V1:` domain tag defined by the policy DSL contract.
+/// `body` must be canonical `WSPL` bytecode, not policy source text.
 pub fn hash_policy(body: &[u8]) -> H256 {
     Hash::sha256_concat(&[b"POLICY_V1:", body])
 }

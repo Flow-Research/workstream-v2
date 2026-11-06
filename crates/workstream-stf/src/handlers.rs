@@ -470,6 +470,14 @@ pub(crate) fn store_lease(state: &mut State, lease: LeaseId, record: &LeaseRecor
     state.set(&kv_key(K_LEASE, &lease), &bytes)
 }
 
+/// Key of the (reviewer, project) active-lease index pointer.
+fn lease_active_key(reviewer: &H256, project: &H256) -> Vec<u8> {
+    let mut key = K_LEASE_ACTIVE.to_vec();
+    key.extend_from_slice(reviewer.as_bytes());
+    key.extend_from_slice(project.as_bytes());
+    key
+}
+
 /// Overwrite the (reviewer, project) active-lease index pointer. The index
 /// is the invariant mechanism for one active lease per reviewer per
 /// project; a consumed lease's index is simply replaced by the next lease.
@@ -481,10 +489,7 @@ pub(crate) fn set_active_lease(
 ) -> Result<()> {
     let bytes = postcard::to_allocvec(&lease)
         .map_err(|e| Error::Serialization(format!("active lease encode: {e}")))?;
-    let mut key = K_LEASE_ACTIVE.to_vec();
-    key.extend_from_slice(reviewer.as_bytes());
-    key.extend_from_slice(project.as_bytes());
-    state.set(&key, &bytes)
+    state.set(&lease_active_key(reviewer, project), &bytes)
 }
 
 /// Read the (reviewer, project) active-lease index, if present.
@@ -493,10 +498,7 @@ pub(crate) fn active_lease(
     reviewer: &H256,
     project: &H256,
 ) -> Result<Option<LeaseId>> {
-    let mut key = K_LEASE_ACTIVE.to_vec();
-    key.extend_from_slice(reviewer.as_bytes());
-    key.extend_from_slice(project.as_bytes());
-    match state.get(&key)? {
+    match state.get(&lease_active_key(reviewer, project))? {
         Some(bytes) => postcard::from_bytes::<LeaseId>(&bytes)
             .map(Some)
             .map_err(|e| Error::Serialization(format!("active lease decode: {e}"))),
@@ -1175,6 +1177,14 @@ pub(crate) fn handle_submission_create(
             p.task, p.content_hash
         ))
     })?;
+    // The derived id already commits to (task, author, content); assert the
+    // stored record agrees so a corrupted/injected record can never back a
+    // submission with different terms.
+    if bundle.task != p.task || bundle.author != account || bundle.content_hash != p.content_hash {
+        return Err(Error::InvalidTransition(format!(
+            "bundle {bundle_id} does not match the submitted task/author/content"
+        )));
+    }
     if bundle.status == BundleStatus::Consumed {
         return Err(Error::InvalidTransition(format!(
             "bundle {} was already consumed by a submission",
@@ -1317,6 +1327,15 @@ pub(crate) fn handle_review_lease(
             "the task's sponsor cannot review its submissions".to_string(),
         ));
     }
+    // Reviews only belong to work that is still under way: once the task is
+    // Completed its remaining submissions can never be accepted, so refusing
+    // new leases keeps the review surface aligned with `accept.final`.
+    if task.status != TaskStatus::Started {
+        return Err(Error::InvalidTransition(format!(
+            "task {} is not under review (status {:?})",
+            submission.task, task.status
+        )));
+    }
 
     // One active lease per reviewer per project (the (reviewer, project)
     // index pointer; consumed leases' pointers are overwritten by the
@@ -1382,6 +1401,20 @@ pub(crate) fn handle_review_decide(
         return Err(Error::InvalidTransition(format!(
             "submission {} is not open for review (status {:?})",
             p.submission, submission.status
+        )));
+    }
+
+    // Mirror `review.lease` / `accept.final`: a Completed task no longer
+    // accepts review decisions on its residual pending submissions.
+    let task_bytes = state
+        .get(&kv_key(K_TASK, &submission.task))?
+        .ok_or_else(|| Error::NotFound(format!("task {}", submission.task)))?;
+    let task: TaskRecord = postcard::from_bytes(&task_bytes)
+        .map_err(|e| Error::Serialization(format!("task record decode: {e}")))?;
+    if task.status != TaskStatus::Started {
+        return Err(Error::InvalidTransition(format!(
+            "task {} is not under review (status {:?})",
+            submission.task, task.status
         )));
     }
 
@@ -1463,7 +1496,10 @@ pub(crate) fn handle_accept_final(
         )));
     }
     // Review-gated payout (issue #25): a sponsor can only accept work that
-    // survived review — at least one recorded `Accept` decision.
+    // survived review — at least one recorded `Accept` decision. One positive
+    // decision is sufficient by design: another reviewer's Reject or
+    // NeedsRevision does not veto acceptance (reviews are independent
+    // opinions, not a quorum).
     if submission.accept_reviews == 0 {
         return Err(Error::InvalidTransition(format!(
             "submission {} has no accepting review; acceptance is gated on review",

@@ -33,6 +33,13 @@ const K_GUIDE: &[u8] = b"WS:v1:k:guide:";
 const K_GUIDE_ACTIVE: &[u8] = b"WS:v1:k:guide-active:";
 /// Per-project head of the ingested guide version lineage (latest u32).
 const K_GUIDE_HEAD: &[u8] = b"WS:v1:k:guide-head:";
+/// Admitted submission bundles (one prepared artifact set per id).
+const K_BUNDLE: &[u8] = b"WS:v1:k:bundle:";
+/// Review leases of reviewers on submissions.
+const K_LEASE: &[u8] = b"WS:v1:k:lease:";
+/// Per-(reviewer, project) pointer to the reviewer's latest lease in that
+/// project, backing the one-active-lease-at-a-time invariant.
+const K_LEASE_ACTIVE: &[u8] = b"WS:v1:k:lease-active:";
 /// Per-(account, key_id) replay-protection counter. The stored value is the
 /// NEXT expected sequence number for that account/key (0 when unused).
 const K_NONCE: &[u8] = b"WS:v1:k:nonce:";
@@ -170,6 +177,64 @@ pub struct SubmissionRecord {
     pub author: AccountId,
     pub content_hash: H256,
     pub status: SubmissionStatus,
+    /// Number of `Review(accept)` decisions recorded for this submission.
+    /// `accept.final` requires at least one — a sponsor can only pay out
+    /// work that survived review (issue #25).
+    pub accept_reviews: u32,
+}
+
+/// Lifecycle of an admitted bundle: it becomes `Consumed` atomically with
+/// the immutable `SubmissionRecord` created from it.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BundleStatus {
+    Ready,
+    Consumed,
+}
+
+/// An admitted bundle: the worker-bound, content-committed artifact set a
+/// submission must consume. Admission precedes submission (manifest
+/// admission flow per the reference glossary).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BundleRecord {
+    pub task: TaskId,
+    pub author: AccountId,
+    pub content_hash: H256,
+    pub status: BundleStatus,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LeaseStatus {
+    Active,
+    Consumed,
+}
+
+/// A review lease: the permanent identity of one reviewer claim attempt.
+/// Leases guard the review flow — deciding without an active lease is not
+/// permitted; deciding consumes the lease.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LeaseRecord {
+    pub submission: SubmissionId,
+    pub reviewer: AccountId,
+    pub status: LeaseStatus,
+}
+
+/// The three-and-only-three review outcomes (exactly `accept` |
+/// `needs_revision` | `reject` per the reference contract).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReviewDecision {
+    Accept,
+    NeedsRevision,
+    Reject,
+}
+
+/// The immutable review record: appended to the MMR on decision, bound to
+/// the lease that authorized it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewRecord {
+    pub submission: SubmissionId,
+    pub reviewer: AccountId,
+    pub decision: ReviewDecision,
+    pub lease: LeaseId,
 }
 
 /// The append-only record written to the MMR when a submission is accepted.
@@ -253,10 +318,34 @@ pub struct TaskReleasePayload {
     pub reason: String,
 }
 
+/// SubmissionCreatePayload: binds one admitted bundle's content to the
+/// immutable submission record created from it.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubmissionCreatePayload {
     pub task: TaskId,
     pub content_hash: H256,
+}
+
+/// bundle.admit: register a prepared, content-committed bundle for the
+/// task, ready to back exactly one submission.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BundleAdmitPayload {
+    pub task: TaskId,
+    pub content_hash: H256,
+}
+
+/// review.lease: claim the exclusive right to review one submission.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewLeasePayload {
+    pub submission: SubmissionId,
+}
+
+/// review.decide: record an immutable review decision under the caller's
+/// active lease.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewDecidePayload {
+    pub submission: SubmissionId,
+    pub decision: ReviewDecision,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -272,6 +361,8 @@ const D_PROJECT: &[u8] = b"WS:v1:id:project:";
 const D_TASK: &[u8] = b"WS:v1:id:task:";
 const D_SUBMISSION: &[u8] = b"WS:v1:id:submission:";
 const D_GUIDE: &[u8] = b"WS:v1:id:guide:";
+const D_BUNDLE: &[u8] = b"WS:v1:id:bundle:";
+const D_LEASE: &[u8] = b"WS:v1:id:lease:";
 
 /// Deterministic project id: H(tag ‖ owner ‖ title).
 pub fn derive_project(owner: &H256, title: &str) -> ProjectId {
@@ -301,6 +392,24 @@ pub fn derive_guide(project: &H256, version: u32, content_hash: &H256) -> GuideI
         &version_bytes,
         content_hash.as_bytes(),
     ])
+}
+
+/// Deterministic bundle id: H(tag ‖ task ‖ author ‖ content_hash).
+///
+/// Admission is content-committed: admitting the exact same artifact set
+/// for the same (task, author) twice derives the same id and is refused.
+pub fn derive_bundle(task: &H256, author: &H256, content_hash: &H256) -> BundleId {
+    Hash::sha256_concat(&[
+        D_BUNDLE,
+        task.as_bytes(),
+        author.as_bytes(),
+        content_hash.as_bytes(),
+    ])
+}
+
+/// Deterministic lease id: H(tag ‖ submission ‖ reviewer).
+pub fn derive_lease(submission: &H256, reviewer: &H256) -> LeaseId {
+    Hash::sha256_concat(&[D_LEASE, submission.as_bytes(), reviewer.as_bytes()])
 }
 
 // ---------------------------------------------------------------------------
@@ -341,6 +450,60 @@ pub(crate) fn store_submission(
     let bytes = postcard::to_allocvec(record)
         .map_err(|e| Error::Serialization(format!("submission record encode: {e}")))?;
     state.set(&kv_key(K_SUBMISSION, &submission), &bytes)
+}
+
+/// Write a bundle record under its id (see [`store_task`]).
+pub(crate) fn store_bundle(
+    state: &mut State,
+    bundle: BundleId,
+    record: &BundleRecord,
+) -> Result<()> {
+    let bytes = postcard::to_allocvec(record)
+        .map_err(|e| Error::Serialization(format!("bundle record encode: {e}")))?;
+    state.set(&kv_key(K_BUNDLE, &bundle), &bytes)
+}
+
+/// Write a lease record under its id (see [`store_task`]).
+pub(crate) fn store_lease(state: &mut State, lease: LeaseId, record: &LeaseRecord) -> Result<()> {
+    let bytes = postcard::to_allocvec(record)
+        .map_err(|e| Error::Serialization(format!("lease record encode: {e}")))?;
+    state.set(&kv_key(K_LEASE, &lease), &bytes)
+}
+
+/// Key of the (reviewer, project) active-lease index pointer.
+fn lease_active_key(reviewer: &H256, project: &H256) -> Vec<u8> {
+    let mut key = K_LEASE_ACTIVE.to_vec();
+    key.extend_from_slice(reviewer.as_bytes());
+    key.extend_from_slice(project.as_bytes());
+    key
+}
+
+/// Overwrite the (reviewer, project) active-lease index pointer. The index
+/// is the invariant mechanism for one active lease per reviewer per
+/// project; a consumed lease's index is simply replaced by the next lease.
+pub(crate) fn set_active_lease(
+    state: &mut State,
+    reviewer: &H256,
+    project: &H256,
+    lease: LeaseId,
+) -> Result<()> {
+    let bytes = postcard::to_allocvec(&lease)
+        .map_err(|e| Error::Serialization(format!("active lease encode: {e}")))?;
+    state.set(&lease_active_key(reviewer, project), &bytes)
+}
+
+/// Read the (reviewer, project) active-lease index, if present.
+pub(crate) fn active_lease(
+    state: &State,
+    reviewer: &H256,
+    project: &H256,
+) -> Result<Option<LeaseId>> {
+    match state.get(&lease_active_key(reviewer, project))? {
+        Some(bytes) => postcard::from_bytes::<LeaseId>(&bytes)
+            .map(Some)
+            .map_err(|e| Error::Serialization(format!("active lease decode: {e}"))),
+        None => Ok(None),
+    }
 }
 
 fn event(event_type: &str, data: &[u8]) -> Result<Event> {
@@ -438,6 +601,16 @@ pub fn get_active_guide(state: &State, project: &H256) -> Result<Option<GuideId>
             .map_err(|e| Error::Serialization(format!("active guide decode: {e}"))),
         None => Ok(None),
     }
+}
+
+/// Read a bundle record.
+pub fn get_bundle(state: &State, bundle: &H256) -> Result<Option<BundleRecord>> {
+    decode_from_state(state, K_BUNDLE, bundle, "bundle")
+}
+
+/// Read a review lease record.
+pub fn get_lease(state: &State, lease: &H256) -> Result<Option<LeaseRecord>> {
+    decode_from_state(state, K_LEASE, lease, "lease")
 }
 
 /// The next expected sequence number for `(account, key_id)`.
@@ -948,8 +1121,10 @@ pub(crate) fn handle_task_start(state: &mut State, account: H256, payload: &[u8]
     )
 }
 
-/// submission.create: the assigned worker submits finished work, under a
-/// `SubmitWork` grant issued by that task's own sponsor (issue #22).
+/// submission.create: the assigned worker submits finished work, binding
+/// one admitted bundle's committed content to the immutable submission
+/// record. Consumption of the bundle is atomic with submission creation
+/// (bundle.admit precedes submission per the manifest-admission flow).
 pub(crate) fn handle_submission_create(
     state: &mut State,
     account: H256,
@@ -991,17 +1166,302 @@ pub(crate) fn handle_submission_create(
             "submission already exists".to_string(),
         ));
     }
+
+    // A submission must consume an admitted bundle carrying the same
+    // content commitment — nothing is submitted that was never admitted,
+    // and a bundle backs at most one submission.
+    let bundle_id = derive_bundle(&p.task, &account, &p.content_hash);
+    let mut bundle = get_bundle(state, &bundle_id)?.ok_or_else(|| {
+        Error::NotFound(format!(
+            "no admitted bundle for task {} content {}",
+            p.task, p.content_hash
+        ))
+    })?;
+    // The derived id already commits to (task, author, content); assert the
+    // stored record agrees so a corrupted/injected record can never back a
+    // submission with different terms.
+    if bundle.task != p.task || bundle.author != account || bundle.content_hash != p.content_hash {
+        return Err(Error::InvalidTransition(format!(
+            "bundle {bundle_id} does not match the submitted task/author/content"
+        )));
+    }
+    if bundle.status == BundleStatus::Consumed {
+        return Err(Error::InvalidTransition(format!(
+            "bundle {} was already consumed by a submission",
+            bundle_id
+        )));
+    }
+    bundle.status = BundleStatus::Consumed;
+
     let record = SubmissionRecord {
         task: p.task,
         author: account,
         content_hash: p.content_hash,
         status: SubmissionStatus::Pending,
+        accept_reviews: 0,
     };
+    store_bundle(state, bundle_id, &bundle)?;
     store_submission(state, submission_id, &record)?;
 
     event(
         "submission.created",
-        &postcard::to_allocvec(&(submission_id, p.task))
+        &postcard::to_allocvec(&(submission_id, p.task, bundle_id))
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// bundle.admit: the assigned worker registers a prepared, content-committed
+/// bundle for the started task, ready to back exactly one submission.
+///
+/// Rules: only the task's assignee may admit (bundle admission is personal
+/// to the worker the sponsor hired), only on a Started task, under a
+/// `SubmitWork` grant from the task's own sponsor. The bundle id commits
+/// to (task, author, content), so re-admitting identical content is
+/// deterministically refused; admitting different content derives a new
+/// bundle. The bundle is not consumable by anyone but its author — the
+/// submission that consumes it must carry author + content matching it.
+pub(crate) fn handle_bundle_admit(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: BundleAdmitPayload = decode_payload(payload)?;
+
+    let worker_rec = load_actor(state, &account)?;
+    authz::require_worker(&worker_rec, "admit a bundle")?;
+
+    let task_bytes = state
+        .get(&kv_key(K_TASK, &p.task))?
+        .ok_or_else(|| Error::NotFound(format!("task {}", p.task)))?;
+    let task: TaskRecord = postcard::from_bytes(&task_bytes)
+        .map_err(|e| Error::Serialization(format!("task record decode: {e}")))?;
+    authz::require_grant(
+        &worker_rec,
+        Capability::SubmitWork,
+        &task.sponsor,
+        "admit a bundle",
+    )?;
+    if task.assignee != Some(account) {
+        return Err(Error::Unauthorized(
+            "only the assigned worker admits bundles".to_string(),
+        ));
+    }
+    if task.status != TaskStatus::Started {
+        return Err(Error::InvalidTransition(format!(
+            "task {} is not admitting bundles (status {:?})",
+            p.task, task.status
+        )));
+    }
+
+    let bundle_id = derive_bundle(&p.task, &account, &p.content_hash);
+    if state.get(&kv_key(K_BUNDLE, &bundle_id))?.is_some() {
+        return Err(Error::InvalidTransition(format!(
+            "bundle {} already admitted",
+            bundle_id
+        )));
+    }
+    let record = BundleRecord {
+        task: p.task,
+        author: account,
+        content_hash: p.content_hash,
+        status: BundleStatus::Ready,
+    };
+    store_bundle(state, bundle_id, &record)?;
+
+    event(
+        "bundle.admitted",
+        &postcard::to_allocvec(&(bundle_id, p.task))
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// review.lease: an eligible reviewer claims the exclusive right to decide
+/// one submission.
+///
+/// Eligibility (all checked before any mutation):
+/// - the reviewer exists and is a registered actor,
+/// - the reviewer is NOT the submission's author (non-self review) and not
+///   the task's sponsor (the payer cannot review their own buy),
+/// - the reviewer holds no other active lease in this project (the
+///   one-active-lease-per-reviewer-per-project invariant).
+///
+/// The lease id is derived (submission, reviewer), so a reviewer leasing
+/// the same submission twice — including after consuming a lease there —
+/// deterministically derives the same id and is refused.
+pub(crate) fn handle_review_lease(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: ReviewLeasePayload = decode_payload(payload)?;
+
+    // Reviewer eligibility: must be a registered actor (unregistered keys
+    // are refused before anything else). Role itself is free — workers
+    // cross-review each other per the MVP review policy.
+    let _reviewer = load_actor(state, &account)?;
+
+    let submission_bytes = state
+        .get(&kv_key(K_SUBMISSION, &p.submission))?
+        .ok_or_else(|| Error::NotFound(format!("submission {}", p.submission)))?;
+    let submission: SubmissionRecord = postcard::from_bytes(&submission_bytes)
+        .map_err(|e| Error::Serialization(format!("submission record decode: {e}")))?;
+    if submission.status != SubmissionStatus::Pending {
+        return Err(Error::InvalidTransition(format!(
+            "submission {} is not open for review (status {:?})",
+            p.submission, submission.status
+        )));
+    }
+    if submission.author == account {
+        return Err(Error::Unauthorized(
+            "a submission's author cannot review it".to_string(),
+        ));
+    }
+
+    let task_bytes = state
+        .get(&kv_key(K_TASK, &submission.task))?
+        .ok_or_else(|| Error::NotFound(format!("task {}", submission.task)))?;
+    let task: TaskRecord = postcard::from_bytes(&task_bytes)
+        .map_err(|e| Error::Serialization(format!("task record decode: {e}")))?;
+    if task.sponsor == account {
+        return Err(Error::Unauthorized(
+            "the task's sponsor cannot review its submissions".to_string(),
+        ));
+    }
+    // Reviews only belong to work that is still under way: once the task is
+    // Completed its remaining submissions can never be accepted, so refusing
+    // new leases keeps the review surface aligned with `accept.final`.
+    if task.status != TaskStatus::Started {
+        return Err(Error::InvalidTransition(format!(
+            "task {} is not under review (status {:?})",
+            submission.task, task.status
+        )));
+    }
+
+    // One active lease per reviewer per project (the (reviewer, project)
+    // index pointer; consumed leases' pointers are overwritten by the
+    // next lease). The project id comes from the task record — task
+    // creation guarantees it exists.
+    let project = task.project;
+    if let Some(existing_lease) = active_lease(state, &account, &project)? {
+        if let Some(existing) = get_lease(state, &existing_lease)? {
+            if existing.status == LeaseStatus::Active {
+                return Err(Error::InvalidTransition(format!(
+                    "reviewer already holds an active lease ({existing_lease}) in this project"
+                )));
+            }
+        }
+    }
+
+    let lease_id = derive_lease(&p.submission, &account);
+    if state.get(&kv_key(K_LEASE, &lease_id))?.is_some() {
+        return Err(Error::InvalidTransition(format!(
+            "lease {} already exists for this reviewer on this submission",
+            lease_id
+        )));
+    }
+    let record = LeaseRecord {
+        submission: p.submission,
+        reviewer: account,
+        status: LeaseStatus::Active,
+    };
+    store_lease(state, lease_id, &record)?;
+    set_active_lease(state, &account, &project, lease_id)?;
+
+    event(
+        "review.leased",
+        &postcard::to_allocvec(&(lease_id, p.submission, account))
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// review.decide: the lease holder records one immutable decision on the
+/// leased submission.
+///
+/// The lease must be the caller's own and still Active; deciding consumes
+/// it (one decision per lease), and the decision is appended to the MMR as
+/// a `ReviewRecord`. An `Accept` decision increments the submission's
+/// review counter — the gate `accept.final` later requires.
+pub(crate) fn handle_review_decide(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: ReviewDecidePayload = decode_payload(payload)?;
+
+    // The decider must still be a registered actor; the lease binds the
+    // actual authority (only its holder may decide).
+    let _reviewer = load_actor(state, &account)?;
+
+    let submission_bytes = state
+        .get(&kv_key(K_SUBMISSION, &p.submission))?
+        .ok_or_else(|| Error::NotFound(format!("submission {}", p.submission)))?;
+    let mut submission: SubmissionRecord = postcard::from_bytes(&submission_bytes)
+        .map_err(|e| Error::Serialization(format!("submission record decode: {e}")))?;
+    if submission.status != SubmissionStatus::Pending {
+        return Err(Error::InvalidTransition(format!(
+            "submission {} is not open for review (status {:?})",
+            p.submission, submission.status
+        )));
+    }
+
+    // Mirror `review.lease` / `accept.final`: a Completed task no longer
+    // accepts review decisions on its residual pending submissions.
+    let task_bytes = state
+        .get(&kv_key(K_TASK, &submission.task))?
+        .ok_or_else(|| Error::NotFound(format!("task {}", submission.task)))?;
+    let task: TaskRecord = postcard::from_bytes(&task_bytes)
+        .map_err(|e| Error::Serialization(format!("task record decode: {e}")))?;
+    if task.status != TaskStatus::Started {
+        return Err(Error::InvalidTransition(format!(
+            "task {} is not under review (status {:?})",
+            submission.task, task.status
+        )));
+    }
+
+    let lease_id = derive_lease(&p.submission, &account);
+    let mut lease = get_lease(state, &lease_id)?.ok_or_else(|| {
+        Error::NotFound(format!(
+            "no review lease for {} on submission {}",
+            account, p.submission
+        ))
+    })?;
+    if lease.status != LeaseStatus::Active {
+        return Err(Error::InvalidTransition(format!(
+            "lease {} is not active (status {:?})",
+            lease_id, lease.status
+        )));
+    }
+    if lease.reviewer != account {
+        return Err(Error::Unauthorized(
+            "only the lease holder decides".to_string(),
+        ));
+    }
+
+    // One decision per lease: the decision consumes it.
+    lease.status = LeaseStatus::Consumed;
+    store_lease(state, lease_id, &lease)?;
+
+    let record = ReviewRecord {
+        submission: p.submission,
+        reviewer: account,
+        decision: p.decision,
+        lease: lease_id,
+    };
+    let record_bytes =
+        postcard::to_allocvec(&record).map_err(|e| Error::Serialization(e.to_string()))?;
+    let record_index = state.append_record(&record_bytes)? as u64;
+
+    if p.decision == ReviewDecision::Accept {
+        submission.accept_reviews = submission
+            .accept_reviews
+            .checked_add(1)
+            .ok_or_else(|| Error::InvalidTransition("review counter exhausted".to_string()))?;
+        store_submission(state, p.submission, &submission)?;
+    }
+
+    event(
+        "review.decided",
+        &postcard::to_allocvec(&(p.submission, record_index, p.decision))
             .map_err(|e| Error::Serialization(e.to_string()))?,
     )
 }
@@ -1033,6 +1493,17 @@ pub(crate) fn handle_accept_final(
         return Err(Error::InvalidTransition(format!(
             "submission {} is not acceptable (status {:?})",
             p.submission, submission.status
+        )));
+    }
+    // Review-gated payout (issue #25): a sponsor can only accept work that
+    // survived review — at least one recorded `Accept` decision. One positive
+    // decision is sufficient by design: another reviewer's Reject or
+    // NeedsRevision does not veto acceptance (reviews are independent
+    // opinions, not a quorum).
+    if submission.accept_reviews == 0 {
+        return Err(Error::InvalidTransition(format!(
+            "submission {} has no accepting review; acceptance is gated on review",
+            p.submission
         )));
     }
 

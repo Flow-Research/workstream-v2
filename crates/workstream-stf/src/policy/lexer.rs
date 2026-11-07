@@ -322,7 +322,9 @@ fn read_bytes_literal(source: &str, start: usize) -> Result<(TokenKind, usize), 
     }
 
     let mut value = Vec::with_capacity(len);
-    for pair in nibbles.chunks_exact(2) {
+    let (pairs, remainder) = nibbles.as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    for pair in pairs {
         value.push((pair[0] << 4) | pair[1]);
     }
     Ok((TokenKind::Bytes(value), i))

@@ -16,7 +16,7 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.88"
 authors = ["Musa AbdulKareem <wisemrmusa@gmail.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/wisemrmusa/workstream"
@@ -43,7 +43,7 @@ k256 = { version = "0.14", features = ["ecdsa", "sha256"] }
 ed25519-dalek = { version = "3.0", features = ["rand_core"] }
 
 # Types & utils
-toml = "0.8"
+toml = "1.1"
 thiserror = "2.0"
 anyhow = "1.0"
 tracing = "0.1"

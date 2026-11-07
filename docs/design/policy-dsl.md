@@ -259,7 +259,7 @@ a typed stack:
 4. Stack simulation: no underflow at any instruction; `LIST(n)` consumes
    exactly `n` same-typed scalar values and pushes one `list<T>`; both operands
    of every binary op have the required types; final stack is exactly `[bool]`.
-5. Limits: stack depth ≤ 256, list length ≤ 256, byte literal ≤ 64 bytes.
+5. Limits: stack depth ≤ 4096, list length ≤ 256, byte literal ≤ 64 bytes.
 
 A program that fails any check is rejected; it is never partially executed.
 Because there are no jumps, the static stack simulation is exact.
@@ -288,8 +288,13 @@ Because there are no jumps, the static stack simulation is exact.
 | List length | 256 |
 | Byte literal / bytes value | 64 bytes |
 | Parser nesting depth | 128 |
-| Operand stack depth | 256 |
+| Operand stack depth | 4096 |
 | Runtime steps | `code.len()` (defensive hard stop at 4096) |
+
+`MAX_STACK` equals `MAX_INSTRUCTIONS`: each instruction pushes at most one
+value, so the instruction bound already bounds the operand stack. This keeps a
+maximal 256-element list literal valid even when other operands are waiting
+(for example, `x in [..]` or a list nested inside another expression).
 
 ### 6.3 Arithmetic
 

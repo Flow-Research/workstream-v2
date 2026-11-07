@@ -14,6 +14,7 @@ use workstream_tx::TxValidator;
 
 pub(crate) mod authz;
 pub mod handlers;
+pub mod policy;
 
 pub use handlers::{
     derive_bundle, derive_guide, derive_lease, derive_project, derive_submission, derive_task,

@@ -135,8 +135,19 @@ fn policy_id_is_stable_and_domain_separated() {
     let changed = ELIGIBILITY.replace("reputation >= 50", "reputation >= 51");
     assert_ne!(first.id(), policy(&changed).id());
 
-    // Domain separation: the id is not the bare bytecode hash.
+    // Domain separation: the id is not the bare bytecode hash, and it reuses
+    // the single workspace policy-hash helper.
     assert_ne!(first.id(), Hash::sha256(&first.to_bytecode()));
+    assert_eq!(
+        first.id(),
+        workstream_crypto::hash_policy(&first.to_bytecode())
+    );
+}
+
+#[test]
+fn allow_terminator_is_required() {
+    assert!(Policy::compile(r#"policy "p" { allow true }"#).is_err());
+    assert!(Policy::compile(r#"policy "p" { allow true; }"#).is_ok());
 }
 
 #[test]
@@ -187,6 +198,49 @@ fn missing_and_mistyped_oracles_are_errors() {
             ("unrelated", Value::Bytes(vec![1, 2, 3])),
         ]))
         .unwrap());
+}
+
+#[test]
+fn oracle_input_bounds_are_enforced() {
+    let bytes_policy = policy(r#"policy "p" { oracle blob: bytes; allow blob == 0x00; }"#);
+    let oversized = bytes_policy
+        .evaluate(&input(&[("blob", Value::Bytes(vec![0; MAX_BYTES + 1]))]))
+        .unwrap_err();
+    assert!(matches!(
+        oversized,
+        PolicyError::OracleBytesTooLong { ref name, len, max }
+            if name == "blob" && len == MAX_BYTES + 1 && max == MAX_BYTES
+    ));
+
+    let trivial = policy(r#"policy "p" { allow true; }"#);
+    let too_many: OracleInput = (0..=MAX_ORACLE_INPUTS)
+        .map(|index| (format!("extra{index}"), Value::Int(0)))
+        .collect();
+    assert_eq!(
+        trivial.evaluate(&too_many).unwrap_err(),
+        PolicyError::TooManyInputs {
+            count: MAX_ORACLE_INPUTS + 1,
+            max: MAX_ORACLE_INPUTS,
+        }
+    );
+}
+
+#[test]
+fn nested_lists_are_rejected() {
+    let cases = [
+        r#"policy "p" { allow [true] in [[true]]; }"#,
+        r#"policy "p" { allow [[1], [2]] == [[1], [2]]; }"#,
+        r#"policy "p" { allow count([[true]]); }"#,
+    ];
+    for source in cases {
+        assert!(
+            matches!(
+                Policy::compile(source),
+                Err(PolicyError::TypeMismatch { .. })
+            ),
+            "expected TypeMismatch for {source}"
+        );
+    }
 }
 
 #[test]

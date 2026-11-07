@@ -38,20 +38,15 @@ mod tests;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use workstream_core::hash::Hash;
-
 pub use bytecode::Instr;
 pub use error::{
     PolicyError, MAX_BYTES, MAX_INSTRUCTIONS, MAX_LIST, MAX_NAME_LEN, MAX_NESTING, MAX_ORACLES,
-    MAX_SOURCE_LEN, MAX_STACK,
+    MAX_ORACLE_INPUTS, MAX_SOURCE_LEN, MAX_STACK,
 };
 pub use workstream_core::types::PolicyId;
 
 /// Maximum identifier length (oracle names).
 pub const MAX_IDENT_LEN: usize = 64;
-
-/// Domain separation tag for policy ids.
-const POLICY_DOMAIN: &[u8] = b"WS:v1:policy:";
 
 /// A policy type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,10 +182,12 @@ impl Policy {
         bytecode::encode(self)
     }
 
-    /// Hash-locked policy id: `SHA-256("WS:v1:policy:" ‖ bytecode)`.
+    /// Hash-locked policy id: `SHA-256("POLICY_V1:" ‖ bytecode)`.
+    ///
+    /// Reuses [`workstream_crypto::hash_policy`] so there is exactly one
+    /// policy-hash definition in the workspace.
     pub fn id(&self) -> PolicyId {
-        let bytes = self.to_bytecode();
-        Hash::sha256_concat(&[POLICY_DOMAIN, &bytes])
+        workstream_crypto::hash_policy(&self.to_bytecode())
     }
 
     /// Policy name (opaque metadata committed to by the id).

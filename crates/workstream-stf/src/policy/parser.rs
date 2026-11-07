@@ -158,11 +158,8 @@ impl Parser {
 
         self.expect(TokenKind::Allow, "`allow`")?;
         let allow = self.parse_or()?;
-        // The trailing semicolon is optional so both `allow x }` and
-        // `allow x; }` are accepted (the latter reads better in long policies).
-        if *self.peek() == TokenKind::Semi {
-            self.advance();
-        }
+        // The contract requires the terminator: `allow <expr>; }`.
+        self.expect(TokenKind::Semi, "`;`")?;
         self.expect(TokenKind::RBrace, "`}`")?;
         self.expect(TokenKind::Eof, "end of input")?;
 

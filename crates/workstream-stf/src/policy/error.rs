@@ -10,6 +10,8 @@ pub const MAX_SOURCE_LEN: usize = 16 * 1024;
 pub const MAX_NAME_LEN: usize = 128;
 /// Maximum oracle count.
 pub const MAX_ORACLES: usize = 64;
+/// Maximum entries in an oracle input map (declared plus extra facts).
+pub const MAX_ORACLE_INPUTS: usize = 1024;
 /// Maximum instructions in a program (also the hard runtime step bound).
 pub const MAX_INSTRUCTIONS: usize = 4096;
 /// Maximum elements in a list literal.
@@ -124,6 +126,16 @@ pub enum PolicyError {
         expected: String,
         found: String,
     },
+
+    #[error("oracle {name:?} byte value is {len} bytes, maximum is {max}")]
+    OracleBytesTooLong {
+        name: String,
+        len: usize,
+        max: usize,
+    },
+
+    #[error("oracle input has {count} entries, maximum is {max}")]
+    TooManyInputs { count: usize, max: usize },
 
     #[error("integer overflow during policy evaluation")]
     ArithmeticOverflow,

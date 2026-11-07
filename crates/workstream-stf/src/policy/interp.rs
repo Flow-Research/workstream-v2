@@ -6,14 +6,25 @@
 //! instruction vector exactly once and stops at `HALT`.
 
 use super::bytecode::Instr;
-use super::error::{PolicyError, MAX_INSTRUCTIONS, MAX_LIST, MAX_STACK};
-use super::{OracleInput, Policy, Value};
+use super::error::{
+    PolicyError, MAX_BYTES, MAX_INSTRUCTIONS, MAX_LIST, MAX_ORACLE_INPUTS, MAX_STACK,
+};
+use super::{OracleInput, Policy, Type, Value};
 
 /// Evaluate a validated policy against its declared oracle inputs.
 ///
 /// Returns the boolean result of `allow`. Missing or mistyped oracle values
 /// are errors; the caller decides whether an error means deny (fail closed).
 pub fn evaluate(policy: &Policy, oracles: &OracleInput) -> Result<bool, PolicyError> {
+    // Bound the whole host-provided fact set, not just the declared subset:
+    // lookup work must stay independent of an attacker-controlled map size.
+    if oracles.len() > MAX_ORACLE_INPUTS {
+        return Err(PolicyError::TooManyInputs {
+            count: oracles.len(),
+            max: MAX_ORACLE_INPUTS,
+        });
+    }
+
     // Validate the complete oracle interface up front. Extra inputs are
     // intentionally ignored so hosts can pass a shared fact set.
     for oracle in &policy.oracles {
@@ -28,6 +39,15 @@ pub fn evaluate(policy: &Policy, oracles: &OracleInput) -> Result<bool, PolicyEr
                 expected: oracle.ty.to_string(),
                 found: value.type_of().to_string(),
             });
+        }
+        if let (Type::Bytes, Value::Bytes(bytes)) = (&oracle.ty, value) {
+            if bytes.len() > MAX_BYTES {
+                return Err(PolicyError::OracleBytesTooLong {
+                    name: oracle.name.clone(),
+                    len: bytes.len(),
+                    max: MAX_BYTES,
+                });
+            }
         }
     }
 

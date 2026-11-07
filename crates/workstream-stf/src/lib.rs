@@ -94,11 +94,13 @@ impl StateTransitionFunction {
     /// Execute a single transaction under the given fork context
     ///
     /// Contract: the caller (sequencer #16 / node #32) must only supply
-    /// transactions that are valid for the current state. Handlers apply
-    /// actions sequentially without rollback; a mid-transaction failure
-    /// leaves earlier actions applied and must not occur inside executed
-    /// blocks. Payload well-formedness is pre-checked here so malformed
-    /// payloads abort before any state mutation.
+    /// transactions that are valid for the current state. Execution is atomic:
+    /// actions run against an isolated draft of the state, and the shared
+    /// state is replaced only when every action succeeds — a mid-transaction
+    /// failure discards the draft, so no partial changes leak into live state
+    /// while the transaction's nonce stays reusable for a retry. Payload
+    /// well-formedness is pre-checked here so malformed payloads abort before
+    /// any state mutation.
     pub fn execute_tx(&self, state: &mut State, tx: &Transaction) -> Result<Vec<Event>> {
         debug!("Executing transaction for account {:?}", tx.account);
 
@@ -122,11 +124,15 @@ impl StateTransitionFunction {
             self.decode_action_payload(action)?;
         }
 
-        // Execute all actions atomically
+        // Execute all actions atomically against an isolated draft. If any
+        // action fails, the draft is dropped and the shared state — including
+        // the nonce — is left exactly as it was: no partial changes are
+        // committed and the transaction's nonce remains reusable.
+        let mut draft = state.clone();
         let mut events = Vec::new();
         for (idx, action) in tx.actions.iter().enumerate() {
             debug!("Executing action {}: {:?}", idx, action.action_type);
-            let action_events = self.execute_action(state, tx, action)?;
+            let action_events = self.execute_action(&mut draft, tx, action)?;
             events.extend(action_events);
         }
 
@@ -139,8 +145,10 @@ impl StateTransitionFunction {
                 tx.account, tx.nonce.key_id
             ))
         })?;
-        handlers::set_nonce(state, &tx.account, tx.nonce.key_id, next)?;
+        handlers::set_nonce(&mut draft, &tx.account, tx.nonce.key_id, next)?;
 
+        // Commit: replace the shared state only after full success.
+        *state = draft;
         Ok(events)
     }
 
@@ -368,6 +376,10 @@ mod mvp_handler_tests {
 
     fn worker2() -> AccountId {
         H256::from_bytes([44u8; 32])
+    }
+
+    fn worker3() -> AccountId {
+        H256::from_bytes([55u8; 32])
     }
 
     fn content_hash(b: u8) -> H256 {
@@ -764,11 +776,20 @@ mod mvp_handler_tests {
         .unwrap()
     }
 
-    /// Drive the Started task to a review-gated submission: the assignee
-    /// admits its bundle, the submission consumes it, and the reviewer
-    /// leases + records an `Accept`. Leaves the submission `Pending` with
-    /// `accept_reviews == 1` — ready for `accept.final` by the sponsor.
-    fn admit_submit_and_review(
+    /// Drive the standard setup through claim + start, leaving the task
+    /// `Started` with `worker()` assigned and ready to admit work.
+    fn setup_started_task(
+        book: &mut NonceBook,
+    ) -> (StateTransitionFunction, State, ProjectId, TaskId) {
+        let (stf, mut state, project, task) = setup_task_ready(book);
+        stf.execute_tx(&mut state, &claim_tx(book, task)).unwrap();
+        stf.execute_tx(&mut state, &start_tx(book, task)).unwrap();
+        (stf, state, project, task)
+    }
+
+    /// Admit a bundle for the assigned worker and consume it with a
+    /// submission, without recording any review.
+    fn admit_and_submit(
         book: &mut NonceBook,
         stf: &StateTransitionFunction,
         state: &mut State,
@@ -792,7 +813,21 @@ mod mvp_handler_tests {
             ActionType::SubmissionCreate,
             submit_payload(task, content),
         );
-        let submission = submission_id(task, content);
+        submission_id(task, content)
+    }
+
+    /// Drive the Started task to a review-gated submission: the assignee
+    /// admits its bundle, the submission consumes it, and the reviewer
+    /// leases + records an `Accept`. Leaves the submission `Pending` with
+    /// `accept_reviews == 1` — ready for `accept.final` by the sponsor.
+    fn admit_submit_and_review(
+        book: &mut NonceBook,
+        stf: &StateTransitionFunction,
+        state: &mut State,
+        task: TaskId,
+        content: H256,
+    ) -> SubmissionId {
+        let submission = admit_and_submit(book, stf, state, task, content);
         run(
             stf,
             state,
@@ -1371,6 +1406,513 @@ mod mvp_handler_tests {
     }
 
     #[test]
+    fn bundle_cannot_be_admitted_twice() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, task) = setup_started_task(&mut book);
+        let content = content_hash(1);
+        let bundle_id = handlers::derive_bundle(&task, &worker(), &content);
+
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::BundleAdmit,
+            bundle_admit_payload(task, content),
+        );
+        assert_eq!(
+            handlers::get_bundle(&state, &bundle_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            BundleStatus::Ready
+        );
+
+        // Re-admitting identical content derives the same id and is refused.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::BundleAdmit,
+            bundle_admit_payload(task, content),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)), "got {err:?}");
+        assert_eq!(
+            handlers::get_bundle(&state, &bundle_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            BundleStatus::Ready,
+            "the failed re-admission must not mutate the bundle"
+        );
+    }
+
+    #[test]
+    fn submission_requires_matching_admitted_bundle() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, task) = setup_started_task(&mut book);
+        let content = content_hash(1);
+        let other_content = content_hash(2);
+
+        // Nothing admitted yet: no bundle, no submission.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::SubmissionCreate,
+            submit_payload(task, content),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)), "got {err:?}");
+
+        // A bundle for one content commitment cannot back another.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::BundleAdmit,
+            bundle_admit_payload(task, content),
+        );
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::SubmissionCreate,
+            submit_payload(task, other_content),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)), "got {err:?}");
+
+        let bundle_id = handlers::derive_bundle(&task, &worker(), &content);
+        assert_eq!(
+            handlers::get_bundle(&state, &bundle_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            BundleStatus::Ready,
+            "the mismatched submission must leave the bundle unconsumed"
+        );
+
+        // The matching submission consumes the bundle exactly once.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::SubmissionCreate,
+            submit_payload(task, content),
+        );
+        assert_eq!(
+            handlers::get_bundle(&state, &bundle_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            BundleStatus::Consumed
+        );
+        assert!(
+            handlers::get_submission(&state, &submission_id(task, content))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn author_and_sponsor_cannot_lease_a_review() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, task) = setup_started_task(&mut book);
+        let submission = admit_and_submit(&mut book, &stf, &mut state, task, content_hash(1));
+
+        for denied in [worker(), sponsor()] {
+            let err = attempt(
+                &stf,
+                &mut state,
+                &mut book,
+                denied,
+                ActionType::ReviewLease,
+                review_lease_payload(submission),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, Error::Unauthorized(_)),
+                "got {err:?} for {denied:?}"
+            );
+        }
+
+        // An independent registered actor can lease the same submission.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            reviewer(),
+            ActionType::ReviewLease,
+            review_lease_payload(submission),
+        );
+        let lease_id = handlers::derive_lease(&submission, &reviewer());
+        assert_eq!(
+            handlers::get_lease(&state, &lease_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            LeaseStatus::Active
+        );
+    }
+
+    #[test]
+    fn reviewer_holds_one_active_lease_per_project() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, task) = setup_started_task(&mut book);
+        let first = admit_and_submit(&mut book, &stf, &mut state, task, content_hash(1));
+        let second = admit_and_submit(&mut book, &stf, &mut state, task, content_hash(2));
+
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            reviewer(),
+            ActionType::ReviewLease,
+            review_lease_payload(first),
+        );
+
+        // A second active lease in the same project is refused.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            reviewer(),
+            ActionType::ReviewLease,
+            review_lease_payload(second),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)), "got {err:?}");
+
+        // Consuming the first lease frees the reviewer for another one.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            reviewer(),
+            ActionType::ReviewDecide,
+            review_decide_payload(first, ReviewDecision::NeedsRevision),
+        );
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            reviewer(),
+            ActionType::ReviewLease,
+            review_lease_payload(second),
+        );
+        let second_lease = handlers::derive_lease(&second, &reviewer());
+        assert_eq!(
+            handlers::get_lease(&state, &second_lease)
+                .unwrap()
+                .unwrap()
+                .status,
+            LeaseStatus::Active
+        );
+    }
+
+    #[test]
+    fn review_decision_consumes_lease_once() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, task) = setup_started_task(&mut book);
+        let submission = admit_and_submit(&mut book, &stf, &mut state, task, content_hash(1));
+
+        // Deciding without a lease is not permitted.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            reviewer(),
+            ActionType::ReviewDecide,
+            review_decide_payload(submission, ReviewDecision::Accept),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)), "got {err:?}");
+
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            reviewer(),
+            ActionType::ReviewLease,
+            review_lease_payload(submission),
+        );
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            reviewer(),
+            ActionType::ReviewDecide,
+            review_decide_payload(submission, ReviewDecision::Accept),
+        );
+
+        let record = handlers::get_submission(&state, &submission)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.accept_reviews, 1);
+        assert_eq!(state.mmr.size(), 1);
+
+        // The lease is consumed: a second decision is refused.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            reviewer(),
+            ActionType::ReviewDecide,
+            review_decide_payload(submission, ReviewDecision::Accept),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)), "got {err:?}");
+
+        // Holding no lease on the submission also blocks another actor.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor2(),
+            ActionType::ReviewDecide,
+            review_decide_payload(submission, ReviewDecision::Accept),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)), "got {err:?}");
+        assert_eq!(
+            handlers::get_submission(&state, &submission)
+                .unwrap()
+                .unwrap()
+                .accept_reviews,
+            1
+        );
+        assert_eq!(state.mmr.size(), 1);
+    }
+
+    #[test]
+    fn accept_requires_an_accepting_review() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, task) = setup_started_task(&mut book);
+        let submission = admit_and_submit(&mut book, &stf, &mut state, task, content_hash(1));
+
+        // No review at all: payout is gated.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::AcceptFinal,
+            submission_payload(submission),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)), "got {err:?}");
+        assert!(
+            format!("{err}").contains("no accepting review"),
+            "got {err}"
+        );
+
+        // A non-Accept review still does not unlock acceptance.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            reviewer(),
+            ActionType::ReviewLease,
+            review_lease_payload(submission),
+        );
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            reviewer(),
+            ActionType::ReviewDecide,
+            review_decide_payload(submission, ReviewDecision::Reject),
+        );
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::AcceptFinal,
+            submission_payload(submission),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)), "got {err:?}");
+
+        assert_eq!(
+            handlers::get_submission(&state, &submission)
+                .unwrap()
+                .unwrap()
+                .status,
+            SubmissionStatus::Pending
+        );
+        assert_eq!(
+            handlers::get_task(&state, &task).unwrap().unwrap().status,
+            TaskStatus::Started
+        );
+        assert_eq!(state.mmr.size(), 1); // the reject is still auditable
+    }
+
+    #[test]
+    fn one_accept_is_sufficient_despite_another_rejection() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, task) = setup_started_task(&mut book);
+        let submission = admit_and_submit(&mut book, &stf, &mut state, task, content_hash(1));
+
+        // First reviewer rejects.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            reviewer(),
+            ActionType::ReviewLease,
+            review_lease_payload(submission),
+        );
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            reviewer(),
+            ActionType::ReviewDecide,
+            review_decide_payload(submission, ReviewDecision::Reject),
+        );
+
+        // An independent second reviewer accepts; one positive review is
+        // sufficient and the earlier rejection is not a veto.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker3(),
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Worker),
+        );
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker3(),
+            ActionType::ReviewLease,
+            review_lease_payload(submission),
+        );
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker3(),
+            ActionType::ReviewDecide,
+            review_decide_payload(submission, ReviewDecision::Accept),
+        );
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::AcceptFinal,
+            submission_payload(submission),
+        );
+
+        assert_eq!(
+            handlers::get_submission(&state, &submission)
+                .unwrap()
+                .unwrap()
+                .status,
+            SubmissionStatus::Accepted
+        );
+        assert_eq!(
+            handlers::get_task(&state, &task).unwrap().unwrap().status,
+            TaskStatus::Completed
+        );
+        // reject + accept + acceptance
+        assert_eq!(state.mmr.size(), 3);
+    }
+
+    #[test]
+    fn completed_task_closes_review_surface() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _, task) = setup_started_task(&mut book);
+        let first = admit_and_submit(&mut book, &stf, &mut state, task, content_hash(1));
+        let second = admit_and_submit(&mut book, &stf, &mut state, task, content_hash(2));
+
+        // The default reviewer holds an active lease on the second submission.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            reviewer(),
+            ActionType::ReviewLease,
+            review_lease_payload(second),
+        );
+
+        // A third worker reviews the first submission; accepting it completes
+        // the task while the second submission is still Pending.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker3(),
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Worker),
+        );
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker3(),
+            ActionType::ReviewLease,
+            review_lease_payload(first),
+        );
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker3(),
+            ActionType::ReviewDecide,
+            review_decide_payload(first, ReviewDecision::Accept),
+        );
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::AcceptFinal,
+            submission_payload(first),
+        );
+        assert_eq!(
+            handlers::get_task(&state, &task).unwrap().unwrap().status,
+            TaskStatus::Completed
+        );
+
+        // The existing lease cannot be used after completion...
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            reviewer(),
+            ActionType::ReviewDecide,
+            review_decide_payload(second, ReviewDecision::Accept),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)), "got {err:?}");
+        assert!(format!("{err}").contains("not under review"), "got {err}");
+
+        // ...and no new lease can be opened on the residual submission.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker3(),
+            ActionType::ReviewLease,
+            review_lease_payload(second),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)), "got {err:?}");
+        assert!(format!("{err}").contains("not under review"), "got {err}");
+    }
+
+    #[test]
     fn malformed_payload_aborts_without_state_change() {
         let mut state = State::new();
         let stf = mvp_stf();
@@ -1383,6 +1925,58 @@ mod mvp_handler_tests {
         assert_eq!(state.root(), root_before, "no state mutation before decode");
         assert_eq!(handlers::get_nonce(&state, &sponsor(), 0).unwrap(), 0);
         assert!(stf.execute_tx(&mut state, &bad).is_err());
+    }
+
+    #[test]
+    fn failed_multi_action_tx_leaves_no_partial_changes() {
+        let stf = mvp_stf();
+        let mut state = State::new();
+        let root_before = state.root();
+
+        // A two-action transaction whose first action succeeds and second
+        // fails: registering the same account twice. Atomic execution must
+        // discard the draft on failure — no actor record may leak into live
+        // state while the nonce stays reusable for a retry.
+        let bad = TxBuilder::new()
+            .chain_id(1)
+            .account(sponsor())
+            .nonce(0, 0)
+            .add_action(
+                ActionType::ActorRegister,
+                register_payload(ActorRole::Sponsor),
+            )
+            .add_action(
+                ActionType::ActorRegister,
+                register_payload(ActorRole::Sponsor),
+            )
+            .fee(FeeSpec {
+                payer: FeePayer::Self_,
+                asset_id: 0,
+                max_fee: 1000,
+            })
+            .build()
+            .unwrap();
+
+        let err = stf.execute_tx(&mut state, &bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)), "got {err:?}");
+        assert_eq!(
+            state.root(),
+            root_before,
+            "failed tx must not commit partial changes"
+        );
+        assert!(handlers::get_actor(&state, &sponsor()).unwrap().is_none());
+        assert_eq!(handlers::get_nonce(&state, &sponsor(), 0).unwrap(), 0);
+
+        // The nonce was never burned: a clean single-action retry succeeds.
+        let retry = raw_tx(
+            sponsor(),
+            0,
+            0,
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Sponsor),
+        );
+        stf.execute_tx(&mut state, &retry).unwrap();
+        assert!(handlers::get_actor(&state, &sponsor()).unwrap().is_some());
     }
 
     #[test]

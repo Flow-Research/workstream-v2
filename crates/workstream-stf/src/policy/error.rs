@@ -21,7 +21,13 @@ pub const MAX_BYTES: usize = 64;
 /// Maximum parser recursion depth.
 pub const MAX_NESTING: usize = 128;
 /// Maximum operand stack depth.
-pub const MAX_STACK: usize = 256;
+///
+/// Every instruction pushes at most one value, so `MAX_INSTRUCTIONS` also
+/// bounds the operand stack. Keeping this equal to `MAX_INSTRUCTIONS` ensures
+/// a maximum-length list literal is not rejected merely because other operands
+/// are waiting (for example, `x in [..256..]` or a list nested inside another
+/// expression).
+pub const MAX_STACK: usize = MAX_INSTRUCTIONS;
 
 /// Errors produced while compiling, decoding, or evaluating a policy.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

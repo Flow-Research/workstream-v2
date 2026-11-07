@@ -345,6 +345,48 @@ fn parser_limits_are_enforced() {
 }
 
 #[test]
+fn maximal_list_fits_when_operands_are_waiting() {
+    // Membership keeps `x` on the stack while all MAX_LIST elements are pushed.
+    let ints = vec!["1"; MAX_LIST].join(", ");
+    let membership = format!(r#"policy "membership" {{ oracle x: int; allow x in [{ints}]; }}"#);
+    assert!(Policy::compile(&membership).is_ok());
+
+    // A pending left operand of `&&` adds another value to the peak.
+    let bools = vec!["true"; MAX_LIST].join(", ");
+    let guarded =
+        format!(r#"policy "guarded" {{ oracle a: bool; allow a && count([{bools}]) > 0; }}"#);
+    assert!(Policy::compile(&guarded).is_ok());
+}
+
+#[test]
+fn maximal_list_fits_at_max_nesting() {
+    // Each parenthesized right operand leaves one more value waiting. The list
+    // consumes the final nesting level, so the peak is
+    // MAX_LIST + MAX_NESTING operands.
+    let items = vec!["1"; MAX_LIST].join(", ");
+    let mut expr = format!("x in [{items}]");
+    for _ in 0..(MAX_NESTING - 1) {
+        expr = format!("true && ({expr})");
+    }
+    let source = format!(r#"policy "nested" {{ oracle x: int; allow {expr}; }}"#);
+    assert!(Policy::compile(&source).is_ok());
+}
+
+#[test]
+fn stack_bound_covers_nested_list_operands() {
+    // A list inside another list keeps all earlier outer elements waiting while
+    // the inner list is built, so the peak exceeds MAX_LIST + MAX_NESTING.
+    let inner = vec!["true"; MAX_LIST].join(", ");
+    let mut outer = String::from("true");
+    for _ in 1..(MAX_LIST - 1) {
+        outer.push_str(", true");
+    }
+    outer.push_str(&format!(", count([{inner}]) > 0"));
+    let source = format!(r#"policy "nested-list" {{ allow count([{outer}]) > 0; }}"#);
+    assert!(Policy::compile(&source).is_ok());
+}
+
+#[test]
 fn decode_rejects_corrupt_bytecode() {
     let valid = policy(ELIGIBILITY).to_bytecode();
 

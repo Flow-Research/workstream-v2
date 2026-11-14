@@ -162,11 +162,10 @@ impl<S: BlockSource> Node<S> {
         }
 
         // 2. Parent hash
-        let expected_parent = self
-            .last_header
-            .as_ref()
-            .map(header_hash)
-            .unwrap_or_else(|| Hash::sha256(GENESIS_PARENT_HASH));
+        let expected_parent = match self.last_header.as_ref() {
+            Some(header) => header_hash(header)?,
+            None => Hash::sha256(GENESIS_PARENT_HASH),
+        };
         if block.header.parent_hash != expected_parent {
             return Err(Error::Consensus(format!(
                 "parent hash mismatch at height {}: expected {}, got {}",
@@ -178,7 +177,11 @@ impl<S: BlockSource> Node<S> {
         validate_header_fork(&block.header, &self.schedule)?;
 
         // 4. Tx root
-        let leaf_hashes: Vec<H256> = block.transactions.iter().map(tx_hash).collect();
+        let leaf_hashes: Vec<H256> = block
+            .transactions
+            .iter()
+            .map(|tx| tx_hash(tx).unwrap())
+            .collect();
         let computed_tx_root = tx_root(&leaf_hashes);
         if block.header.tx_root != computed_tx_root {
             return Err(Error::Consensus(format!(
@@ -459,8 +462,8 @@ mod tests {
 
         // The node's last header equals the sequencer's produced header
         assert_eq!(
-            header_hash(node.last_header().unwrap()),
-            header_hash(&sequencer_header)
+            header_hash(node.last_header().unwrap()).unwrap(),
+            header_hash(&sequencer_header).unwrap()
         );
     }
 }

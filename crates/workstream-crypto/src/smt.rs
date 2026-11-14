@@ -361,8 +361,9 @@ impl<S: NodeStore> SmTree<S> {
 
     /// Insert or update a key-value pair.
     ///
-    /// Returns the new root hash.
-    pub fn update(&mut self, key: &H256, value_hash: H256) -> H256
+    /// Returns the new root hash, or a typed fail-closed error if the tree
+    /// cannot be traversed within its fixed depth (SEC-005).
+    pub fn update(&mut self, key: &H256, value_hash: H256) -> Result<H256>
     where
         S: NodeStore,
     {
@@ -373,16 +374,25 @@ impl<S: NodeStore> SmTree<S> {
                     key: *key,
                     value_hash,
                 };
-                self.store.put(leaf)
+                Ok(self.store.put(leaf))
             }
             Some(root) => self.update_at(root, key, value_hash, 0),
-        };
+        }?;
         self.root = Some(new_root);
-        new_root
+        Ok(new_root)
     }
 
     /// Recursive update traversing the tree.
-    fn update_at(&mut self, node_hash: H256, key: &H256, value_hash: H256, depth: usize) -> H256
+    ///
+    /// Returns a typed error instead of panicking on depth overflow so the
+    /// consensus-critical path fails closed (SEC-005).
+    fn update_at(
+        &mut self,
+        node_hash: H256,
+        key: &H256,
+        value_hash: H256,
+        depth: usize,
+    ) -> Result<H256>
     where
         S: NodeStore,
     {
@@ -392,7 +402,7 @@ impl<S: NodeStore> SmTree<S> {
                 key: *key,
                 value_hash,
             };
-            return self.store.put(leaf);
+            return Ok(self.store.put(leaf));
         }
 
         let node = self.store.get(&node_hash).expect("node must exist");
@@ -407,33 +417,38 @@ impl<S: NodeStore> SmTree<S> {
                         key: *key,
                         value_hash,
                     };
-                    self.store.put(new_leaf)
+                    Ok(self.store.put(new_leaf))
                 } else {
                     // Collision: split into inner nodes until keys diverge
                     self.split_leaf(leaf_key, node_hash, key, value_hash, depth)
                 }
             }
             SmtNode::Inner { left, right } => {
+                // Fixed-depth tree: a descent past the depth limit is a typed,
+                // fail-closed error — never a panic in a consensus path (SEC-005).
                 if depth >= TREE_DEPTH {
-                    panic!("exceeded tree depth");
+                    return Err(Error::DepthLimitExceeded);
                 }
                 let (new_left, new_right) = if get_bit(key, depth) {
-                    let new_right = self.update_at(right, key, value_hash, depth + 1);
+                    let new_right = self.update_at(right, key, value_hash, depth + 1)?;
                     (left, new_right)
                 } else {
-                    let new_left = self.update_at(left, key, value_hash, depth + 1);
+                    let new_left = self.update_at(left, key, value_hash, depth + 1)?;
                     (new_left, right)
                 };
                 let inner = SmtNode::Inner {
                     left: new_left,
                     right: new_right,
                 };
-                self.store.put(inner)
+                Ok(self.store.put(inner))
             }
         }
     }
 
     /// Split a leaf node when a new key collides with an existing one.
+    ///
+    /// Returns the new subtree hash, or a typed error if the split cannot be
+    /// performed within the tree's depth budget.
     fn split_leaf(
         &mut self,
         existing_key: H256,
@@ -441,7 +456,7 @@ impl<S: NodeStore> SmTree<S> {
         new_key: &H256,
         new_value_hash: H256,
         depth: usize,
-    ) -> H256
+    ) -> Result<H256>
     where
         S: NodeStore,
     {
@@ -478,7 +493,7 @@ impl<S: NodeStore> SmTree<S> {
             current = self.store.put(SmtNode::Inner { left, right });
         }
 
-        current
+        Ok(current)
     }
 
     /// Delete a key from the tree.
@@ -656,7 +671,7 @@ impl<S: NodeStore> SmTree<S> {
             }
             SmtNode::Inner { left, right } => {
                 if depth >= TREE_DEPTH {
-                    return Err(Error::State("proof depth exceeded".to_string()));
+                    return Err(Error::DepthLimitExceeded);
                 }
 
                 let go_right = get_bit(key, depth);
@@ -711,8 +726,7 @@ mod tests {
 
         let key = H256::from_bytes([1u8; 32]);
         let value_hash = H256::from_bytes([2u8; 32]);
-        tree.update(&key, value_hash);
-
+        tree.update(&key, value_hash).unwrap();
         assert_ne!(tree.root(), empty_root);
         assert!(!tree.is_empty());
     }
@@ -724,7 +738,7 @@ mod tests {
         let value_hash = H256::from_bytes([2u8; 32]);
 
         assert_eq!(tree.get(&key), None);
-        tree.update(&key, value_hash);
+        tree.update(&key, value_hash).unwrap();
         assert_eq!(tree.get(&key), Some(value_hash));
     }
 
@@ -735,10 +749,10 @@ mod tests {
         let v1 = H256::from_bytes([2u8; 32]);
         let v2 = H256::from_bytes([3u8; 32]);
 
-        tree.update(&key, v1);
+        tree.update(&key, v1).unwrap();
         assert_eq!(tree.get(&key), Some(v1));
 
-        tree.update(&key, v2);
+        tree.update(&key, v2).unwrap();
         assert_eq!(tree.get(&key), Some(v2));
     }
 
@@ -756,7 +770,7 @@ mod tests {
             .collect();
 
         for (k, v) in &entries {
-            tree.update(k, *v);
+            tree.update(k, *v).unwrap();
         }
 
         for (k, v) in &entries {
@@ -770,7 +784,7 @@ mod tests {
         let key = H256::from_bytes([1u8; 32]);
         let value_hash = H256::from_bytes([2u8; 32]);
 
-        tree.update(&key, value_hash);
+        tree.update(&key, value_hash).unwrap();
         assert_eq!(tree.get(&key), Some(value_hash));
 
         tree.delete(&key);
@@ -784,7 +798,7 @@ mod tests {
 
         let key = H256::from_bytes([1u8; 32]);
         let value_hash = H256::from_bytes([2u8; 32]);
-        tree.update(&key, value_hash);
+        tree.update(&key, value_hash).unwrap();
         assert_ne!(tree.root(), empty_root);
 
         tree.delete(&key);
@@ -800,13 +814,11 @@ mod tests {
         let v2 = H256::from_bytes([20u8; 32]);
 
         let mut tree_a: SmTree = SmTree::new();
-        tree_a.update(&k1, v1);
-        tree_a.update(&k2, v2);
-
+        tree_a.update(&k1, v1).unwrap();
+        tree_a.update(&k2, v2).unwrap();
         let mut tree_b: SmTree = SmTree::new();
-        tree_b.update(&k2, v2);
-        tree_b.update(&k1, v1);
-
+        tree_b.update(&k2, v2).unwrap();
+        tree_b.update(&k1, v1).unwrap();
         assert_eq!(tree_a.root(), tree_b.root());
     }
 
@@ -817,11 +829,9 @@ mod tests {
         let v = H256::from_bytes([10u8; 32]);
 
         let mut tree_a: SmTree = SmTree::new();
-        tree_a.update(&k1, v);
-
+        tree_a.update(&k1, v).unwrap();
         let mut tree_b: SmTree = SmTree::new();
-        tree_b.update(&k2, v);
-
+        tree_b.update(&k2, v).unwrap();
         assert_ne!(tree_a.root(), tree_b.root());
     }
 
@@ -832,11 +842,9 @@ mod tests {
         let v2 = H256::from_bytes([20u8; 32]);
 
         let mut tree_a: SmTree = SmTree::new();
-        tree_a.update(&k, v1);
-
+        tree_a.update(&k, v1).unwrap();
         let mut tree_b: SmTree = SmTree::new();
-        tree_b.update(&k, v2);
-
+        tree_b.update(&k, v2).unwrap();
         assert_ne!(tree_a.root(), tree_b.root());
     }
 
@@ -854,9 +862,8 @@ mod tests {
         let v2 = H256::from_bytes([20u8; 32]);
 
         let mut tree: SmTree = SmTree::new();
-        tree.update(&key1, v1);
-        tree.update(&key2, v2);
-
+        tree.update(&key1, v1).unwrap();
+        tree.update(&key2, v2).unwrap();
         assert_eq!(tree.get(&key1), Some(v1));
         assert_eq!(tree.get(&key2), Some(v2));
     }
@@ -901,9 +908,8 @@ mod tests {
         let v2 = H256::from_bytes([20u8; 32]);
 
         let mut tree: SmTree = SmTree::new();
-        tree.update(&k1, v1);
-        tree.update(&k2, v2);
-
+        tree.update(&k1, v1).unwrap();
+        tree.update(&k2, v2).unwrap();
         let root_before = tree.root();
         tree.delete(&k1);
         let root_after = tree.root();
@@ -928,7 +934,7 @@ mod tests {
             val_bytes[0..8].copy_from_slice(&((i + 1000) as u64).to_le_bytes());
             let val = H256::from_bytes(val_bytes);
 
-            tree.update(&key, val);
+            tree.update(&key, val).unwrap();
         }
 
         // Verify all keys exist
@@ -1006,6 +1012,75 @@ mod tests {
     }
 
     // ========================================================================
+    // Fail-closed depth handling (SEC-005 / issue #73)
+    // ========================================================================
+
+    /// Store that can host arbitrarily deep (crafted) inner-node chains.
+    #[derive(Clone, Debug, Default)]
+    struct ChainNodeStore {
+        nodes: HashMap<H256, SmtNode>,
+    }
+
+    impl NodeStore for ChainNodeStore {
+        fn get(&self, hash: &H256) -> Option<SmtNode> {
+            self.nodes.get(hash).cloned()
+        }
+        fn put(&mut self, node: SmtNode) -> H256 {
+            let hash = node.hash();
+            self.nodes.insert(hash, node);
+            hash
+        }
+    }
+
+    /// A key whose bits are all zero always takes the "left" branch, so a
+    /// crafted deep inner-node chain drives the descent to the depth limit.
+    fn zero_key() -> H256 {
+        H256::from_bytes([0u8; 32])
+    }
+
+    #[test]
+    fn depth_overflow_is_typed_fail_closed_error() {
+        // Build a chain of Inner nodes reaching depth == TREE_DEPTH, then
+        // surface it as the tree root and attempt an update through it.
+        let mut store = ChainNodeStore::default();
+        let empty = SmTree::<ChainNodeStore>::new().root();
+
+        // Deepest node: an Inner examined exactly at the depth limit.
+        let mut node_hash = store.put(SmtNode::Inner {
+            left: H256::ZERO,
+            right: empty,
+        });
+
+        // Wrap in Inner nodes up to the root (depth 0).
+        for _ in 0..256 {
+            let parent = SmtNode::Inner {
+                left: node_hash,
+                right: empty,
+            };
+            node_hash = store.put(parent);
+        }
+
+        let mut tree: SmTree<ChainNodeStore> = SmTree::with_store(store);
+        tree.root = Some(node_hash);
+
+        let err = tree
+            .update(&zero_key(), H256::from_bytes([2u8; 32]))
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::DepthLimitExceeded),
+            "expected a typed depth-limit error, got {err:?}"
+        );
+        assert_eq!(err.code(), workstream_core::ErrorCode::E1002);
+
+        // Fail-closed: the error is fatal-classified and the root was not
+        // mutated — the transition is rejected, not panicked on.
+        assert!(err.is_fatal());
+        assert!(!err.is_retryable());
+        assert_eq!(tree.root(), node_hash);
+        assert!(!tree.is_empty());
+    }
+
+    // ========================================================================
     // Proof Tests
     // ========================================================================
 
@@ -1025,8 +1100,7 @@ mod tests {
         let mut tree: SmTree = SmTree::new();
         let key = H256::from_bytes([1u8; 32]);
         let value = H256::from_bytes([2u8; 32]);
-        tree.update(&key, value);
-
+        tree.update(&key, value).unwrap();
         let proof = tree.prove(&key).unwrap();
         assert_eq!(proof.kind, SmtProofKind::Inclusion);
         assert_eq!(proof.value_hash, Some(value));
@@ -1039,8 +1113,7 @@ mod tests {
         let k1 = H256::from_bytes([1u8; 32]);
         let k2 = H256::from_bytes([2u8; 32]);
         let v1 = H256::from_bytes([10u8; 32]);
-        tree.update(&k1, v1);
-
+        tree.update(&k1, v1).unwrap();
         // Prove k2 doesn't exist
         let proof = tree.prove(&k2).unwrap();
         assert_eq!(proof.kind, SmtProofKind::NonExistence);
@@ -1071,7 +1144,7 @@ mod tests {
             .collect();
 
         for (k, v) in keys.iter().zip(values.iter()) {
-            tree.update(k, *v);
+            tree.update(k, *v).unwrap();
         }
 
         let root = tree.root();
@@ -1096,8 +1169,7 @@ mod tests {
         let mut tree: SmTree = SmTree::new();
         let key = H256::from_bytes([1u8; 32]);
         let value = H256::from_bytes([2u8; 32]);
-        tree.update(&key, value);
-
+        tree.update(&key, value).unwrap();
         let proof = tree.prove(&key).unwrap();
 
         // Verify against wrong root
@@ -1110,8 +1182,7 @@ mod tests {
         let mut tree: SmTree = SmTree::new();
         let key = H256::from_bytes([1u8; 32]);
         let value = H256::from_bytes([2u8; 32]);
-        tree.update(&key, value);
-
+        tree.update(&key, value).unwrap();
         let mut proof = tree.prove(&key).unwrap();
         let root = tree.root();
 
@@ -1159,9 +1230,8 @@ mod tests {
             0,
             0,
         ]);
-        tree.update(&k1, H256::from_bytes([1u8; 32]));
-        tree.update(&k2, H256::from_bytes([2u8; 32]));
-
+        tree.update(&k1, H256::from_bytes([1u8; 32])).unwrap();
+        tree.update(&k2, H256::from_bytes([2u8; 32])).unwrap();
         let mut proof = tree.prove(&k1).unwrap();
         let root = tree.root();
 
@@ -1189,9 +1259,8 @@ mod tests {
         let v2 = H256::from_bytes([20u8; 32]);
 
         let mut tree: SmTree = SmTree::new();
-        tree.update(&key1, v1);
-        tree.update(&key2, v2);
-
+        tree.update(&key1, v1).unwrap();
+        tree.update(&key2, v2).unwrap();
         let root = tree.root();
 
         // Both should have valid inclusion proofs
@@ -1213,9 +1282,8 @@ mod tests {
         let k2 = H256::from_bytes([2u8; 32]);
         let v = H256::from_bytes([10u8; 32]);
 
-        tree.update(&k1, v);
-        tree.update(&k2, v);
-
+        tree.update(&k1, v).unwrap();
+        tree.update(&k2, v).unwrap();
         // Delete k1
         tree.delete(&k1);
         let root = tree.root();
@@ -1241,9 +1309,8 @@ mod tests {
         let v1 = H256::from_bytes([10u8; 32]);
         let v2 = H256::from_bytes([20u8; 32]);
 
-        tree.update(&k1, v1);
-        tree.update(&k2, v2);
-
+        tree.update(&k1, v1).unwrap();
+        tree.update(&k2, v2).unwrap();
         let root = tree.root();
 
         // Get the valid inclusion proof for k1
@@ -1279,7 +1346,7 @@ mod tests {
         let k2 = H256::from_bytes([2u8; 32]);
         let v1 = H256::from_bytes([10u8; 32]);
 
-        tree.update(&k1, v1);
+        tree.update(&k1, v1).unwrap();
         let root = tree.root();
 
         // Get the valid inclusion proof for k1
@@ -1308,8 +1375,7 @@ mod tests {
         let mut tree: SmTree = SmTree::new();
         let key = H256::from_bytes([1u8; 32]);
         let value = H256::from_bytes([2u8; 32]);
-        tree.update(&key, value);
-
+        tree.update(&key, value).unwrap();
         let mut proof = tree.prove(&key).unwrap();
         let root = tree.root();
 
@@ -1360,9 +1426,8 @@ mod tests {
             0,
             0,
         ]);
-        tree.update(&k1, H256::from_bytes([1u8; 32]));
-        tree.update(&k2, H256::from_bytes([2u8; 32]));
-
+        tree.update(&k1, H256::from_bytes([1u8; 32])).unwrap();
+        tree.update(&k2, H256::from_bytes([2u8; 32])).unwrap();
         let mut proof = tree.prove(&k1).unwrap();
         let root = tree.root();
 
@@ -1395,7 +1460,7 @@ mod proptests {
             value in arb_h256()
         ) {
             let mut tree: SmTree = SmTree::new();
-            tree.update(&key, value);
+            tree.update(&key, value).unwrap();
             prop_assert_eq!(tree.get(&key), Some(value));
         }
 
@@ -1405,7 +1470,7 @@ mod proptests {
             value in arb_h256()
         ) {
             let mut tree: SmTree = SmTree::new();
-            tree.update(&key, value);
+            tree.update(&key, value).unwrap();
             tree.delete(&key);
             prop_assert_eq!(tree.get(&key), None);
         }
@@ -1419,8 +1484,8 @@ mod proptests {
             let mut tree_b: SmTree = SmTree::new();
 
             for (k, v) in &pairs {
-                tree_a.update(k, *v);
-                tree_b.update(k, *v);
+                tree_a.update(k, *v).unwrap();
+                tree_b.update(k, *v).unwrap();
             }
 
             prop_assert_eq!(tree_a.root(), tree_b.root());
@@ -1433,13 +1498,13 @@ mod proptests {
             // Insert in forward and reverse order
             let mut tree_fwd: SmTree = SmTree::new();
             for (k, v) in &pairs {
-                tree_fwd.update(k, *v);
+                tree_fwd.update(k, *v).unwrap();
             }
 
             let mut tree_rev: SmTree = SmTree::new();
             pairs.reverse();
             for (k, v) in &pairs {
-                tree_rev.update(k, *v);
+                tree_rev.update(k, *v).unwrap();
             }
 
             prop_assert_eq!(tree_fwd.root(), tree_rev.root());
@@ -1454,11 +1519,9 @@ mod proptests {
             prop_assume!(k1 != k2);
 
             let mut tree_a: SmTree = SmTree::new();
-            tree_a.update(&k1, v);
-
+            tree_a.update(&k1, v).unwrap();
             let mut tree_b: SmTree = SmTree::new();
-            tree_b.update(&k2, v);
-
+            tree_b.update(&k2, v).unwrap();
             prop_assert_ne!(tree_a.root(), tree_b.root());
         }
 
@@ -1471,11 +1534,9 @@ mod proptests {
             prop_assume!(v1 != v2);
 
             let mut tree_a: SmTree = SmTree::new();
-            tree_a.update(&k, v1);
-
+            tree_a.update(&k, v1).unwrap();
             let mut tree_b: SmTree = SmTree::new();
-            tree_b.update(&k, v2);
-
+            tree_b.update(&k, v2).unwrap();
             prop_assert_ne!(tree_a.root(), tree_b.root());
         }
 
@@ -1485,8 +1546,7 @@ mod proptests {
             value in arb_h256()
         ) {
             let mut tree: SmTree = SmTree::new();
-            tree.update(&key, value);
-
+            tree.update(&key, value).unwrap();
             let proof = tree.prove(&key).unwrap();
             prop_assert_eq!(proof.kind, SmtProofKind::Inclusion);
             prop_assert!(proof.verify(tree.root()));
@@ -1501,8 +1561,7 @@ mod proptests {
             prop_assume!(inserted != missing);
 
             let mut tree: SmTree = SmTree::new();
-            tree.update(&inserted, value);
-
+            tree.update(&inserted, value).unwrap();
             let proof = tree.prove(&missing).unwrap();
             prop_assert_eq!(proof.kind, SmtProofKind::NonExistence);
             prop_assert!(proof.verify(tree.root()));
@@ -1514,7 +1573,7 @@ mod proptests {
         ) {
             let mut tree: SmTree = SmTree::new();
             for (k, v) in &pairs {
-                tree.update(k, *v);
+                tree.update(k, *v).unwrap();
             }
 
             let root = tree.root();

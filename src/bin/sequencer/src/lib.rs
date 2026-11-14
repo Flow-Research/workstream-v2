@@ -38,11 +38,13 @@ const TX_ROOT_EMPTY: &[u8] = b"WS:v1:txroot:empty";
 const HEADER_TAG: &[u8] = b"WS:v1:header:";
 
 /// Canonical transaction hash: H(tag ‖ postcard(tx)).
-pub fn tx_hash(tx: &Transaction) -> H256 {
-    // Serialization of these structs is infallible in practice; a failure
-    // indicates a programming error, not a runtime condition.
-    let bytes = postcard::to_allocvec(tx).expect("postcard encode Transaction");
-    Hash::sha256_concat(&[TX_TAG, &bytes])
+///
+/// Returns a typed error if canonical encoding fails; the transaction hash is
+/// a consensus commitment, so it must fail closed rather than panic (SEC-008).
+pub fn tx_hash(tx: &Transaction) -> Result<H256> {
+    let bytes = postcard::to_allocvec(tx)
+        .map_err(|e| Error::Serialization(format!("transaction encode: {e}")))?;
+    Ok(Hash::sha256_concat(&[TX_TAG, &bytes]))
 }
 
 /// Canonical commit over ordered tx hashes (duplicate-last pairing fold).
@@ -54,13 +56,15 @@ pub fn tx_root(leaf_hashes: &[H256]) -> H256 {
     }
     let mut level: Vec<H256> = leaf_hashes.to_vec();
     while level.len() > 1 {
-        if level.len() % 2 == 1 {
-            let last = *level.last().unwrap();
-            level.push(last);
-        }
+        // Pair adjacent hashes; a trailing unpaired hash is committed against
+        // itself (deterministic duplicate-last fold, panic-free).
         level = level
             .chunks(2)
-            .map(|pair| Hash::sha256_concat(&[TX_NODE_TAG, pair[0].as_bytes(), pair[1].as_bytes()]))
+            .map(|pair| {
+                let left = pair[0];
+                let right = pair.get(1).copied().unwrap_or(left);
+                Hash::sha256_concat(&[TX_NODE_TAG, left.as_bytes(), right.as_bytes()])
+            })
             .collect();
     }
     level[0]
@@ -68,11 +72,15 @@ pub fn tx_root(leaf_hashes: &[H256]) -> H256 {
 
 /// Header hash. The proof is excluded (a proof may be attached later without
 /// changing the chain hash); everything else participates.
-pub fn header_hash(header: &BlockHeader) -> H256 {
+///
+/// Returns a typed error if canonical encoding fails; the header hash is a
+/// consensus commitment, so it must fail closed rather than panic (SEC-008).
+pub fn header_hash(header: &BlockHeader) -> Result<H256> {
     let mut exposed = header.clone();
     exposed.proof = None;
-    let bytes = postcard::to_allocvec(&exposed).expect("postcard encode BlockHeader");
-    Hash::sha256_concat(&[HEADER_TAG, &bytes])
+    let bytes = postcard::to_allocvec(&exposed)
+        .map_err(|e| Error::Serialization(format!("block header encode: {e}")))?;
+    Ok(Hash::sha256_concat(&[HEADER_TAG, &bytes]))
 }
 
 /// FIFO, deduplicating, bounded mempool.
@@ -101,7 +109,7 @@ impl Mempool {
     /// Admit a transaction; returns its canonical hash.
     pub fn submit(&mut self, tx: Transaction) -> Result<H256> {
         self.validator.validate(&tx)?;
-        let hash = tx_hash(&tx);
+        let hash = tx_hash(&tx)?;
         if self.seen.contains(&hash) {
             return Err(Error::Transaction(format!(
                 "transaction {hash} already submitted"
@@ -214,14 +222,16 @@ impl Sequencer {
         self.state = draft;
         let state_root = self.state.root();
 
-        let tx_leaf_hashes: Vec<H256> = included.iter().map(tx_hash).collect();
-        let tx_root = tx_root(&tx_leaf_hashes);
+        let mut tx_leaf_hashes: Vec<H256> = Vec::with_capacity(included.len());
+        for tx in &included {
+            tx_leaf_hashes.push(tx_hash(tx)?);
+        }
+        let computed_tx_root = tx_root(&tx_leaf_hashes);
 
-        let parent_hash = self
-            .last_header
-            .as_ref()
-            .map(header_hash)
-            .unwrap_or_else(|| Hash::sha256(GENESIS_PARENT_HASH));
+        let parent_hash = match self.last_header.as_ref() {
+            Some(header) => header_hash(header)?,
+            None => Hash::sha256(GENESIS_PARENT_HASH),
+        };
 
         // Consensus-derived timestamp: slot grid over block height.
         let timestamp = number * SLOT_SECONDS;
@@ -230,7 +240,7 @@ impl Sequencer {
             number,
             parent_hash,
             timestamp,
-            tx_root,
+            tx_root: computed_tx_root,
             state_root,
             da_ref: H256::ZERO, // DA integration is a later milestone item
             fork_id: fork.fork_id,
@@ -291,13 +301,15 @@ mod tests {
             0,
             ActionType::ActorRegister,
             b"x".to_vec(),
-        ));
+        ))
+        .unwrap();
         let b = tx_hash(&seq_tx(
             account(2),
             0,
             ActionType::ActorRegister,
             b"y".to_vec(),
-        ));
+        ))
+        .unwrap();
 
         assert_ne!(a, b);
         assert_eq!(tx_root(&[a]), tx_root(&[a]));
@@ -328,12 +340,12 @@ mod tests {
             proof_system_version: 1,
             proof: None,
         };
-        let bare = header_hash(&header);
+        let bare = header_hash(&header).unwrap();
         header.proof = Some(Proof {
             proof_data: vec![0x00; 8],
             proof_type: ProofType::ZkVm,
         });
-        let proven = header_hash(&header);
+        let proven = header_hash(&header).unwrap();
         assert_eq!(bare, proven);
     }
 
@@ -450,7 +462,10 @@ mod tests {
         // next block links to the previous header hash
         let block2 = sequencer.build_block(None).unwrap();
         assert_eq!(block2.header.number, 2);
-        assert_eq!(block2.header.parent_hash, header_hash(&block.header));
+        assert_eq!(
+            block2.header.parent_hash,
+            header_hash(&block.header).unwrap()
+        );
         assert_eq!(block2.header.timestamp, 2 * SLOT_SECONDS);
     }
 
@@ -479,7 +494,11 @@ mod tests {
         assert_eq!(block.transactions.len(), 3);
 
         // the tx root commits exactly to the included transactions
-        let hashes = block.transactions.iter().map(tx_hash).collect::<Vec<_>>();
+        let hashes: Vec<H256> = block
+            .transactions
+            .iter()
+            .map(|tx| tx_hash(tx).unwrap())
+            .collect();
         assert_eq!(block.header.tx_root, tx_root(&hashes));
 
         // the failing transaction was dropped without touching the chain
@@ -511,10 +530,13 @@ mod tests {
         // Header chain integrity end to end
         assert_eq!(
             project_block.header.parent_hash,
-            header_hash(&with_tx.header)
+            header_hash(&with_tx.header).unwrap()
         );
 
-        assert_eq!(with_tx.header.parent_hash, header_hash(&empty.header));
+        assert_eq!(
+            with_tx.header.parent_hash,
+            header_hash(&empty.header).unwrap()
+        );
     }
 
     #[test]

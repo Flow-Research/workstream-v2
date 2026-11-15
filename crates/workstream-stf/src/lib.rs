@@ -3,6 +3,8 @@
 //! Deterministic state transition: stf(state, block) -> (new_state, events)
 //! All logic must be deterministic - no wall clocks, no network calls, no randomness
 
+use std::collections::BTreeMap;
+
 use tracing::{debug, info};
 use workstream_core::fork::{
     features, validate_header_fork, ForkActivationHook, ForkConfig, ForkSchedule, NoopForkHook,
@@ -11,6 +13,8 @@ use workstream_core::hash::Hash;
 use workstream_core::{types::*, Error, Result};
 use workstream_state::State;
 use workstream_tx::TxValidator;
+
+use crate::policy::{OracleInput, Policy, PolicyError};
 
 pub(crate) mod authz;
 pub mod handlers;
@@ -46,6 +50,9 @@ pub struct StateTransitionFunction {
     fork_schedule: ForkSchedule,
     /// Hook invoked when a fork activates (state migrations etc.)
     activation_hook: std::sync::Arc<dyn ForkActivationHook + Send + Sync>,
+    /// Policies for policy-driven authorization (issue #77), keyed by
+    /// action key. Absent entries leave the interim RBAC layer in charge.
+    policies: BTreeMap<String, Policy>,
 }
 
 impl StateTransitionFunction {
@@ -54,6 +61,7 @@ impl StateTransitionFunction {
             tx_validator: TxValidator::new(),
             fork_schedule: ForkSchedule::default(),
             activation_hook: std::sync::Arc::new(NoopForkHook),
+            policies: BTreeMap::new(),
         }
     }
 
@@ -64,6 +72,7 @@ impl StateTransitionFunction {
             tx_validator: TxValidator::new(),
             fork_schedule,
             activation_hook: std::sync::Arc::new(NoopForkHook),
+            policies: BTreeMap::new(),
         })
     }
 
@@ -78,7 +87,37 @@ impl StateTransitionFunction {
             tx_validator: TxValidator::new(),
             fork_schedule,
             activation_hook: hook,
+            policies: BTreeMap::new(),
         })
+    }
+
+    /// Attach compiled policies keyed by action key (issue #77).
+    ///
+    /// Policies take precedence over the interim RBAC checks for the
+    /// actions they cover; actions without a configured policy fall through
+    /// to the interim RBAC layer.
+    pub fn with_policies(mut self, policies: BTreeMap<String, Policy>) -> Self {
+        self.policies = policies;
+        self
+    }
+
+    /// Evaluate the policy configured for `action` against the supplied
+    /// oracles.
+    ///
+    /// Fail-closed contract (see `docs/design/policy-dsl.md` §4.3): when a
+    /// policy is configured for the action, its decision is authoritative;
+    /// an evaluation error is surfaced to the caller as `Err(_)` so the caller
+    /// can deny. When no policy is configured the interim RBAC layer remains
+    /// authoritative.
+    pub fn evaluate_policy(
+        &self,
+        action: &str,
+        oracles: &OracleInput,
+    ) -> std::result::Result<bool, PolicyError> {
+        match self.policies.get(action) {
+            None => Ok(true),
+            Some(policy) => policy.evaluate(oracles),
+        }
     }
 
     /// The fork schedule this STF enforces
@@ -214,6 +253,22 @@ impl StateTransitionFunction {
     ) -> Result<Vec<Event>> {
         let account = tx.account;
         let payload = action.payload.as_slice();
+
+        // Policy gate (issue #77): when a policy is configured for this
+        // action it decides authoritatively. Evaluation failure maps to a
+        // denial (fail closed); actions without a configured policy fall
+        // through to the interim RBAC checks in the handlers.
+        let action_id = handlers::action_key(action.action_type);
+        let oracles = BTreeMap::new();
+        let allowed = self.evaluate_policy(action_id, &oracles).map_err(|e| {
+            Error::Unauthorized(format!("action {action_id} denied by policy: {e}"))
+        })?;
+        if !allowed {
+            return Err(Error::Unauthorized(format!(
+                "action {action_id} denied by policy"
+            )));
+        }
+
         let event = match action.action_type {
             ActionType::ActorRegister => handlers::handle_actor_register(state, account, payload)?,
             ActionType::ActorGrant => handlers::handle_actor_grant(state, account, payload)?,
@@ -3527,5 +3582,122 @@ mod fork_gating_tests {
             assert_eq!(stf.active_fork_at(10).unwrap().fork_id, 2);
             assert_eq!(stf.active_fork_at(500).unwrap().fork_id, 2);
         }
+    }
+}
+
+#[cfg(test)]
+mod policy_wiring_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use workstream_core::hash::H256;
+    use workstream_crypto::signature;
+    use workstream_tx::TxBuilder;
+
+    use crate::policy::{Policy, Value};
+
+    fn ed25519_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    fn sponsor() -> AccountId {
+        H256::from_bytes([11u8; 32])
+    }
+
+    fn signed_register_tx(acct: AccountId, seq: u64) -> Transaction {
+        let mut tx = TxBuilder::new()
+            .chain_id(1)
+            .account(acct)
+            .nonce(0, seq)
+            .add_action(
+                ActionType::ActorRegister,
+                encode_payload(&ActorRegisterPayload {
+                    role: ActorRole::Sponsor,
+                })
+                .unwrap(),
+            )
+            .fee(FeeSpec {
+                payer: FeePayer::Self_,
+                asset_id: 0,
+                max_fee: 1000,
+            })
+            .build()
+            .unwrap();
+        signature::sign_tx_ed25519(&mut tx, &ed25519_signing_key()).unwrap();
+        tx
+    }
+
+    fn stf_with_policy(source: &str) -> StateTransitionFunction {
+        let mut policies = BTreeMap::new();
+        policies.insert(
+            "actor_register".to_string(),
+            Policy::compile(source).expect("policy compiles"),
+        );
+        StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap())
+            .unwrap()
+            .with_policies(policies)
+    }
+
+    #[test]
+    fn policy_absent_action_falls_through_to_rbac() {
+        let stf = StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap()).unwrap();
+        let mut state = State::new();
+        // No policy configured: the interim RBAC layer decides (sponsor may
+        // register itself on a fresh chain).
+        let events = stf
+            .execute_tx(&mut state, &signed_register_tx(sponsor(), 0))
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "actor.registered");
+    }
+
+    #[test]
+    fn configured_allow_policy_permits_action() {
+        let stf = stf_with_policy("policy \"allow-all\" { allow true; }");
+        let mut state = State::new();
+        let events = stf
+            .execute_tx(&mut state, &signed_register_tx(sponsor(), 0))
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "actor.registered");
+    }
+
+    #[test]
+    fn configured_deny_policy_blocks_action() {
+        let stf = stf_with_policy("policy \"deny-all\" { allow false; }");
+        let mut state = State::new();
+        let err = stf
+            .execute_tx(&mut state, &signed_register_tx(sponsor(), 0))
+            .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)), "got {err:?}");
+        assert!(format!("{err}").contains("denied by policy"));
+    }
+
+    #[test]
+    fn policy_evaluation_failure_denies_fail_closed() {
+        // Declared oracle is missing from the oracle input: evaluation fails,
+        // and the STF maps that to a denial before any state mutation.
+        let stf = stf_with_policy("policy \"elig\" { oracle flag: bool; allow flag; }");
+        let mut state = State::new();
+        let err = stf
+            .execute_tx(&mut state, &signed_register_tx(sponsor(), 0))
+            .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)), "got {err:?}");
+        assert!(format!("{err}").contains("denied by policy"));
+    }
+
+    #[test]
+    fn evaluate_policy_respects_declared_oracles() {
+        let stf = stf_with_policy("policy \"elig\" { oracle flag: bool; allow flag; }");
+        let mut oracles = BTreeMap::new();
+        oracles.insert("flag".to_string(), Value::Bool(true));
+        assert!(stf.evaluate_policy("actor_register", &oracles).unwrap());
+
+        oracles.insert("flag".to_string(), Value::Bool(false));
+        assert!(!stf.evaluate_policy("actor_register", &oracles).unwrap());
+
+        // Missing oracle is an evaluation error, not a silent denial/allowance.
+        assert!(stf
+            .evaluate_policy("actor_register", &BTreeMap::new())
+            .is_err());
     }
 }

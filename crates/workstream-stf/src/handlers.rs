@@ -416,6 +416,47 @@ pub fn derive_lease(submission: &H256, reviewer: &H256) -> LeaseId {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+/// Stable, canonical action key used to key compiled policies (issue #77).
+///
+/// The key is the snake_case action identifier (e.g. `task_claim`); policy
+/// sources compile under these keys via the policy DSL's action-oriented
+/// naming. Two actions with the same key share one policy decision.
+pub(crate) fn action_key(action_type: ActionType) -> &'static str {
+    match action_type {
+        ActionType::ActorRegister => "actor_register",
+        ActionType::ActorLink => "actor_link",
+        ActionType::ActorGrant => "actor_grant",
+        ActionType::ActorRevoke => "actor_revoke",
+        ActionType::ActorSuspend => "actor_suspend",
+        ActionType::ActorReactivate => "actor_reactivate",
+        ActionType::ActorDeactivate => "actor_deactivate",
+        ActionType::ProjectCreate => "project_create",
+        ActionType::GuideIngest => "guide_ingest",
+        ActionType::GuideActivate => "guide_activate",
+        ActionType::PolicyCompile => "policy_compile",
+        ActionType::PolicyApprove => "policy_approve",
+        ActionType::TaskCreate => "task_create",
+        ActionType::TaskScreen => "task_screen",
+        ActionType::TaskRelease => "task_release",
+        ActionType::TaskClaim => "task_claim",
+        ActionType::TaskStart => "task_start",
+        ActionType::BundlePrepare => "bundle_prepare",
+        ActionType::BundleAdmit => "bundle_admit",
+        ActionType::SubmissionCreate => "submission_create",
+        ActionType::CheckRun => "check_run",
+        ActionType::RouteSubmission => "route_submission",
+        ActionType::ReviewLease => "review_lease",
+        ActionType::ReviewDecide => "review_decide",
+        ActionType::RevisionPrepare => "revision_prepare",
+        ActionType::AcceptFinal => "accept_final",
+        ActionType::AwardFulfill => "award_fulfill",
+        ActionType::ReputationProject => "reputation_project",
+        ActionType::GovUpgrade => "gov_upgrade",
+        ActionType::GovSetSequencer => "gov_set_sequencer",
+        ActionType::GovSetParameters => "gov_set_parameters",
+    }
+}
+
 fn decode_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T> {
     postcard::from_bytes(payload)
         .map_err(|e| Error::Serialization(format!("action payload decode: {e}")))

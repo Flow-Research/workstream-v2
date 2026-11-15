@@ -358,6 +358,7 @@ pub fn mvp_genesis_schedule() -> Result<ForkSchedule> {
 mod mvp_handler_tests {
     use super::*;
     use workstream_core::hash::H256;
+    use workstream_crypto::signature;
     use workstream_tx::TxBuilder;
 
     const TITLE: &str = "alpha";
@@ -384,6 +385,12 @@ mod mvp_handler_tests {
 
     fn content_hash(b: u8) -> H256 {
         H256::from_bytes([b; 32])
+    }
+
+    /// Deterministic Ed25519 signer for admission fixtures: signatures must
+    /// be reproducible so retries and replay checks stay deterministic.
+    fn ed25519_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
     }
 
     fn mvp_stf() -> StateTransitionFunction {
@@ -415,7 +422,7 @@ mod mvp_handler_tests {
         t: ActionType,
         payload: Vec<u8>,
     ) -> Transaction {
-        TxBuilder::new()
+        let mut tx = TxBuilder::new()
             .chain_id(1)
             .account(acct)
             .nonce(key_id, seq)
@@ -426,7 +433,9 @@ mod mvp_handler_tests {
                 max_fee: 1000,
             })
             .build()
-            .unwrap()
+            .unwrap();
+        signature::sign_tx_ed25519(&mut tx, &ed25519_signing_key()).unwrap();
+        tx
     }
 
     /// Build a transaction with the next valid nonce for `acct` (key_id 0).
@@ -1937,7 +1946,7 @@ mod mvp_handler_tests {
         // fails: registering the same account twice. Atomic execution must
         // discard the draft on failure — no actor record may leak into live
         // state while the nonce stays reusable for a retry.
-        let bad = TxBuilder::new()
+        let mut bad = TxBuilder::new()
             .chain_id(1)
             .account(sponsor())
             .nonce(0, 0)
@@ -1956,6 +1965,7 @@ mod mvp_handler_tests {
             })
             .build()
             .unwrap();
+        signature::sign_tx_ed25519(&mut bad, &ed25519_signing_key()).unwrap();
 
         let err = stf.execute_tx(&mut state, &bad).unwrap_err();
         assert!(matches!(err, Error::InvalidTransition(_)), "got {err:?}");
@@ -3217,10 +3227,16 @@ mod fork_gating_tests {
     use std::sync::Arc;
     use workstream_core::fork::GuestHash;
     use workstream_core::hash::{Hash, H256};
+    use workstream_crypto::signature;
     use workstream_tx::TxBuilder;
 
     fn guest(seed: u8) -> GuestHash {
         Hash::sha256(&[seed; 32])
+    }
+
+    /// Deterministic Ed25519 signer for admission fixtures.
+    fn ed25519_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
     }
 
     fn schedule_with_task_fork() -> ForkSchedule {
@@ -3268,7 +3284,7 @@ mod fork_gating_tests {
 
     fn task_tx() -> Transaction {
         let account = H256::from_bytes([7u8; 32]);
-        TxBuilder::new()
+        let mut tx = TxBuilder::new()
             .chain_id(1)
             .account(account)
             .nonce(0, 1)
@@ -3279,7 +3295,9 @@ mod fork_gating_tests {
                 max_fee: 1000,
             })
             .build()
-            .unwrap()
+            .unwrap();
+        signature::sign_tx_ed25519(&mut tx, &ed25519_signing_key()).unwrap();
+        tx
     }
 
     #[test]
@@ -3341,7 +3359,7 @@ mod fork_gating_tests {
 
         // Register the sponsor and create a project under fork 1
         // (identity + projects are genesis-era, ungated).
-        let reg_tx = TxBuilder::new()
+        let mut reg_tx = TxBuilder::new()
             .chain_id(1)
             .account(sponsor)
             .nonce(0, 0)
@@ -3359,10 +3377,11 @@ mod fork_gating_tests {
             })
             .build()
             .unwrap();
+        signature::sign_tx_ed25519(&mut reg_tx, &ed25519_signing_key()).unwrap();
         stf.execute_tx_with_fork(&mut state, &reg_tx, stf.active_fork_at(5).unwrap())
             .unwrap();
 
-        let project_tx = TxBuilder::new()
+        let mut project_tx = TxBuilder::new()
             .chain_id(1)
             .account(sponsor)
             .nonce(0, 1)
@@ -3380,6 +3399,7 @@ mod fork_gating_tests {
             })
             .build()
             .unwrap();
+        signature::sign_tx_ed25519(&mut project_tx, &ed25519_signing_key()).unwrap();
         let events = stf
             .execute_tx_with_fork(&mut state, &project_tx, stf.active_fork_at(5).unwrap())
             .unwrap();
@@ -3389,7 +3409,7 @@ mod fork_gating_tests {
         // Task creation requires the (later) task-lifecycle fork — allowed,
         // and the handler runs for real.
         let project_id = handlers::derive_project(&sponsor, title);
-        let task_tx = TxBuilder::new()
+        let mut task_tx = TxBuilder::new()
             .chain_id(1)
             .account(sponsor)
             .nonce(0, 2)
@@ -3409,6 +3429,7 @@ mod fork_gating_tests {
             })
             .build()
             .unwrap();
+        signature::sign_tx_ed25519(&mut task_tx, &ed25519_signing_key()).unwrap();
 
         let fork2 = stf.active_fork_at(10).unwrap();
         assert!(stf
@@ -3432,7 +3453,7 @@ mod fork_gating_tests {
             role: ActorRole::Worker,
         })
         .unwrap();
-        let tx = TxBuilder::new()
+        let mut tx = TxBuilder::new()
             .chain_id(1)
             .account(account)
             .nonce(0, 0)
@@ -3444,6 +3465,7 @@ mod fork_gating_tests {
             })
             .build()
             .unwrap();
+        signature::sign_tx_ed25519(&mut tx, &ed25519_signing_key()).unwrap();
 
         assert!(stf.execute_tx_with_fork(&mut state, &tx, fork1).is_ok());
         // The handler executed: the actor record now exists in state.

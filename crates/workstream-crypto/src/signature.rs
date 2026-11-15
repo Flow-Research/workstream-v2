@@ -7,9 +7,12 @@
 //!
 //! All verification is deterministic and zkVM-compatible.
 
-use ed25519_dalek::{Signature as Ed25519Sig, Verifier, VerifyingKey as Ed25519Key};
+use ed25519_dalek::{Signature as Ed25519Sig, Signer, Verifier, VerifyingKey as Ed25519Key};
 use k256::ecdsa::{Signature as EcdsaSig, VerifyingKey as Secp256k1Key};
+use postcard::to_allocvec;
 use serde::{Deserialize, Serialize};
+use workstream_core::hash::H256;
+use workstream_core::types::Transaction;
 use workstream_core::{Error, Result};
 
 /// Supported signature algorithms.
@@ -91,6 +94,66 @@ pub fn verify(message: &[u8], signature: &Signature, public_key: &PublicKey) -> 
         }
         SignatureAlgorithm::Ed25519 => verify_ed25519(message, &signature.bytes, &public_key.bytes),
     }
+}
+
+/// Sign a message with Ed25519 under the given signing key.
+pub fn sign_ed25519(message: &[u8], signing_key: &ed25519_dalek::SigningKey) -> Ed25519Sig {
+    signing_key.sign(message)
+}
+
+/// Sign a message with secp256k1 (ECDSA) under the given signing key.
+pub fn sign_secp256k1(message: &[u8], signing_key: &k256::ecdsa::SigningKey) -> EcdsaSig {
+    use k256::ecdsa::signature::Signer;
+    signing_key.sign(message)
+}
+
+/// Canonical transaction signing message: the domain-tagged hash of the
+/// canonical encoding of the transaction with its signature and verifying
+/// public key cleared.
+///
+/// Clearing the signature keeps the signed message independent of the
+/// signature bytes themselves (a signature cannot sign itself); clearing the
+/// verifying key keeps the message equal to the unsigned transaction content
+/// the signer attested to.
+pub fn tx_message_hash(tx: &Transaction) -> Result<H256> {
+    let mut unsigned = tx.clone();
+    unsigned.signature = None;
+    unsigned.public_key = None;
+    let bytes = to_allocvec(&unsigned).map_err(|e| Error::Serialization(e.to_string()))?;
+    Ok(workstream_core::hash::Hash::sha256_concat(&[
+        b"WS:v1:tx:",
+        &bytes,
+    ]))
+}
+
+/// Sign a transaction canonically (Ed25519) and attach the resulting
+/// signature and verifying public key to it.
+///
+/// The signature is computed over the transaction's canonical signing
+/// message (see [`tx_message_hash`]); the verifying key is carried alongside
+/// so admission can authenticate the signer.
+pub fn sign_tx_ed25519(
+    tx: &mut Transaction,
+    signing_key: &ed25519_dalek::SigningKey,
+) -> Result<()> {
+    let message = tx_message_hash(tx)?;
+    let sig = sign_ed25519(message.as_bytes(), signing_key);
+    tx.signature = Some(sig.to_bytes().to_vec());
+    tx.public_key = Some(signing_key.verifying_key().to_bytes().to_vec());
+    Ok(())
+}
+
+/// Sign a transaction canonically (secp256k1 / ECDSA) and attach the
+/// resulting signature and verifying public key to it.
+pub fn sign_tx_secp256k1(
+    tx: &mut Transaction,
+    signing_key: &k256::ecdsa::SigningKey,
+) -> Result<()> {
+    let message = tx_message_hash(tx)?;
+    let sig = sign_secp256k1(message.as_bytes(), signing_key);
+    tx.signature = Some(sig.to_bytes().to_vec());
+    tx.public_key = Some(signing_key.verifying_key().to_sec1_bytes().to_vec());
+    Ok(())
 }
 
 /// Verify a secp256k1 ECDSA signature.

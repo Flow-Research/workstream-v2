@@ -11,6 +11,7 @@
 
 use workstream_core::hash::H256;
 use workstream_core::types::*;
+use workstream_crypto::signature;
 use workstream_node::{MemoryBlockSource, Node};
 use workstream_sequencer::Sequencer;
 use workstream_stf::{
@@ -44,8 +45,13 @@ fn content_hash() -> H256 {
 }
 
 // Transaction builders
+/// Deterministic Ed25519 signer for admission fixtures.
+fn ed25519_signing_key() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+}
+
 fn tx(acct: AccountId, seq: u64, action_type: ActionType, payload: Vec<u8>) -> Transaction {
-    TxBuilder::new()
+    let mut tx = TxBuilder::new()
         .chain_id(1)
         .account(acct)
         .nonce(0, seq)
@@ -56,7 +62,9 @@ fn tx(acct: AccountId, seq: u64, action_type: ActionType, payload: Vec<u8>) -> T
             max_fee: 1_000,
         })
         .build()
-        .unwrap()
+        .unwrap();
+    signature::sign_tx_ed25519(&mut tx, &ed25519_signing_key()).unwrap();
+    tx
 }
 
 fn register_sponsor() -> Transaction {

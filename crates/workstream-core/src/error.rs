@@ -13,6 +13,10 @@ pub enum ErrorCategory {
     Consensus,
     Configuration,
     Internal,
+    /// The referenced resource does not exist
+    NotFound,
+    /// The API/component version is incompatible
+    VersionMismatch,
 }
 
 #[derive(Debug, Error)]
@@ -94,11 +98,12 @@ impl Error {
             Error::Validation(_) => ErrorCategory::Validation,
             Error::Config(_) => ErrorCategory::Configuration,
             Error::Unauthorized(_) => ErrorCategory::Authorization,
-            Error::NotFound(_) | Error::Timeout(_) => ErrorCategory::Network,
+            Error::NotFound(_) => ErrorCategory::NotFound,
+            Error::Timeout(_) => ErrorCategory::Network,
             Error::Determinism(_) | Error::Consensus(_) | Error::Fork(_) => {
                 ErrorCategory::Consensus
             }
-            Error::VersionMismatch(_) => ErrorCategory::Internal,
+            Error::VersionMismatch(_) => ErrorCategory::VersionMismatch,
             Error::Io(_) | Error::Other(_) => ErrorCategory::Internal,
         }
     }
@@ -114,6 +119,8 @@ impl Error {
                 | Error::Consensus(_)
                 | Error::DepthLimitExceeded
                 | Error::InvalidSignature
+                | Error::Validation(_)
+                | Error::Unauthorized(_)
         )
     }
 }
@@ -157,7 +164,7 @@ mod tests {
         );
         assert_eq!(
             Error::NotFound("x".to_string()).category(),
-            ErrorCategory::Network
+            ErrorCategory::NotFound
         );
         assert_eq!(
             Error::Timeout("x".to_string()).category(),
@@ -170,6 +177,10 @@ mod tests {
         assert_eq!(
             Error::Consensus("x".to_string()).category(),
             ErrorCategory::Consensus
+        );
+        assert_eq!(
+            Error::VersionMismatch("x".to_string()).category(),
+            ErrorCategory::VersionMismatch
         );
         assert_eq!(
             Error::DepthLimitExceeded.category(),
@@ -196,8 +207,11 @@ mod tests {
         assert!(Error::Consensus("x".to_string()).is_fatal());
         assert!(Error::DepthLimitExceeded.is_fatal());
         assert!(Error::InvalidSignature.is_fatal());
+        assert!(Error::Validation("x".to_string()).is_fatal());
+        assert!(Error::Unauthorized("x".to_string()).is_fatal());
         assert!(!Error::Timeout("x".to_string()).is_fatal());
-        assert!(!Error::Validation("x".to_string()).is_fatal());
+        assert!(!Error::NotFound("x".to_string()).is_fatal());
+        assert!(!Error::VersionMismatch("x".to_string()).is_fatal());
     }
 
     #[test]

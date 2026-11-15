@@ -14,3 +14,9 @@ workstream-stf = { path = "../workstream-stf" }
 workstream-tx = { path = "../workstream-tx" }
 workstream-sequencer = { path = "../../src/bin/sequencer" }
 workstream-node = { path = "../../src/bin/node" }
+workstream-crypto = { path = "../workstream-crypto" }
+
+[dev-dependencies]
+proptest = { workspace = true }
+rstest = { workspace = true }
+ed25519-dalek = { workspace = true }

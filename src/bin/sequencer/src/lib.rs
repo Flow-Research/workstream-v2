@@ -260,6 +260,7 @@ impl Sequencer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use workstream_crypto::signature;
     use workstream_stf::encode_payload;
     use workstream_stf::{
         mvp_genesis_schedule, ActorGrantPayload, ActorRegisterPayload, ActorRole, Capability,
@@ -271,8 +272,15 @@ mod tests {
         H256::from_bytes([tag; 32])
     }
 
+    /// Deterministic Ed25519 signer for admission fixtures: signatures must
+    /// be reproducible so identical transactions hash identically (dedup) and
+    /// replay enforcement stays deterministic.
+    fn ed25519_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+    }
+
     fn seq_tx(acct: AccountId, seq: u64, t: ActionType, payload: Vec<u8>) -> Transaction {
-        TxBuilder::new()
+        let mut tx = TxBuilder::new()
             .chain_id(1)
             .account(acct)
             .nonce(0, seq)
@@ -283,7 +291,9 @@ mod tests {
                 max_fee: 1_000,
             })
             .build()
-            .unwrap()
+            .unwrap();
+        signature::sign_tx_ed25519(&mut tx, &ed25519_signing_key()).unwrap();
+        tx
     }
 
     fn mvp_sequencer() -> Sequencer {

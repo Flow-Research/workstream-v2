@@ -271,10 +271,21 @@ impl StateTransitionFunction {
 
         let event = match action.action_type {
             ActionType::ActorRegister => handlers::handle_actor_register(state, account, payload)?,
+            ActionType::ActorLink => handlers::handle_actor_link(state, account, payload)?,
             ActionType::ActorGrant => handlers::handle_actor_grant(state, account, payload)?,
+            ActionType::ActorRevoke => handlers::handle_actor_revoke(state, account, payload)?,
+            ActionType::ActorSuspend => handlers::handle_actor_suspend(state, account, payload)?,
+            ActionType::ActorReactivate => {
+                handlers::handle_actor_reactivate(state, account, payload)?
+            }
+            ActionType::ActorDeactivate => {
+                handlers::handle_actor_deactivate(state, account, payload)?
+            }
             ActionType::ProjectCreate => handlers::handle_project_create(state, account, payload)?,
             ActionType::GuideIngest => handlers::handle_guide_ingest(state, account, payload)?,
             ActionType::GuideActivate => handlers::handle_guide_activate(state, account, payload)?,
+            ActionType::PolicyCompile => handlers::handle_policy_compile(state, account, payload)?,
+            ActionType::PolicyApprove => handlers::handle_policy_approve(state, account, payload)?,
             ActionType::TaskCreate => handlers::handle_task_create(state, account, payload)?,
             ActionType::TaskScreen => handlers::handle_task_screen(state, account, payload)?,
             ActionType::TaskRelease => handlers::handle_task_release(state, account, payload)?,
@@ -283,15 +294,28 @@ impl StateTransitionFunction {
             ActionType::SubmissionCreate => {
                 handlers::handle_submission_create(state, account, payload)?
             }
+            ActionType::BundlePrepare => handlers::handle_bundle_prepare(state, account, payload)?,
             ActionType::BundleAdmit => handlers::handle_bundle_admit(state, account, payload)?,
+            ActionType::CheckRun => handlers::handle_check_run(state, account, payload)?,
+            ActionType::RouteSubmission => {
+                handlers::handle_route_submission(state, account, payload)?
+            }
             ActionType::ReviewLease => handlers::handle_review_lease(state, account, payload)?,
             ActionType::ReviewDecide => handlers::handle_review_decide(state, account, payload)?,
+            ActionType::RevisionPrepare => {
+                handlers::handle_revision_prepare(state, account, payload)?
+            }
             ActionType::AcceptFinal => handlers::handle_accept_final(state, account, payload)?,
-            other => {
-                return Err(Error::Transaction(format!(
-                    "action {:?} is not enabled in the MVP era",
-                    other
-                )));
+            ActionType::AwardFulfill => handlers::handle_award_fulfill(state, account, payload)?,
+            ActionType::ReputationProject => {
+                handlers::handle_reputation_project(state, account, payload)?
+            }
+            ActionType::GovUpgrade => handlers::handle_gov_upgrade(state, account, payload)?,
+            ActionType::GovSetSequencer => {
+                handlers::handle_gov_set_sequencer(state, account, payload)?
+            }
+            ActionType::GovSetParameters => {
+                handlers::handle_gov_set_parameters(state, account, payload)?
             }
         };
         Ok(vec![event])
@@ -2040,21 +2064,210 @@ mod mvp_handler_tests {
     }
 
     #[test]
-    fn unsupported_action_rejected() {
+    fn action_disallowed_by_fork_feature_rejected() {
         let mut book = NonceBook::default();
         let (stf, mut state, ..) = setup_task_ready(&mut book);
+        // The MVP fork enables only the task-lifecycle and submission-review
+        // features, so a reputation action is rejected by fork gating before
+        // any handler runs.
+        let fork = stf.active_fork_at(5).unwrap();
+        let err = stf
+            .execute_tx_with_fork(
+                &mut state,
+                &raw_tx(sponsor(), 0, 0, ActionType::ReputationProject, vec![]),
+                fork,
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::Fork(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn actor_revoke_revokes_granted_capability() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _project, task) = setup_task_ready(&mut book);
+
+        let before = handlers::get_actor(&state, &worker()).unwrap().unwrap();
+        assert!(before
+            .grants
+            .iter()
+            .any(|g| g.capability == Capability::ClaimWork));
+
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::ActorRevoke,
+            encode_payload(&handlers::ActorRevokePayload {
+                grantee: worker(),
+                capability: Capability::ClaimWork,
+            })
+            .unwrap(),
+        );
+
+        let after = handlers::get_actor(&state, &worker()).unwrap().unwrap();
+        assert!(!after
+            .grants
+            .iter()
+            .any(|g| g.capability == Capability::ClaimWork));
+        // The revoked worker can no longer claim the released task.
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::TaskClaim,
+            id_payload(task),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn actor_suspend_blocks_worker_actions() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _project, task) = setup_task_ready(&mut book);
+
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::ActorSuspend,
+            encode_payload(&handlers::ActorSuspendPayload { account: worker() }).unwrap(),
+        );
+        let err = attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::TaskClaim,
+            id_payload(task),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Unauthorized(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn bundle_prepare_registers_ready_bundle() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _project, task) = setup_task_ready(&mut book);
+
+        // Move the task to `Started` so the assigned worker may prepare.
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::TaskClaim,
+            id_payload(task),
+        );
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::TaskStart,
+            id_payload(task),
+        );
+
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            worker(),
+            ActionType::BundlePrepare,
+            encode_payload(&handlers::BundlePreparePayload {
+                task,
+                content_hash: content_hash(9),
+            })
+            .unwrap(),
+        );
+
+        let bundle_id = handlers::derive_bundle(&task, &worker(), &content_hash(9));
+        let bundle = handlers::get_bundle(&state, &bundle_id).unwrap().unwrap();
+        assert_eq!(bundle.status, BundleStatus::Ready);
+    }
+
+    #[test]
+    fn policy_compile_and_approve_lifecycle() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _project, _task) = setup_task_ready(&mut book);
+
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::PolicyCompile,
+            encode_payload(&handlers::PolicyCompilePayload {
+                source: "policy \"allow-all\" { allow true; }".to_string(),
+            })
+            .unwrap(),
+        );
+        let policy = Policy::compile("policy \"allow-all\" { allow true; }").unwrap();
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::PolicyApprove,
+            encode_payload(&handlers::PolicyApprovePayload {
+                policy: policy.id(),
+            })
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn award_fulfill_rejects_uncompleted_task() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _project, task) = setup_task_ready(&mut book);
         let err = attempt(
             &stf,
             &mut state,
             &mut book,
             sponsor(),
             ActionType::AwardFulfill,
-            vec![],
+            encode_payload(&handlers::AwardFulfillPayload { task }).unwrap(),
         )
         .unwrap_err();
-        assert!(matches!(err, Error::Transaction(_)), "got {err:?}");
-        let msg = format!("{err}");
-        assert!(msg.contains("not enabled in the MVP era"), "got {msg}");
+        assert!(matches!(err, Error::InvalidTransition(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn gov_set_sequencer_action_executable() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _project, _task) = setup_task_ready(&mut book);
+        let events = run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::GovSetSequencer,
+            encode_payload(&handlers::GovSetSequencerPayload {
+                sequencer: worker(),
+            })
+            .unwrap(),
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "gov.sequencer_set");
+    }
+
+    #[test]
+    fn check_run_requires_existing_task() {
+        let mut book = NonceBook::default();
+        let (stf, mut state, _project, task) = setup_task_ready(&mut book);
+        let events = run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::CheckRun,
+            encode_payload(&handlers::CheckRunPayload { task }).unwrap(),
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "check.run");
     }
 
     // -----------------------------------------------------------------------

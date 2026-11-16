@@ -17,6 +17,7 @@ use workstream_core::{Error, Result};
 use workstream_state::State;
 
 use crate::authz;
+use crate::policy::Policy;
 
 // ---------------------------------------------------------------------------
 // Storage keys
@@ -46,6 +47,10 @@ const K_NONCE: &[u8] = b"WS:v1:k:nonce:";
 /// Nullifier set: domain-derived commitments recording that a one-time
 /// action has been performed, independent of any mutable record status.
 const K_NULLIFIER: &[u8] = b"WS:v1:k:nullifier:";
+/// Compiled policies by id (bytecode), written by `policy.compile`.
+const K_POLICY: &[u8] = b"WS:v1:k:policy:";
+/// Approved policy ids (latest approval wins; approval is sponsor-gated).
+const K_POLICY_APPROVED: &[u8] = b"WS:v1:k:policy-approved:";
 
 fn kv_key(domain: &[u8], id: &H256) -> Vec<u8> {
     let mut key = domain.to_vec();
@@ -111,10 +116,24 @@ pub struct Grant {
     pub grantor: AccountId,
 }
 
+/// Lifecycle of an actor: self-service status transitions (issue #78).
+///
+/// `Suspended` actors may not perform authorized actions until they
+/// `Reactivate`; `Deactivated` is terminal (no reactivation from it).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ActorStatus {
+    Active,
+    Suspended,
+    Deactivated,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActorRecord {
     pub account: AccountId,
     pub role: ActorRole,
+    /// Lifecycle status of the actor (issue #78). Only `Active` actors may
+    /// perform authorized actions.
+    pub status: ActorStatus,
     /// Capabilities granted to this actor, each bound to its granting
     /// sponsor. Invariant: non-empty only when `role == Worker` — the
     /// grant path (`actor.grant`) refuses all other targets.
@@ -351,6 +370,585 @@ pub struct ReviewDecidePayload {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubmissionIdPayload {
     pub submission: SubmissionId,
+}
+
+/// actor.link: sponsor binds a worker actor to one of their tasks.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActorLinkPayload {
+    pub task: TaskId,
+    pub grantee: AccountId,
+}
+
+/// actor.revoke: sponsor withdraws a capability grant previously issued to
+/// a worker.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActorRevokePayload {
+    pub grantee: AccountId,
+    pub capability: Capability,
+}
+
+/// actor.<suspend|reactivate|deactivate>: actor-self status transitions.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActorSuspendPayload {
+    pub account: AccountId,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActorReactivatePayload {
+    pub account: AccountId,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActorDeactivatePayload {
+    pub account: AccountId,
+}
+
+/// bundle.prepare: the assigned worker commits prepared content for a
+/// started task (content commitment input to `bundle.admit`).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BundlePreparePayload {
+    pub task: TaskId,
+    pub content_hash: H256,
+}
+
+/// policy.compile: compile a bounded policy source into bytecode.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PolicyCompilePayload {
+    pub source: String,
+}
+
+/// policy.approve: approve a compiled policy by id.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PolicyApprovePayload {
+    pub policy: PolicyId,
+}
+
+/// check.run: precondition check over a task.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CheckRunPayload {
+    pub task: TaskId,
+}
+
+/// route.submission: sponsor routes a pending submission to a reviewer,
+/// which opens the review lease.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RouteSubmissionPayload {
+    pub submission: SubmissionId,
+    pub reviewer: AccountId,
+}
+
+/// revision.prepare: the assigned worker prepares revised content for a
+/// task (a new submission attempt for the revised content).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RevisionPreparePayload {
+    pub task: TaskId,
+    pub content_hash: H256,
+}
+
+/// award.fulfill: payout of a completed task's award.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AwardFulfillPayload {
+    pub task: TaskId,
+}
+
+/// reputation.project: reputation update for a project.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReputationProjectPayload {
+    pub project: ProjectId,
+}
+
+/// gov.upgrade: governance proposal to upgrade the protocol.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GovUpgradePayload {
+    pub target_fork_id: u64,
+}
+
+/// gov.set_sequencer: governance proposal to set the sequencer account.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GovSetSequencerPayload {
+    pub sequencer: AccountId,
+}
+
+/// gov.set_parameters: governance proposal to set protocol parameters.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GovSetParametersPayload {
+    pub param_key: String,
+    pub param_value: String,
+}
+
+// ---------------------------------------------------------------------------
+// Remaining action handlers (issue #78): actor lifecycle extras, bundle
+// preparation, policy lifecycle, checks, routing, revisions, awards,
+// reputation, and governance-era actions.
+// ---------------------------------------------------------------------------
+
+/// actor.link: a sponsor binds a worker actor to one of their tasks.
+///
+/// The delegation is authorization context, not a second capability
+/// mechanism: capability enforcement lives in `authz::require_grant` and
+/// task ownership in the task handlers, both of which already scope work to
+/// the sponsor's own tasks.
+pub(crate) fn handle_actor_link(state: &mut State, account: H256, payload: &[u8]) -> Result<Event> {
+    let p: ActorLinkPayload = decode_payload(payload)?;
+
+    let actor = load_actor(state, &account)?;
+    authz::require_sponsor(&actor, "actor.link")?;
+
+    let task =
+        get_task(state, &p.task)?.ok_or_else(|| Error::NotFound(format!("task {}", p.task)))?;
+    if task.sponsor != account {
+        return Err(Error::Unauthorized(
+            "only the task sponsor links actors to it".to_string(),
+        ));
+    }
+    let grantee = load_actor(state, &p.grantee)?;
+    authz::require_grantable_grantee(&grantee)?;
+
+    event(
+        "actor.linked",
+        &postcard::to_allocvec(&(p.task, p.grantee))
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// actor.revoke: a sponsor withdraws a capability grant previously issued
+/// to a worker.
+pub(crate) fn handle_actor_revoke(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: ActorRevokePayload = decode_payload(payload)?;
+
+    let grantor = load_actor(state, &account)?;
+    authz::require_sponsor(&grantor, "actor.revoke")?;
+
+    let mut grantee = load_actor(state, &p.grantee)?;
+    authz::require_grantable_grantee(&grantee)?;
+
+    let before = grantee.grants.len();
+    grantee
+        .grants
+        .retain(|g| !(g.capability == p.capability && g.grantor == account));
+    if grantee.grants.len() == before {
+        return Err(Error::InvalidTransition(format!(
+            "actor {} holds no {:?} grant from sponsor {account} to revoke",
+            p.grantee, p.capability
+        )));
+    }
+    store_actor(state, &grantee)?;
+
+    event(
+        "actor.revoked",
+        &postcard::to_allocvec(&(p.grantee, p.capability))
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// actor.suspend: the actor suspends itself (self-service lifecycle).
+pub(crate) fn handle_actor_suspend(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: ActorSuspendPayload = decode_payload(payload)?;
+    if p.account != account {
+        return Err(Error::Unauthorized(
+            "an actor can only suspend itself".to_string(),
+        ));
+    }
+    let mut actor = load_actor(state, &account)?;
+    if actor.status != ActorStatus::Active {
+        return Err(Error::InvalidTransition(format!(
+            "actor {} cannot suspend from status {:?}",
+            account, actor.status
+        )));
+    }
+    actor.status = ActorStatus::Suspended;
+    store_actor(state, &actor)?;
+    event(
+        "actor.suspended",
+        &postcard::to_allocvec(&account).map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// actor.reactivate: the actor reactivates itself (self-service lifecycle).
+pub(crate) fn handle_actor_reactivate(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: ActorReactivatePayload = decode_payload(payload)?;
+    if p.account != account {
+        return Err(Error::Unauthorized(
+            "an actor can only reactivate itself".to_string(),
+        ));
+    }
+    let mut actor = load_actor(state, &account)?;
+    if actor.status != ActorStatus::Suspended {
+        return Err(Error::InvalidTransition(format!(
+            "actor {} cannot reactivate from status {:?}",
+            account, actor.status
+        )));
+    }
+    actor.status = ActorStatus::Active;
+    store_actor(state, &actor)?;
+    event(
+        "actor.reactivated",
+        &postcard::to_allocvec(&account).map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// actor.deactivate: the actor deactivates itself (self-service lifecycle;
+/// deactivation is terminal).
+pub(crate) fn handle_actor_deactivate(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: ActorDeactivatePayload = decode_payload(payload)?;
+    if p.account != account {
+        return Err(Error::Unauthorized(
+            "an actor can only deactivate itself".to_string(),
+        ));
+    }
+    let mut actor = load_actor(state, &account)?;
+    if actor.status != ActorStatus::Active {
+        return Err(Error::InvalidTransition(format!(
+            "actor {} cannot deactivate from status {:?}",
+            account, actor.status
+        )));
+    }
+    actor.status = ActorStatus::Deactivated;
+    store_actor(state, &actor)?;
+    event(
+        "actor.deactivated",
+        &postcard::to_allocvec(&account).map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// bundle.prepare: the assigned worker prepares content for a started task,
+/// registering the resulting bundle (ready to back one submission).
+pub(crate) fn handle_bundle_prepare(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: BundlePreparePayload = decode_payload(payload)?;
+
+    let worker = load_actor(state, &account)?;
+    authz::require_worker(&worker, "prepare a bundle")?;
+
+    let task_bytes = state
+        .get(&kv_key(K_TASK, &p.task))?
+        .ok_or_else(|| Error::NotFound(format!("task {}", p.task)))?;
+    let task: TaskRecord = postcard::from_bytes(&task_bytes)
+        .map_err(|e| Error::Serialization(format!("task record decode: {e}")))?;
+    authz::require_grant(
+        &worker,
+        Capability::SubmitWork,
+        &task.sponsor,
+        "prepare a bundle",
+    )?;
+    if task.assignee != Some(account) {
+        return Err(Error::Unauthorized(
+            "only the assigned worker prepares bundles".to_string(),
+        ));
+    }
+    if task.status != TaskStatus::Started {
+        return Err(Error::InvalidTransition(format!(
+            "task {} is not preparing bundles (status {:?})",
+            p.task, task.status
+        )));
+    }
+
+    let bundle_id = derive_bundle(&p.task, &account, &p.content_hash);
+    if state.get(&kv_key(K_BUNDLE, &bundle_id))?.is_some() {
+        return Err(Error::InvalidTransition(format!(
+            "bundle {} already prepared",
+            bundle_id
+        )));
+    }
+    let record = BundleRecord {
+        task: p.task,
+        author: account,
+        content_hash: p.content_hash,
+        status: BundleStatus::Ready,
+    };
+    store_bundle(state, bundle_id, &record)?;
+
+    event(
+        "bundle.prepared",
+        &postcard::to_allocvec(&(bundle_id, p.task))
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// policy.compile: compile a bounded policy source into hash-locked
+/// bytecode and store it under its policy id.
+pub(crate) fn handle_policy_compile(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: PolicyCompilePayload = decode_payload(payload)?;
+
+    let actor = load_actor(state, &account)?;
+    authz::require_sponsor(&actor, "compile a policy")?;
+
+    let policy = Policy::compile(&p.source)
+        .map_err(|e| Error::Validation(format!("policy compile failed: {e}")))?;
+    let policy_id = policy.id();
+    let bytes = policy.to_bytecode();
+    state.set(&kv_key(K_POLICY, &policy_id), &bytes)?;
+
+    event(
+        "policy.compiled",
+        &postcard::to_allocvec(&policy_id).map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// policy.approve: approve a compiled policy by id.
+pub(crate) fn handle_policy_approve(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: PolicyApprovePayload = decode_payload(payload)?;
+
+    let actor = load_actor(state, &account)?;
+    authz::require_sponsor(&actor, "approve a policy")?;
+
+    if state.get(&kv_key(K_POLICY, &p.policy))?.is_none() {
+        return Err(Error::NotFound(format!("policy {}", p.policy)));
+    }
+
+    let approval: Vec<u8> =
+        postcard::to_allocvec(&true).map_err(|e| Error::Serialization(e.to_string()))?;
+    state.set(&kv_key(K_POLICY_APPROVED, &p.policy), &approval)?;
+
+    event(
+        "policy.approved",
+        &postcard::to_allocvec(&p.policy).map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// check.run: precondition check over a task (must exist and be in a
+/// state that supports the check being run).
+pub(crate) fn handle_check_run(state: &mut State, account: H256, payload: &[u8]) -> Result<Event> {
+    let p: CheckRunPayload = decode_payload(payload)?;
+
+    let _checker = load_actor(state, &account)?;
+    let task =
+        get_task(state, &p.task)?.ok_or_else(|| Error::NotFound(format!("task {}", p.task)))?;
+    let passed = task.status != TaskStatus::Draft;
+
+    event(
+        "check.run",
+        &postcard::to_allocvec(&(p.task, passed))
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// route.submission: sponsor routes a pending submission to a reviewer,
+/// which opens that reviewer's lease on the submission.
+pub(crate) fn handle_route_submission(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: RouteSubmissionPayload = decode_payload(payload)?;
+
+    let sponsor = load_actor(state, &account)?;
+    authz::require_sponsor(&sponsor, "route submission")?;
+
+    let submission_bytes = state
+        .get(&kv_key(K_SUBMISSION, &p.submission))?
+        .ok_or_else(|| Error::NotFound(format!("submission {}", p.submission)))?;
+    let submission: SubmissionRecord = postcard::from_bytes(&submission_bytes)
+        .map_err(|e| Error::Serialization(format!("submission record decode: {e}")))?;
+    if submission.status != SubmissionStatus::Pending {
+        return Err(Error::InvalidTransition(format!(
+            "submission {} is not open for routing (status {:?})",
+            p.submission, submission.status
+        )));
+    }
+    let task = get_task(state, &submission.task)?
+        .ok_or_else(|| Error::NotFound(format!("task {}", submission.task)))?;
+    if task.sponsor != account {
+        return Err(Error::Unauthorized(
+            "only the task sponsor routes submissions".to_string(),
+        ));
+    }
+
+    let lease_id = create_review_lease(state, p.submission, p.reviewer)?;
+    event(
+        "submission.routed",
+        &postcard::to_allocvec(&(lease_id, p.submission, p.reviewer))
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// revision.prepare: the assigned worker prepares revised content for a task,
+/// opening a new pending submission attempt for the revised content.
+pub(crate) fn handle_revision_prepare(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: RevisionPreparePayload = decode_payload(payload)?;
+
+    let worker = load_actor(state, &account)?;
+    authz::require_worker(&worker, "prepare a revision")?;
+
+    let task_bytes = state
+        .get(&kv_key(K_TASK, &p.task))?
+        .ok_or_else(|| Error::NotFound(format!("task {}", p.task)))?;
+    let task: TaskRecord = postcard::from_bytes(&task_bytes)
+        .map_err(|e| Error::Serialization(format!("task record decode: {e}")))?;
+    authz::require_grant(
+        &worker,
+        Capability::SubmitWork,
+        &task.sponsor,
+        "prepare a revision",
+    )?;
+    if task.assignee != Some(account) {
+        return Err(Error::Unauthorized(
+            "only the assigned worker prepares revisions".to_string(),
+        ));
+    }
+    if task.status != TaskStatus::Started {
+        return Err(Error::InvalidTransition(format!(
+            "task {} is not accepting revisions (status {:?})",
+            p.task, task.status
+        )));
+    }
+
+    let submission_id = derive_submission(&p.task, &p.content_hash);
+    if state.get(&kv_key(K_SUBMISSION, &submission_id))?.is_some() {
+        return Err(Error::InvalidTransition(format!(
+            "submission {} already exists",
+            submission_id
+        )));
+    }
+    let record = SubmissionRecord {
+        task: p.task,
+        author: account,
+        content_hash: p.content_hash,
+        status: SubmissionStatus::Pending,
+        accept_reviews: 0,
+    };
+    store_submission(state, submission_id, &record)?;
+
+    event(
+        "revision.prepared",
+        &postcard::to_allocvec(&(submission_id, p.task))
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// award.fulfill: payout of a completed task's award to its assignee.
+pub(crate) fn handle_award_fulfill(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: AwardFulfillPayload = decode_payload(payload)?;
+
+    let actor = load_actor(state, &account)?;
+    authz::require_sponsor(&actor, "fulfill an award")?;
+
+    let task =
+        get_task(state, &p.task)?.ok_or_else(|| Error::NotFound(format!("task {}", p.task)))?;
+    if task.status != TaskStatus::Completed {
+        return Err(Error::InvalidTransition(format!(
+            "task {} is not awardable (status {:?})",
+            p.task, task.status
+        )));
+    }
+    let worker = task.assignee.ok_or_else(|| {
+        Error::InvalidTransition(format!("task {} has no assignee to award", p.task))
+    })?;
+
+    event(
+        "award.fulfilled",
+        &postcard::to_allocvec(&(p.task, worker, task.award))
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// reputation.project: sponsor records a reputation update for a project.
+pub(crate) fn handle_reputation_project(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: ReputationProjectPayload = decode_payload(payload)?;
+
+    let actor = load_actor(state, &account)?;
+    authz::require_sponsor(&actor, "update reputation")?;
+
+    let project = get_project(state, &p.project)?
+        .ok_or_else(|| Error::NotFound(format!("project {}", p.project)))?;
+
+    event(
+        "reputation.updated",
+        &postcard::to_allocvec(&(p.project, project.owner))
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// gov.upgrade: governance action to schedule a protocol upgrade.
+pub(crate) fn handle_gov_upgrade(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: GovUpgradePayload = decode_payload(payload)?;
+
+    let actor = load_actor(state, &account)?;
+    authz::require_sponsor(&actor, "execute a governance upgrade")?;
+
+    event(
+        "gov.upgraded",
+        &postcard::to_allocvec(&p.target_fork_id)
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// gov.set_sequencer: governance action to set the sequencer account.
+pub(crate) fn handle_gov_set_sequencer(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: GovSetSequencerPayload = decode_payload(payload)?;
+
+    let actor = load_actor(state, &account)?;
+    authz::require_sponsor(&actor, "set the sequencer")?;
+
+    event(
+        "gov.sequencer_set",
+        &postcard::to_allocvec(&p.sequencer).map_err(|e| Error::Serialization(e.to_string()))?,
+    )
+}
+
+/// gov.set_parameters: governance action to set protocol parameters.
+pub(crate) fn handle_gov_set_parameters(
+    state: &mut State,
+    account: H256,
+    payload: &[u8],
+) -> Result<Event> {
+    let p: GovSetParametersPayload = decode_payload(payload)?;
+
+    let actor = load_actor(state, &account)?;
+    authz::require_sponsor(&actor, "set governance parameters")?;
+
+    event(
+        "gov.parameters_set",
+        &postcard::to_allocvec(&(p.param_key, p.param_value))
+            .map_err(|e| Error::Serialization(e.to_string()))?,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -739,6 +1337,7 @@ pub(crate) fn handle_actor_register(
     let record = ActorRecord {
         account,
         role: p.role,
+        status: ActorStatus::Active,
         grants: Vec::new(),
     };
     store_actor(state, &record)?;
@@ -1329,6 +1928,83 @@ pub(crate) fn handle_bundle_admit(
 /// The lease id is derived (submission, reviewer), so a reviewer leasing
 /// the same submission twice — including after consuming a lease there —
 /// deterministically derives the same id and is refused.
+/// Open the review lease of `reviewer` on `submission`, enforcing every
+/// eligibility and one-active-lease-per-reviewer invariant. Shared by
+/// `review.lease` (self-service) and the sponsor-driven `route.submission`.
+fn create_review_lease(
+    state: &mut State,
+    submission: SubmissionId,
+    reviewer: AccountId,
+) -> Result<LeaseId> {
+    let submission_bytes = state
+        .get(&kv_key(K_SUBMISSION, &submission))?
+        .ok_or_else(|| Error::NotFound(format!("submission {}", submission)))?;
+    let submission_record: SubmissionRecord = postcard::from_bytes(&submission_bytes)
+        .map_err(|e| Error::Serialization(format!("submission record decode: {e}")))?;
+    if submission_record.status != SubmissionStatus::Pending {
+        return Err(Error::InvalidTransition(format!(
+            "submission {} is not open for review (status {:?})",
+            submission, submission_record.status
+        )));
+    }
+    if submission_record.author == reviewer {
+        return Err(Error::Unauthorized(
+            "a submission's author cannot review it".to_string(),
+        ));
+    }
+
+    let task_bytes = state
+        .get(&kv_key(K_TASK, &submission_record.task))?
+        .ok_or_else(|| Error::NotFound(format!("task {}", submission_record.task)))?;
+    let task: TaskRecord = postcard::from_bytes(&task_bytes)
+        .map_err(|e| Error::Serialization(format!("task record decode: {e}")))?;
+    if task.sponsor == reviewer {
+        return Err(Error::Unauthorized(
+            "the task's sponsor cannot review its submissions".to_string(),
+        ));
+    }
+    // Reviews only belong to work that is still under way: once the task is
+    // Completed its remaining submissions can never be accepted, so refusing
+    // new leases keeps the review surface aligned with `accept.final`.
+    if task.status != TaskStatus::Started {
+        return Err(Error::InvalidTransition(format!(
+            "task {} is not under review (status {:?})",
+            submission_record.task, task.status
+        )));
+    }
+
+    // One active lease per reviewer per project (the (reviewer, project)
+    // index pointer; consumed leases' pointers are overwritten by the
+    // next lease). The project id comes from the task record — task
+    // creation guarantees it exists.
+    let project = task.project;
+    if let Some(existing_lease) = active_lease(state, &reviewer, &project)? {
+        if let Some(existing) = get_lease(state, &existing_lease)? {
+            if existing.status == LeaseStatus::Active {
+                return Err(Error::InvalidTransition(format!(
+                    "reviewer already holds an active lease ({existing_lease}) in this project"
+                )));
+            }
+        }
+    }
+
+    let lease_id = derive_lease(&submission, &reviewer);
+    if state.get(&kv_key(K_LEASE, &lease_id))?.is_some() {
+        return Err(Error::InvalidTransition(format!(
+            "lease {} already exists for this reviewer on this submission",
+            lease_id
+        )));
+    }
+    let record = LeaseRecord {
+        submission,
+        reviewer,
+        status: LeaseStatus::Active,
+    };
+    store_lease(state, lease_id, &record)?;
+    set_active_lease(state, &reviewer, &project, lease_id)?;
+    Ok(lease_id)
+}
+
 pub(crate) fn handle_review_lease(
     state: &mut State,
     account: H256,
@@ -1341,72 +2017,7 @@ pub(crate) fn handle_review_lease(
     // cross-review each other per the MVP review policy.
     let _reviewer = load_actor(state, &account)?;
 
-    let submission_bytes = state
-        .get(&kv_key(K_SUBMISSION, &p.submission))?
-        .ok_or_else(|| Error::NotFound(format!("submission {}", p.submission)))?;
-    let submission: SubmissionRecord = postcard::from_bytes(&submission_bytes)
-        .map_err(|e| Error::Serialization(format!("submission record decode: {e}")))?;
-    if submission.status != SubmissionStatus::Pending {
-        return Err(Error::InvalidTransition(format!(
-            "submission {} is not open for review (status {:?})",
-            p.submission, submission.status
-        )));
-    }
-    if submission.author == account {
-        return Err(Error::Unauthorized(
-            "a submission's author cannot review it".to_string(),
-        ));
-    }
-
-    let task_bytes = state
-        .get(&kv_key(K_TASK, &submission.task))?
-        .ok_or_else(|| Error::NotFound(format!("task {}", submission.task)))?;
-    let task: TaskRecord = postcard::from_bytes(&task_bytes)
-        .map_err(|e| Error::Serialization(format!("task record decode: {e}")))?;
-    if task.sponsor == account {
-        return Err(Error::Unauthorized(
-            "the task's sponsor cannot review its submissions".to_string(),
-        ));
-    }
-    // Reviews only belong to work that is still under way: once the task is
-    // Completed its remaining submissions can never be accepted, so refusing
-    // new leases keeps the review surface aligned with `accept.final`.
-    if task.status != TaskStatus::Started {
-        return Err(Error::InvalidTransition(format!(
-            "task {} is not under review (status {:?})",
-            submission.task, task.status
-        )));
-    }
-
-    // One active lease per reviewer per project (the (reviewer, project)
-    // index pointer; consumed leases' pointers are overwritten by the
-    // next lease). The project id comes from the task record — task
-    // creation guarantees it exists.
-    let project = task.project;
-    if let Some(existing_lease) = active_lease(state, &account, &project)? {
-        if let Some(existing) = get_lease(state, &existing_lease)? {
-            if existing.status == LeaseStatus::Active {
-                return Err(Error::InvalidTransition(format!(
-                    "reviewer already holds an active lease ({existing_lease}) in this project"
-                )));
-            }
-        }
-    }
-
-    let lease_id = derive_lease(&p.submission, &account);
-    if state.get(&kv_key(K_LEASE, &lease_id))?.is_some() {
-        return Err(Error::InvalidTransition(format!(
-            "lease {} already exists for this reviewer on this submission",
-            lease_id
-        )));
-    }
-    let record = LeaseRecord {
-        submission: p.submission,
-        reviewer: account,
-        status: LeaseStatus::Active,
-    };
-    store_lease(state, lease_id, &record)?;
-    set_active_lease(state, &account, &project, lease_id)?;
+    let lease_id = create_review_lease(state, p.submission, account)?;
 
     event(
         "review.leased",

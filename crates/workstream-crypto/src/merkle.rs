@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use workstream_core::hash::H256;
 use workstream_core::Result;
 
-use crate::smt::{hash_key, hash_value, MemoryNodeStore, SmTree};
+use crate::smt::{hash_key, hash_value, MemoryNodeStore, NodeStore, SmTree, SmtNode, TREE_DEPTH};
 
 /// Sparse Merkle Tree for mutable lifecycle objects.
 ///
@@ -84,6 +84,15 @@ impl SparseMerkleTree {
         }
     }
 
+    /// Insert or update using an already-hashed key (the tree's internal key
+    /// identity), for durable-state reconstruction from a snapshot.
+    pub fn update_hashed(&mut self, key: &H256, value: &[u8]) -> Result<()> {
+        let value_hash = hash_value(value);
+        self.tree.update(key, value_hash)?;
+        self.values.insert(value_hash, value.to_vec());
+        Ok(())
+    }
+
     /// Delete a key from the tree.
     ///
     /// Note: The value remains in storage (for historical access / proofs).
@@ -100,6 +109,53 @@ impl SparseMerkleTree {
     /// Access the underlying tree (for proof generation in #35).
     pub fn tree(&self) -> &SmTree<MemoryNodeStore> {
         &self.tree
+    }
+
+    /// All live key → value entries currently committed in the tree, keyed
+    /// by the tree's internal (content-hashed) key identity.
+    ///
+    /// Walks the fixed-depth (256-bit) compressed tree from the root so the
+    /// snapshot captures exactly the live state; deleted keys are excluded.
+    /// The walk mirrors the tree's internal lookup direction (MSB-first bit
+    /// indexing).
+    pub fn entries(&self) -> Vec<(H256, Vec<u8>)> {
+        let mut out = Vec::new();
+        if self.tree.is_empty() {
+            return out;
+        }
+        let root = self.tree.root();
+        self.walk(root, 0, [0u8; 32], &mut out);
+        out
+    }
+
+    /// Depth-first traversal of the compressed tree collecting live leaves.
+    ///
+    /// `key` accumulates the path bits (MSB-first) down to the leaf, which
+    /// reconstructs the full key at depth == tree depth.
+    fn walk(&self, node_hash: H256, depth: usize, key: [u8; 32], out: &mut Vec<(H256, Vec<u8>)>) {
+        let Some(node) = self.tree.store().get(&node_hash) else {
+            // Absent subtree: nothing live below this node.
+            return;
+        };
+        match node {
+            SmtNode::Leaf { key, value_hash } => {
+                out.push((
+                    key,
+                    self.values.get(&value_hash).cloned().unwrap_or_default(),
+                ));
+            }
+            SmtNode::Inner { left, right } => {
+                if depth >= TREE_DEPTH {
+                    return; // Should not happen with a valid tree
+                }
+                let byte_idx = depth / 8;
+                let bit_idx = 7 - (depth % 8);
+                let mut key_right = key;
+                key_right[byte_idx] |= 1 << bit_idx;
+                self.walk(left, depth + 1, key, out);
+                self.walk(right, depth + 1, key_right, out);
+            }
+        }
     }
 }
 
@@ -150,6 +206,25 @@ impl MerkleMountainRange {
     /// Generate a proof for the record at the given index.
     pub fn prove(&self, index: u64) -> Result<crate::mmr::MmrProof> {
         self.tree.prove(index)
+    }
+
+    /// All appended leaves as `(leaf index, payload hash)`, in append order.
+    ///
+    /// This is the complete durability surface for the append-only log: the
+    /// sequence of payload hashes, keyed by absolute leaf index, is exactly
+    /// what a snapshot must round-trip to reproduce the same MMR root.
+    pub fn entries(&self) -> Vec<(u64, H256)> {
+        self.tree.entries()
+    }
+
+    /// Rebuild an MMR from `(leaf index, payload hash)` entries.
+    ///
+    /// Entries must be supplied in ascending leaf order starting at index 0;
+    /// the deterministic merge sequence is then reproduced exactly.
+    pub fn from_entries(entries: &[(u64, H256)]) -> Self {
+        MerkleMountainRange {
+            tree: crate::mmr::MmrTree::from_entries(entries),
+        }
     }
 
     /// Access the underlying tree (for advanced operations).

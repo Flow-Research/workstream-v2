@@ -140,6 +140,30 @@ impl MmrTree {
         self.size
     }
 
+    /// All appended leaves as `(leaf index, payload hash)`.
+    ///
+    /// The stored entries are keyed by absolute leaf index, so this is the
+    /// complete durability surface for the append-only log.
+    pub fn entries(&self) -> Vec<(u64, H256)> {
+        self.leaf_data
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| (i as u64, entry.payload_hash))
+            .collect()
+    }
+
+    /// Rebuild an MMR from `(leaf index, payload hash)` entries. Entries are
+    /// expected in ascending leaf order; re-appending the leaf hashes
+    /// reproduces the deterministic merge sequence.
+    pub fn from_entries(entries: &[(u64, H256)]) -> Self {
+        let mut tree = Self::new();
+        for (index, payload_hash) in entries {
+            assert_eq!(*index, tree.size(), "mmr leaves must be contiguous from 0");
+            tree.append_hash(*payload_hash);
+        }
+        tree
+    }
+
     /// Check if the MMR is empty.
     pub fn is_empty(&self) -> bool {
         self.size == 0

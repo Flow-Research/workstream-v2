@@ -28,7 +28,7 @@ const TAG_INNER: &[u8] = b"WSMT:v1:N";
 const TAG_KEY: &[u8] = b"WSMT:v1:K";
 
 /// Tree depth (256 bits for H256 keys).
-const TREE_DEPTH: usize = 256;
+pub(crate) const TREE_DEPTH: usize = 256;
 
 /// Hash of an empty subtree (computed once, reused everywhere).
 fn empty_hash() -> H256 {
@@ -251,6 +251,14 @@ impl MemoryNodeStore {
         }
     }
 
+    /// Build a node store from an existing content-addressed map of nodes.
+    ///
+    /// Used by durable-state reconstruction (issue #79) where nodes captured
+    /// in a snapshot are re-inserted into a fresh in-memory store.
+    pub fn from_map(nodes: HashMap<H256, SmtNode>) -> Self {
+        Self { nodes }
+    }
+
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
@@ -258,6 +266,11 @@ impl MemoryNodeStore {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// All stored nodes keyed by their content hash.
+    pub fn iter(&self) -> Vec<(H256, SmtNode)> {
+        self.nodes.iter().map(|(k, v)| (*k, v.clone())).collect()
     }
 }
 

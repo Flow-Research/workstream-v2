@@ -23,14 +23,24 @@
 use workstream_core::hash::H256;
 use workstream_core::{Error, Result};
 
-use crate::handlers::{ActorRecord, ActorRole, Capability};
+use crate::handlers::{ActorRecord, ActorRole, ActorStatus, Capability};
 
 /// Require the actor to hold a specific role.
 ///
 /// Every handler must gate its action with the appropriate role check;
 /// `deny` describes the action for error surfacing ("claim task" etc.) so
 /// denial messages stay human-readable without leaking policy mechanics.
+///
+/// An actor that is not [`ActorStatus::Active`] may not perform authorized
+/// actions: `Suspended` actors self-reactivate before acting again, and
+/// `Deactivated` is terminal.
 pub(crate) fn require_role(record: &ActorRecord, role: ActorRole, action: &str) -> Result<()> {
+    if record.status != ActorStatus::Active {
+        return Err(Error::Unauthorized(format!(
+            "{action} requires an active actor (status {:?})",
+            record.status
+        )));
+    }
     if record.role != role {
         return Err(Error::Unauthorized(format!(
             "{action} requires the {role:?} role (account holds {role_found:?})",

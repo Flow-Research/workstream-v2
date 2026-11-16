@@ -13,6 +13,7 @@
 //!
 //! If any check fails, the block is rejected; the node state is unchanged.
 
+use std::path::Path;
 use workstream_core::fork::{validate_header_fork, ForkSchedule};
 use workstream_core::hash::{Hash, H256};
 use workstream_core::types::*;
@@ -207,6 +208,7 @@ impl<S: BlockSource> Node<S> {
 
         // Commit
         self.state = draft;
+        self.state.last_header = Some(block.header.clone());
         self.last_header = Some(block.header);
 
         Ok(ApplyResult {
@@ -214,6 +216,27 @@ impl<S: BlockSource> Node<S> {
             state_root: computed_state_root,
             events,
         })
+    }
+
+    /// Persist the node state (SMT/MMR snapshot + last applied header) to
+    /// `<dir>/state.json` so a restart resumes at the same tip.
+    pub fn save_state(&self, dir: &Path) -> Result<()> {
+        self.state.save_to_dir(dir)
+    }
+
+    /// Rebuild a verifying node from a previously persisted state directory.
+    pub fn load_state(
+        stf: StateTransitionFunction,
+        schedule: ForkSchedule,
+        source: S,
+        dir: &Path,
+    ) -> Result<Self> {
+        let state = State::load_from_dir(dir)?;
+        let last_header = state.last_header.clone();
+        let mut node = Self::new(stf, schedule, source);
+        node.state = state;
+        node.last_header = last_header;
+        Ok(node)
     }
 }
 
@@ -294,6 +317,20 @@ mod tests {
         }
 
         (blocks, sequencer.state().clone())
+    }
+
+    #[test]
+    fn node_state_round_trips_through_disk() {
+        let node = Node::new(mvp_stf(), mvp_schedule(), MemoryBlockSource::new());
+        let dir =
+            std::env::temp_dir().join(format!("workstream-node-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        node.save_state(&dir).unwrap();
+        let restored =
+            Node::load_state(mvp_stf(), mvp_schedule(), MemoryBlockSource::new(), &dir).unwrap();
+        assert_eq!(restored.tip(), node.tip());
+        assert_eq!(restored.state_root(), node.state_root());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

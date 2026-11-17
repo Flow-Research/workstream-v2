@@ -52,6 +52,9 @@ pub struct ZkProof {
     pub proof_bytes: Vec<u8>,
     pub public_inputs: Vec<u8>,
     pub guest_id: String,
+    /// Pre-state root the guest proved from (the post-state root is the
+    /// public input).
+    pub stateroot_pre: H256,
 }
 
 impl ZkProof {
@@ -66,12 +69,22 @@ impl ZkProof {
     }
 }
 
-/// Backend that turns a guest-program transition into a zero-knowledge proof.
+/// Backend that turns a guest-program transition into a zero-knowledge proof
+/// and decides whether a proof is valid for a transition.
 #[async_trait]
 pub trait ZkvmBackend: Send + Sync {
     /// Prove that the guest program computed the post-state root for the
     /// transition described by `transition`.
     async fn prove_block_transition(&self, transition: &ProveBlockTransition) -> Result<ZkProof>;
+
+    /// Verify a guest-program proof against a transition. The in-memory
+    /// backend recomputes the expected proof from the transition and compares;
+    /// a real backend verifies inside the zkVM runtime.
+    fn verify_block_transition(
+        &self,
+        transition: &ProveBlockTransition,
+        proof: &ZkProof,
+    ) -> Result<bool>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

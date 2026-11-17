@@ -1,5 +1,7 @@
 //! Verifier API trait
 
+use crate::hash::H256;
+use crate::types::Transaction;
 use crate::{Error, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,10 @@ pub struct VerifyBlockRequest {
     pub api_version: u32,
     pub block_hash: [u8; 32],
     pub proof_bundle: Vec<u8>,
+    /// Pre-state root the proved transition started from.
+    pub stateroot_pre: H256,
+    /// Transactions of the proved transition.
+    pub transactions: Vec<Transaction>,
 }
 
 impl VerifyBlockRequest {
@@ -45,6 +51,11 @@ impl VerifyBlockRequest {
                 "proof_bundle cannot be empty".to_string(),
             ));
         }
+        if !self.transactions.is_empty() && self.stateroot_pre == H256::ZERO {
+            return Err(Error::Validation(
+                "pre-state root required for transitions with transactions".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -63,6 +74,9 @@ pub struct VerifyProofRequest {
     pub api_version: u32,
     pub proof_bytes: Vec<u8>,
     pub public_inputs: Vec<u8>,
+    /// Pre-state root the proved transition started from (the post-state
+    /// root is carried in `public_inputs`).
+    pub stateroot_pre: H256,
 }
 
 impl VerifyProofRequest {

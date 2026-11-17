@@ -1,9 +1,12 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
-use tracing::{debug, info};
+use tracing::info;
 use workstream_core::config::{load_config, SequencerConfig};
 use workstream_core::{logging, Result};
+use workstream_sequencer::{InMemoryDaClient, Sequencer};
+use workstream_stf::{mvp_genesis_schedule, StateTransitionFunction};
 
 #[derive(Parser, Debug)]
 #[command(name = "workstream-sequencer")]
@@ -34,11 +37,20 @@ async fn main() -> Result<()> {
     info!("Starting WorkStream Sequencer on port {}", config.port);
     info!("Sovereign zkRollup for governed work coordination");
 
-    // TODO: Implement mempool, block production, DA submission
-    // Idle loop keeps the process alive until real event loops land.
+    // Event loop: mempool -> block production -> DA submission, with the
+    // censorship-resistance escape hatch (DA-direct transaction submissions).
+    let stf = StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap()).unwrap();
+    let mut sequencer = Sequencer::with_da(stf, Arc::new(InMemoryDaClient::new()));
+
     let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(10));
     loop {
         tick.tick().await;
-        debug!("sequencer heartbeat");
+        if sequencer.pending() > 0 {
+            let block = sequencer.build_and_submit_block(None).await?;
+            info!(
+                "Built and submitted block {} to DA (da_ref {})",
+                block.header.number, block.header.da_ref
+            );
+        }
     }
 }

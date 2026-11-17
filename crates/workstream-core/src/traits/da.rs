@@ -17,6 +17,9 @@ pub trait DaClient: Send + Sync {
     async fn post_block(&self, req: PostBlockRequest) -> Result<PostBlockResponse>;
     async fn get_block(&self, req: GetBlockRequest) -> Result<GetBlockResponse>;
     async fn get_availability(&self) -> Result<AvailabilityInfo>;
+    /// Direct transaction submission (escape hatch): publish raw transaction
+    /// bytes to availability without involving the sequencer's mempool.
+    async fn post_tx(&self, req: PostTxRequest) -> Result<PostTxResponse>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -96,4 +99,40 @@ pub struct AvailabilityInfo {
     pub api_version: u32,
     pub available: bool,
     pub latency_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PostTxRequest {
+    pub version: u32,
+    pub api_version: u32,
+    pub tx_bytes: Vec<u8>,
+}
+
+impl PostTxRequest {
+    pub fn validate(&self) -> Result<()> {
+        if self.version != 1 {
+            return Err(Error::Validation(format!(
+                "unsupported dto version: {}",
+                self.version
+            )));
+        }
+        if self.api_version != 1 {
+            return Err(Error::Validation(format!(
+                "unsupported api version: {}",
+                self.api_version
+            )));
+        }
+        if self.tx_bytes.is_empty() {
+            return Err(Error::Validation("tx_bytes cannot be empty".to_string()));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PostTxResponse {
+    pub version: u32,
+    pub api_version: u32,
+    pub da_id: String,
+    pub available: bool,
 }

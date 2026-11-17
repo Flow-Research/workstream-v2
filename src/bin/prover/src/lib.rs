@@ -14,8 +14,10 @@ use workstream_core::traits::prover::{
     ProverStatus, ZkProof, ZkvmBackend,
 };
 use workstream_core::traits::verifier::{
-    VerifierApi, VerifyBlockRequest, VerifyBlockResponse, VerifyProofRequest, VerifyProofResponse,
+    BlockProofVerifier, VerifierApi, VerifyBlockRequest, VerifyBlockResponse, VerifyProofRequest,
+    VerifyProofResponse,
 };
+use workstream_core::types::{Proof, ProofType};
 use workstream_core::{Error, Result};
 use workstream_state::State;
 use workstream_stf::StateTransitionFunction;
@@ -23,6 +25,35 @@ use workstream_stf::StateTransitionFunction;
 /// Guest program identifier: the deterministic STF state-transition program
 /// (`stateroot_post = STF(stateroot_pre, txs)`) compiled to the zkVM guest.
 pub const DEFAULT_GUEST_ID: &str = "workstream-stf-guest-v1";
+
+/// Encode a full zkVM proof envelope for attachment to a block header.
+///
+/// The header's `Proof` is intentionally a small typed wrapper so header
+/// hashing can exclude the proof without changing the header layout. The
+/// canonical `ZkProof` (including public inputs and pre-state root) is stored
+/// in `proof_data` using postcard, which keeps the header self-verifying.
+pub fn encode_header_proof(proof: &ZkProof) -> Result<Proof> {
+    proof.validate()?;
+    Ok(Proof {
+        proof_data: postcard::to_allocvec(proof)
+            .map_err(|e| Error::Serialization(format!("zk proof envelope encode: {e}")))?,
+        proof_type: ProofType::ZkVm,
+    })
+}
+
+/// Decode and validate the zkVM proof envelope attached to a block header.
+pub fn decode_header_proof(proof: &Proof) -> Result<ZkProof> {
+    if proof.proof_type != ProofType::ZkVm {
+        return Err(Error::Validation(format!(
+            "unsupported header proof type: {:?}",
+            proof.proof_type
+        )));
+    }
+    let decoded: ZkProof = postcard::from_bytes(&proof.proof_data)
+        .map_err(|e| Error::Serialization(format!("zk proof envelope decode: {e}")))?;
+    decoded.validate()?;
+    Ok(decoded)
+}
 
 /// Prover runtime that generates block-transition proofs through a backend.
 pub struct Prover {
@@ -115,6 +146,16 @@ impl InMemoryZkBackend {
             tip: 0,
         }
     }
+
+    /// Create a backend whose guest execution uses the same fork schedule as
+    /// the sequencer/node that produced or validates the transition.
+    pub fn with_stf(stf: StateTransitionFunction) -> Self {
+        Self {
+            stf,
+            state: State::new(),
+            tip: 0,
+        }
+    }
 }
 
 impl Default for InMemoryZkBackend {
@@ -196,6 +237,25 @@ impl InMemoryVerifier {
 
     pub fn with_backend(backend: Arc<dyn ZkvmBackend>) -> Self {
         Self { backend }
+    }
+
+    /// Synchronous transition check used by the node apply path.
+    pub fn verify_transition(
+        &self,
+        transition: &ProveBlockTransition,
+        proof: &ZkProof,
+    ) -> Result<bool> {
+        self.backend.verify_block_transition(transition, proof)
+    }
+}
+
+impl BlockProofVerifier for InMemoryVerifier {
+    fn verify_block_transition(
+        &self,
+        transition: &ProveBlockTransition,
+        proof: &ZkProof,
+    ) -> Result<bool> {
+        self.verify_transition(transition, proof)
     }
 }
 

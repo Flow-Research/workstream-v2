@@ -1,10 +1,24 @@
 //! Verifier API trait
 
+use super::prover::{ProveBlockTransition, ZkProof};
 use crate::hash::H256;
 use crate::types::Transaction;
 use crate::{Error, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+
+/// Synchronous proof verifier used by the node's block-apply path (issue #83).
+///
+/// `VerifierApi` is the public async DTO interface; nodes need a synchronous
+/// check so verification can reject a block before any state is committed.
+pub trait BlockProofVerifier: Send + Sync {
+    /// Verify a zkVM proof against the state transition it attests.
+    fn verify_block_transition(
+        &self,
+        transition: &ProveBlockTransition,
+        proof: &ZkProof,
+    ) -> Result<bool>;
+}
 
 #[async_trait]
 pub trait VerifierApi: Send + Sync {

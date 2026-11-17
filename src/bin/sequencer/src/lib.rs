@@ -16,8 +16,10 @@ use std::sync::Arc;
 
 use workstream_core::hash::{Hash, H256};
 use workstream_core::traits::da::{DaClient, PostBlockRequest};
+use workstream_core::traits::prover::{ProveBlockTransition, ZkvmBackend};
 use workstream_core::types::*;
 use workstream_core::{Error, Result};
+use workstream_prover::{encode_header_proof, InMemoryZkBackend};
 use workstream_state::State;
 use workstream_stf::StateTransitionFunction;
 use workstream_tx::TxValidator;
@@ -166,6 +168,8 @@ pub struct Sequencer {
     last_header: Option<BlockHeader>,
     /// Data availability client used to publish produced blocks (issue #82).
     da: Arc<dyn DaClient>,
+    /// zkVM backend used to prove transitions attached to block headers (#83).
+    backend: Arc<dyn ZkvmBackend>,
 }
 
 impl Sequencer {
@@ -176,12 +180,27 @@ impl Sequencer {
 
     /// Create a sequencer wired to a data availability client.
     pub fn with_da(stf: StateTransitionFunction, da: Arc<dyn DaClient>) -> Self {
+        Self::with_da_and_backend(stf.clone(), da, Arc::new(InMemoryZkBackend::with_stf(stf)))
+    }
+
+    /// Create a sequencer with a custom zkVM proving backend.
+    pub fn with_backend(stf: StateTransitionFunction, backend: Arc<dyn ZkvmBackend>) -> Self {
+        Self::with_da_and_backend(stf, Arc::new(crate::da::InMemoryDaClient::new()), backend)
+    }
+
+    /// Create a sequencer with custom DA and proving backends.
+    pub fn with_da_and_backend(
+        stf: StateTransitionFunction,
+        da: Arc<dyn DaClient>,
+        backend: Arc<dyn ZkvmBackend>,
+    ) -> Self {
         Sequencer {
             stf,
             state: State::new(),
             mempool: Mempool::default(),
             last_header: None,
             da,
+            backend,
         }
     }
 
@@ -283,6 +302,21 @@ impl Sequencer {
         da: Arc<dyn DaClient>,
         dir: &Path,
     ) -> Result<Self> {
+        Self::load_state_with_backend(
+            stf.clone(),
+            da,
+            Arc::new(InMemoryZkBackend::with_stf(stf)),
+            dir,
+        )
+    }
+
+    /// Rebuild a sequencer from disk with a custom proving backend.
+    pub fn load_state_with_backend(
+        stf: StateTransitionFunction,
+        da: Arc<dyn DaClient>,
+        backend: Arc<dyn ZkvmBackend>,
+        dir: &Path,
+    ) -> Result<Self> {
         let state = State::load_from_dir(dir)?;
         let last_header = state.last_header.clone();
         Ok(Sequencer {
@@ -291,32 +325,68 @@ impl Sequencer {
             mempool: Mempool::default(),
             last_header,
             da,
+            backend,
         })
     }
 
-    /// Build the next block and publish it to the data availability layer,
-    /// recording the resulting DA reference in the block header.
+    /// Build the next block, prove its transition, publish it to the data
+    /// availability layer, and record the resulting DA reference in the header.
+    ///
+    /// The proof is attached to `header.proof` before publication, so DA
+    /// clients receive a self-verifying block. `da_ref` commits to the canonical
+    /// pre-proof block bytes; the proof itself is excluded from `header_hash`
+    /// so attaching it does not change the chain link.
     ///
     /// Fails closed (typed error) when the DA submission is unavailable; a
     /// block that could not be made available must never be considered final.
     pub async fn build_and_submit_block(&mut self, max_txs: Option<u32>) -> Result<Block> {
+        // Rollback point: state is committed by `build_block`, but an
+        // unavailable DA layer must not leave an unpublishable tip behind.
+        let pre_state = self.state.clone();
+        let pre_last_header = self.last_header.clone();
+        let stateroot_pre = pre_state.root().smt_root;
+
         let mut block = self.build_block(max_txs)?;
-        let block_bytes = serde_json::to_vec(&block)
+
+        // DA reference is stable across proof attachment: commit to the
+        // canonical block before the proof/DA-ref augmentation.
+        let da_payload = serde_json::to_vec(&block)
+            .map_err(|e| Error::Serialization(format!("block encode: {e}")))?;
+        block.header.da_ref = Hash::sha256(&da_payload);
+
+        // Prove the exact transition the node will replay, binding the proof
+        // to the final header hash (proof bytes themselves are excluded).
+        let transition = ProveBlockTransition {
+            version: 1,
+            block_hash: *header_hash(&block.header)?.as_bytes(),
+            stateroot_pre,
+            transactions: block.transactions.clone(),
+        };
+        let proof = self.backend.prove_block_transition(&transition).await?;
+        block.header.proof = Some(encode_header_proof(&proof)?);
+
+        // DA stores the final, self-verifying block bytes.
+        let published = serde_json::to_vec(&block)
             .map_err(|e| Error::Serialization(format!("block encode: {e}")))?;
         let post = self
             .da
             .post_block(PostBlockRequest {
                 version: 1,
                 api_version: 1,
-                block_bytes: block_bytes.clone(),
+                block_bytes: published,
             })
             .await?;
         if !post.available {
+            self.state = pre_state;
+            self.last_header = pre_last_header;
             return Err(Error::Consensus(
                 "data availability submission unavailable".to_string(),
             ));
         }
-        block.header.da_ref = Hash::sha256(&block_bytes);
+
+        // Re-seal the tip with the finalized DA reference and attached proof.
+        self.last_header = Some(block.header.clone());
+        self.state.last_header = Some(block.header.clone());
         Ok(block)
     }
 

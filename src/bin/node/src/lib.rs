@@ -10,6 +10,8 @@
 //! 3. Tx root: recomputed `tx_root` over the block's transactions matches
 //! 4. Execution: STF executes all transactions under the block's fork
 //! 5. State root: computed `state.root()` matches `header.state_root`
+//! 6. zkVM proof: the header envelope is decoded and verified against the
+//!    executed transition (optional unless `require_proof` is enabled)
 //!
 //! If any check fails, the block is rejected; the node state is unchanged.
 
@@ -17,10 +19,11 @@ use std::path::Path;
 use std::sync::Arc;
 use workstream_core::fork::{validate_header_fork, ForkSchedule};
 use workstream_core::hash::{Hash, H256};
-use workstream_core::traits::prover::{ProveBlockTransition, ZkProof, ZkvmBackend};
+use workstream_core::traits::prover::{ProveBlockTransition, ZkvmBackend};
+use workstream_core::traits::verifier::BlockProofVerifier;
 use workstream_core::types::*;
 use workstream_core::{Error, Result};
-use workstream_prover::{InMemoryZkBackend, DEFAULT_GUEST_ID};
+use workstream_prover::{decode_header_proof, InMemoryVerifier};
 use workstream_sequencer::{header_hash, tx_hash, tx_root, GENESIS_PARENT_HASH};
 use workstream_state::State;
 use workstream_stf::StateTransitionFunction;
@@ -94,33 +97,61 @@ pub struct Node<S: BlockSource> {
     schedule: ForkSchedule,
     state: State,
     source: S,
-    /// zkVM proof verification backend (SEC-002); blocks whose attached
-    /// proof fails verification are rejected before commit.
-    backend: Arc<dyn ZkvmBackend>,
+    /// zkVM proof verifier (SEC-002/#83); attached proofs are checked before
+    /// any state is committed.
+    verifier: Arc<dyn BlockProofVerifier>,
+    /// Whether an attached proof is mandatory. Off by default so legacy
+    /// unproven blocks remain syncable; enabled by [`Node::require_proof`].
+    require_proof: bool,
     last_header: Option<BlockHeader>,
 }
 
 impl<S: BlockSource> Node<S> {
     /// Create a node starting from genesis (empty state, no blocks applied).
     pub fn new(stf: StateTransitionFunction, schedule: ForkSchedule, source: S) -> Self {
-        Self::with_backend(stf, schedule, source, Arc::new(InMemoryZkBackend::new()))
+        Self::with_verifier(stf, schedule, source, Arc::new(InMemoryVerifier::new()))
     }
 
     /// Create a node with a custom proof-verification backend.
+    ///
+    /// Kept for callers that previously injected a [`ZkvmBackend`]; the
+    /// backend is wrapped in an [`InMemoryVerifier`] for the block-apply path.
     pub fn with_backend(
         stf: StateTransitionFunction,
         schedule: ForkSchedule,
         source: S,
         backend: Arc<dyn ZkvmBackend>,
     ) -> Self {
+        Self::with_verifier(
+            stf,
+            schedule,
+            source,
+            Arc::new(InMemoryVerifier::with_backend(backend)),
+        )
+    }
+
+    /// Create a node with a custom block-proof verifier.
+    pub fn with_verifier(
+        stf: StateTransitionFunction,
+        schedule: ForkSchedule,
+        source: S,
+        verifier: Arc<dyn BlockProofVerifier>,
+    ) -> Self {
         Node {
             stf,
             schedule,
             state: State::new(),
             source,
-            backend,
+            verifier,
+            require_proof: false,
             last_header: None,
         }
+    }
+
+    /// Require every applied block to carry a valid zkVM proof.
+    pub fn require_proof(mut self) -> Self {
+        self.require_proof = true;
+        self
     }
 
     /// Current chain tip height (0 == genesis, no blocks applied yet).
@@ -223,27 +254,46 @@ impl<S: BlockSource> Node<S> {
             )));
         }
 
-        // 7. zkVM proof verification (SEC-002): reject blocks whose attached
-        //    proof fails verification before any state is committed. Blocks
-        //    without a proof are not yet attributable to a prover and are
-        //    deferred to the prover/header integration (issue #83).
-        if let Some(proof) = block.header.proof.clone() {
+        // 7. zkVM proof verification (SEC-002/#83): the full prover envelope
+        //    travels in the header. Reject malformed or invalid proofs before
+        //    any state is committed; missing proofs are rejected only when the
+        //    node is configured to require them.
+        let attached_proof = match block.header.proof.clone() {
+            Some(proof) => Some(proof),
+            None if self.require_proof => {
+                return Err(Error::Consensus(format!(
+                    "block at height {height} has no attached zk proof"
+                )));
+            }
+            None => None,
+        };
+
+        if let Some(proof) = attached_proof {
+            let zk_proof = decode_header_proof(&proof).map_err(|e| {
+                Error::Consensus(format!(
+                    "zk proof verification failed at height {height}: invalid proof envelope: {e}"
+                ))
+            })?;
             let stateroot_pre = self.state.root().smt_root;
+            if zk_proof.stateroot_pre != stateroot_pre {
+                return Err(Error::Consensus(format!(
+                    "zk proof verification failed at height {height}: pre-state root mismatch"
+                )));
+            }
+            let expected_public_inputs = computed_state_root.smt_root.as_bytes().to_vec();
+            if zk_proof.public_inputs != expected_public_inputs {
+                return Err(Error::Consensus(format!(
+                    "zk proof verification failed at height {height}: public input mismatch"
+                )));
+            }
             let transition = ProveBlockTransition {
                 version: 1,
                 block_hash: *header_hash(&block.header)?.as_bytes(),
                 stateroot_pre,
                 transactions: block.transactions.clone(),
             };
-            let zk_proof = ZkProof {
-                version: 1,
-                proof_bytes: proof.proof_data.clone(),
-                public_inputs: computed_state_root.smt_root.as_bytes().to_vec(),
-                guest_id: DEFAULT_GUEST_ID.to_string(),
-                stateroot_pre,
-            };
             let valid = self
-                .backend
+                .verifier
                 .verify_block_transition(&transition, &zk_proof)?;
             if !valid {
                 return Err(Error::Consensus(format!(
@@ -277,9 +327,26 @@ impl<S: BlockSource> Node<S> {
         source: S,
         dir: &Path,
     ) -> Result<Self> {
+        Self::load_state_with_verifier(
+            stf,
+            schedule,
+            source,
+            Arc::new(InMemoryVerifier::new()),
+            dir,
+        )
+    }
+
+    /// Rebuild a verifying node with a custom block-proof verifier.
+    pub fn load_state_with_verifier(
+        stf: StateTransitionFunction,
+        schedule: ForkSchedule,
+        source: S,
+        verifier: Arc<dyn BlockProofVerifier>,
+        dir: &Path,
+    ) -> Result<Self> {
         let state = State::load_from_dir(dir)?;
         let last_header = state.last_header.clone();
-        let mut node = Self::new(stf, schedule, source);
+        let mut node = Self::with_verifier(stf, schedule, source, verifier);
         node.state = state;
         node.last_header = last_header;
         Ok(node)
@@ -290,6 +357,7 @@ impl<S: BlockSource> Node<S> {
 mod tests {
     use super::*;
     use workstream_crypto::signature;
+    use workstream_prover::{encode_header_proof, InMemoryZkBackend};
     use workstream_sequencer::Sequencer;
     use workstream_stf::{
         encode_payload, mvp_genesis_schedule, ActorRegisterPayload, ActorRole, ProjectCreatePayload,
@@ -477,7 +545,7 @@ mod tests {
     fn node_accepts_valid_proof() {
         let (mut blocks, _) = build_chain(vec![vec![register_tx(0x11, ActorRole::Sponsor)]]);
         let block = blocks.pop().unwrap();
-        let backend = InMemoryZkBackend::new();
+        let backend = InMemoryZkBackend::with_stf(mvp_stf());
         let transition = ProveBlockTransition {
             version: 1,
             block_hash: [7u8; 32],
@@ -486,10 +554,7 @@ mod tests {
         };
         let proof = backend.compute_proof(&transition).unwrap();
         let mut block = block;
-        block.header.proof = Some(Proof {
-            proof_data: proof.proof_bytes.clone(),
-            proof_type: ProofType::ZkVm,
-        });
+        block.header.proof = Some(encode_header_proof(&proof).unwrap());
 
         let mut source = MemoryBlockSource::new();
         source.push(block);
@@ -497,7 +562,7 @@ mod tests {
             mvp_stf(),
             mvp_schedule(),
             source,
-            Arc::new(InMemoryZkBackend::new()),
+            Arc::new(InMemoryZkBackend::with_stf(mvp_stf())),
         );
         let result = node.apply_next().unwrap();
         let result = result.unwrap();
@@ -509,18 +574,43 @@ mod tests {
     fn node_rejects_invalid_proof() {
         let (mut blocks, _) = build_chain(vec![vec![register_tx(0x11, ActorRole::Sponsor)]]);
         let mut block = blocks.pop().unwrap();
-        block.header.proof = Some(Proof {
-            proof_data: vec![0u8; 32],
-            proof_type: ProofType::ZkVm,
-        });
+        let backend = InMemoryZkBackend::with_stf(mvp_stf());
+        let transition = ProveBlockTransition {
+            version: 1,
+            block_hash: [7u8; 32],
+            stateroot_pre: State::new().root().smt_root,
+            transactions: block.transactions.clone(),
+        };
+        let mut proof = backend.compute_proof(&transition).unwrap();
+        proof.proof_bytes[0] ^= 0xff; // decode succeeds; verifier must reject
+        block.header.proof = Some(encode_header_proof(&proof).unwrap());
 
         let mut source = MemoryBlockSource::new();
         source.push(block);
-        let mut node = Node::new(mvp_stf(), mvp_schedule(), source);
+        let mut node = Node::with_backend(
+            mvp_stf(),
+            mvp_schedule(),
+            source,
+            Arc::new(InMemoryZkBackend::with_stf(mvp_stf())),
+        );
         let err = node.apply_next().unwrap_err();
         assert!(matches!(err, Error::Consensus(_)));
         assert!(err.to_string().contains("zk proof verification failed"));
         assert_eq!(node.tip(), 0); // unchanged after rejection
+    }
+
+    #[test]
+    fn node_rejects_missing_proof_when_required() {
+        let (mut blocks, _) = build_chain(vec![vec![]]);
+        let block = blocks.pop().unwrap();
+
+        let mut source = MemoryBlockSource::new();
+        source.push(block);
+        let mut node = Node::new(mvp_stf(), mvp_schedule(), source).require_proof();
+        let err = node.apply_next().unwrap_err();
+        assert!(matches!(err, Error::Consensus(_)));
+        assert!(err.to_string().contains("has no attached zk proof"));
+        assert_eq!(node.tip(), 0);
     }
 
     #[test]

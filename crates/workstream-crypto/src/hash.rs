@@ -1,6 +1,6 @@
 pub use workstream_core::hash::*;
 
-/// Content identifier: sha256:<hex>
+/// Content identifier: sha256: `hex`
 #[derive(Clone, Debug)]
 pub struct ContentId(String);
 

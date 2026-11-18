@@ -38,8 +38,7 @@ pub const SLOT_SECONDS: u64 = 12;
 /// Parent hash of the very first block (genesis boundary marker).
 pub const GENESIS_PARENT_HASH: &[u8] = b"WS:v1:genesis-parent-hash";
 
-/// Domain tag for transaction canonical hashes.
-const TX_TAG: &[u8] = b"WS:v1:tx:";
+pub use workstream_tx::tx_hash;
 
 /// Domain tag for pair nodes inside the tx-merkle fold.
 const TX_NODE_TAG: &[u8] = b"WS:v1:txnode:";
@@ -49,16 +48,6 @@ const TX_ROOT_EMPTY: &[u8] = b"WS:v1:txroot:empty";
 
 /// Domain tag for the block header hash.
 const HEADER_TAG: &[u8] = b"WS:v1:header:";
-
-/// Canonical transaction hash: H(tag ‖ postcard(tx)).
-///
-/// Returns a typed error if canonical encoding fails; the transaction hash is
-/// a consensus commitment, so it must fail closed rather than panic (SEC-008).
-pub fn tx_hash(tx: &Transaction) -> Result<H256> {
-    let bytes = postcard::to_allocvec(tx)
-        .map_err(|e| Error::Serialization(format!("transaction encode: {e}")))?;
-    Ok(Hash::sha256_concat(&[TX_TAG, &bytes]))
-}
 
 /// Canonical commit over ordered tx hashes (duplicate-last pairing fold).
 ///

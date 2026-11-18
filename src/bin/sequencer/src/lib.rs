@@ -26,8 +26,11 @@ use workstream_tx::TxValidator;
 
 pub mod da;
 pub mod p2p;
+pub mod sequencer_api;
+
 pub use da::InMemoryDaClient;
 pub use p2p::InMemoryP2pNetwork;
+pub use sequencer_api::SequencerApiImpl;
 
 /// Fixed block slot spacing in seconds (consensus-derived timestamp).
 pub const SLOT_SECONDS: u64 = 12;

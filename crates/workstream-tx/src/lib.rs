@@ -56,6 +56,11 @@ impl TxValidator {
         if !valid {
             return Err(Error::InvalidSignature);
         }
+        if pk.account_id()? != tx.account {
+            return Err(Error::Unauthorized(
+                "signing key does not control transaction account".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -168,7 +173,6 @@ impl TxBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use workstream_core::hash::H256;
     use workstream_crypto::signature;
 
     fn ed25519_signing_key() -> ed25519_dalek::SigningKey {
@@ -178,7 +182,9 @@ mod tests {
     fn signed_tx() -> Transaction {
         let mut tx = TxBuilder::new()
             .chain_id(1)
-            .account(H256::from_bytes([1u8; 32]))
+            .account(workstream_core::Hash::sha256(
+                ed25519_signing_key().verifying_key().as_bytes(),
+            ))
             .nonce(0, 0)
             .add_action(ActionType::ActorRegister, b"payload".to_vec())
             .fee(FeeSpec {

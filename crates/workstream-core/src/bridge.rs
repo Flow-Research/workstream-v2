@@ -5,16 +5,15 @@
 //! withdrawal) or when a task compensation is paid out (`award.fulfill` mapped
 //! onto the escrow pool).
 //!
-//! Releases spend the escrowed note through the one-time nullifier derived by
-//! [`spend`] in the privacy module, failing closed on zero-value escrows and on
-//! double releases.
+//! Release tracking here is local to this adapter. Canonical note spends
+//! are recorded separately by the rollup state transition function.
 
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::hash::{Hash, H256};
-use crate::privacy::{spend, Asset, ShieldedNote};
+use crate::privacy::{Asset, ShieldedNote};
 use crate::types::{AccountId, Event, TaskId};
 use crate::{Error, Result};
 
@@ -105,29 +104,18 @@ impl BridgePool {
         Ok(escrow_id)
     }
 
-    /// Release (value out / compensation payout): spend the escrowed note for
-    /// `family` and pay out to `recipient`. Fails closed on unknown escrows,
+    /// Release a withdrawal escrow to `recipient`. Fails closed on unknown escrows,
     /// double releases, and zero-value notes.
-    pub fn release(
-        &mut self,
-        escrow_id: H256,
-        recipient: AccountId,
-        family: &[u8],
-    ) -> Result<BridgeEscrow> {
+    pub fn release(&mut self, escrow_id: H256, recipient: AccountId) -> Result<BridgeEscrow> {
         if self.get(&escrow_id).is_some_and(|e| e.task.is_some()) {
             return Err(Error::Unauthorized(
                 "task escrow requires an award payout".into(),
             ));
         }
-        self.release_to(escrow_id, recipient, family)
+        self.release_to(escrow_id, recipient)
     }
 
-    fn release_to(
-        &mut self,
-        escrow_id: H256,
-        recipient: AccountId,
-        family: &[u8],
-    ) -> Result<BridgeEscrow> {
+    fn release_to(&mut self, escrow_id: H256, recipient: AccountId) -> Result<BridgeEscrow> {
         let escrow = self.escrows.get_mut(&escrow_id).ok_or_else(|| {
             Error::NotFound(format!("bridge escrow not found: {}", escrow_id.to_hex()))
         })?;
@@ -140,7 +128,6 @@ impl BridgePool {
         if escrow.recipient != recipient {
             return Err(Error::Unauthorized("escrow recipient mismatch".into()));
         }
-        spend(&escrow.note, family)?;
         escrow.spent = true;
         Ok(escrow.clone())
     }
@@ -161,7 +148,7 @@ impl BridgePool {
             return Err(Error::Validation("trailing award event data".into()));
         }
         let escrow_id = Self::payout_escrow_id(task, worker, award);
-        self.release_to(escrow_id, worker, b"award")
+        self.release_to(escrow_id, worker)
     }
 
     /// Look up an escrow by id.
@@ -239,9 +226,9 @@ mod tests {
         let id = pool
             .deposit(token.clone(), 10, worker(), note.clone())
             .unwrap();
-        assert!(pool.release(id, H256::ZERO, b"withdraw").is_err());
+        assert!(pool.release(id, H256::ZERO).is_err());
         assert!(!pool.get(&id).unwrap().spent);
-        pool.release(id, worker(), b"withdraw").unwrap();
+        pool.release(id, worker()).unwrap();
         assert!(pool
             .deposit_task(task, worker(), 10, token, 10, note)
             .is_err());
@@ -277,20 +264,16 @@ mod tests {
         let note = ShieldedNote::new(asset.id, 100, H256::from_bytes([7u8; 32]));
         let escrow_id = pool.deposit(asset, 100, worker(), note).unwrap();
 
-        let released = pool
-            .release(escrow_id, worker(), b"bridge:withdraw")
-            .unwrap();
+        let released = pool.release(escrow_id, worker()).unwrap();
         assert!(released.spent);
         assert_eq!(released.recipient, worker());
-        assert!(pool
-            .release(escrow_id, worker(), b"bridge:withdraw")
-            .is_err());
+        assert!(pool.release(escrow_id, worker()).is_err());
     }
 
     #[test]
     fn bridge_release_fails_closed_on_unknown_escrow() {
         let mut pool = BridgePool::new();
-        assert!(pool.release(H256::ZERO, worker(), b"award").is_err());
+        assert!(pool.release(H256::ZERO, worker()).is_err());
     }
 
     #[test]
@@ -305,7 +288,7 @@ mod tests {
             .unwrap();
         assert_eq!(escrow_id, BridgePool::payout_escrow_id(task, worker, 50));
 
-        assert!(pool.release(escrow_id, worker, b"withdraw").is_err());
+        assert!(pool.release(escrow_id, worker).is_err());
         let event = Event {
             event_type: "award.fulfilled".into(),
             data: postcard::to_allocvec(&(task, worker, 50u128)).unwrap(),

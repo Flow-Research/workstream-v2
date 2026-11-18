@@ -17,6 +17,9 @@ use crate::privacy::{Asset, ShieldedNote};
 use crate::types::{AccountId, Event, TaskId};
 use crate::{Error, Result};
 
+mod durable;
+pub use durable::DurableBridgePool;
+
 /// Domain tag for task compensation payout escrow derivations.
 const PAYOUT_TAG: &[u8] = b"WS:v1:bridge:payout:";
 
@@ -274,6 +277,42 @@ mod tests {
     fn bridge_release_fails_closed_on_unknown_escrow() {
         let mut pool = BridgePool::new();
         assert!(pool.release(H256::ZERO, worker()).is_err());
+    }
+
+    #[test]
+    fn restarted_relay_rejects_finalized_award_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let task = H256::from_bytes([3; 32]);
+        let token = asset(AssetKind::BridgedStablecoin);
+        let note = ShieldedNote::new(token.id, 50, H256::from_bytes([8; 32]));
+        let event = Event {
+            event_type: "award.fulfilled".into(),
+            data: postcard::to_allocvec(&(task, worker(), note.amount)).unwrap(),
+            block_number: 17,
+            tx_index: 2,
+        };
+        let id = {
+            let mut relay = DurableBridgePool::create(path).unwrap();
+            assert!(DurableBridgePool::open(path).is_err());
+            relay
+                .deposit_task(task, worker(), 50, token.clone(), note.clone())
+                .unwrap()
+        };
+        let receipt = {
+            let mut relay = DurableBridgePool::open(path).unwrap();
+            assert!(!relay.get(&id).unwrap().unwrap().spent);
+            relay.apply_finalized_award(&event).unwrap()
+        };
+        assert_eq!(receipt.escrow_id, id);
+        assert!(receipt.spent);
+        assert!(DurableBridgePool::create(path).is_err());
+        let mut relay = DurableBridgePool::open(path).unwrap();
+        assert!(
+            matches!(relay.apply_finalized_award(&event), Err(Error::Validation(msg)) if msg.contains("already released"))
+        );
+        assert!(relay.deposit(token, 50, worker(), note).is_err());
+        assert_eq!(relay.get(&id).unwrap(), Some(receipt));
     }
 
     #[test]

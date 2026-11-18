@@ -12,7 +12,25 @@ use super::*;
 
 const FILE: &str = "escrows.v1";
 // Keep the original path so create() cannot reset a pre-authentication store.
-const MAGIC: &[u8] = b"WS:bridge:v2\0";
+// v2 releases have unknown external status. Never infer that they are safe to send.
+const MAGIC: &[u8] = b"WS:bridge:v3\0";
+
+/// Public instructions for the external rail. Never export the note opening.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Payout {
+    pub escrow_id: H256,
+    pub domain: H256,
+    pub asset: H256,
+    pub recipient: AccountId,
+    pub amount: u128,
+}
+
+/// The destination must durably deduplicate by escrow ID within the bridge
+/// domain, returning the original receipt on retry and rejecting a different
+/// payload for an existing key. A timeout may mean the payment was accepted.
+pub trait SettlementRail {
+    fn pay_once(&mut self, payout: &Payout) -> Result<H256>;
+}
 
 #[derive(Serialize, Deserialize)]
 struct Snapshot {
@@ -95,7 +113,10 @@ impl DurableBridgePool {
                 || escrow.note.commitment(),
                 |task| BridgePool::payout_escrow_id(task, escrow.recipient, escrow.amount),
             );
-            if expected != escrow.escrow_id || escrow.amount == 0 {
+            if expected != escrow.escrow_id
+                || escrow.amount == 0
+                || (!escrow.spent && escrow.settlement_receipt.is_some())
+            {
                 return Err(Error::State("invalid stored escrow".into()));
             }
             pool.insert_escrow(escrow)?;
@@ -178,6 +199,46 @@ impl DurableBridgePool {
 
     pub fn get(&self, id: &H256) -> Result<Option<BridgeEscrow>> {
         Ok(self.load()?.escrows.remove(id))
+    }
+
+    /// Release and enqueue are the same durable write. Scan after startup
+    /// or after release; confirmations retain the original escrow for audit.
+    pub fn pending_settlements(&self) -> Result<Vec<H256>> {
+        let mut ids: Vec<_> = self
+            .load()?
+            .escrows
+            .into_values()
+            .filter(|e| e.spent && e.settlement_receipt.is_none())
+            .map(|e| e.escrow_id)
+            .collect();
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    /// Deliver one entry. The relay holds its store lock across the external
+    /// call and confirmation. A crash between them retries the same key.
+    pub fn settle(&mut self, id: H256, rail: &mut dyn SettlementRail) -> Result<H256> {
+        let mut pool = self.load()?;
+        let escrow = pool
+            .escrows
+            .get_mut(&id)
+            .ok_or_else(|| Error::NotFound("unknown escrow".into()))?;
+        if !escrow.spent {
+            return Err(Error::InvalidTransition("escrow not released".into()));
+        }
+        if let Some(receipt) = escrow.settlement_receipt {
+            return Ok(receipt);
+        }
+        let receipt = rail.pay_once(&Payout {
+            escrow_id: id,
+            domain: self.authority.domain,
+            asset: escrow.asset.id,
+            recipient: escrow.recipient,
+            amount: escrow.amount,
+        })?;
+        escrow.settlement_receipt = Some(receipt);
+        self.save(&pool)?;
+        Ok(receipt)
     }
 }
 

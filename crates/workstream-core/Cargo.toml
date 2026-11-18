@@ -7,6 +7,8 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+fs2 = "0.4"
+tempfile = "3"
 postcard.workspace = true
 serde = { workspace = true }
 postcard = { workspace = true }

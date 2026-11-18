@@ -201,6 +201,7 @@ impl RpcServer {
 
     /// Handle a single JSON-RPC request and produce the response envelope.
     pub async fn handle_request(&self, request: &JsonRpcRequest) -> JsonRpcResponse {
+        workstream_ops::RPC_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if request.jsonrpc != JSON_RPC_VERSION {
             return self.error_response(
                 request.id,
@@ -264,16 +265,8 @@ impl RpcServer {
     async fn handle_line(&self, line: &str) -> JsonRpcResponse {
         let parsed = serde_json::from_str::<JsonRpcRequest>(line);
         let Ok(request) = parsed else {
-            return JsonRpcResponse {
-                jsonrpc: JSON_RPC_VERSION.to_string(),
-                id: None,
-                result: None,
-                error: Some(JsonRpcError {
-                    code: RPC_ERROR_PARSE,
-                    message: "parse error".to_string(),
-                    data: None,
-                }),
-            };
+            workstream_ops::RPC_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return self.error_response(None, RPC_ERROR_PARSE, "parse error");
         };
         self.handle_request(&request).await
     }
@@ -423,6 +416,7 @@ impl RpcServer {
     }
 
     fn error_response(&self, id: Option<u64>, code: i64, message: &str) -> JsonRpcResponse {
+        workstream_ops::RPC_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         JsonRpcResponse {
             jsonrpc: JSON_RPC_VERSION.to_string(),
             id,

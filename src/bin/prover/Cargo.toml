@@ -11,6 +11,7 @@ name = "prover"
 path = "main.rs"
 
 [dependencies]
+workstream-ops = { path = "../../../crates/workstream-ops" }
 workstream-core = { path = "../../../crates/workstream-core" }
 workstream-stf = { path = "../../../crates/workstream-stf" }
 workstream-state = { path = "../../../crates/workstream-state" }

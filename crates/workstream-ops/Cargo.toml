@@ -1,0 +1,12 @@
+[package]
+name = "workstream-ops"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
+tokio.workspace = true
+tracing.workspace = true
+workstream-core = { path = "../workstream-core" }

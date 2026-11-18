@@ -72,6 +72,7 @@ impl ProverApi for Prover {
         };
         let proof = self.backend.prove_block_transition(&transition).await?;
         proof.validate()?;
+        workstream_ops::PROOFS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(ProofBundleResponse {
             version: 1,
             api_version: 1,

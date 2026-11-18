@@ -384,6 +384,7 @@ impl Sequencer {
             })
             .await?;
         block.header.da_ref = Hash::sha256(&block_bytes);
+        workstream_ops::BLOCKS_SUBMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(block)
     }
 

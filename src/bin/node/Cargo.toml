@@ -14,6 +14,7 @@ path = "main.rs"
 path = "src/lib.rs"
 
 [dependencies]
+workstream-ops = { path = "../../../crates/workstream-ops" }
 workstream-core = { path = "../../../crates/workstream-core" }
 workstream-state = { path = "../../../crates/workstream-state" }
 workstream-stf = { path = "../../../crates/workstream-stf" }

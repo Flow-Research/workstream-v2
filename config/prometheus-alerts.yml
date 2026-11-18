@@ -1,0 +1,12 @@
+groups:
+  - name: workstream
+    rules:
+      - alert: WorkStreamComponentUnavailable
+        expr: (up{job="workstream"} == 0) or (workstream_ready{job="workstream"} == 0)
+        for: 1m
+        annotations:
+          summary: "WorkStream component {{ $labels.instance }} unavailable"
+      - alert: WorkStreamRpcErrors
+        expr: increase(workstream_rpc_errors_total{job="workstream"}[5m]) > 10
+        annotations:
+          summary: "More than 10 RPC errors in five minutes on {{ $labels.instance }}"

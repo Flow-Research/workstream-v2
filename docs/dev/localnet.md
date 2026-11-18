@@ -81,3 +81,13 @@ Useful scripts:
   project-specific overrides that stay untracked.
 - The config system is documented in `docs/ARCHITECTURE.md` → *Configuration*.
 - Logs respect `RUST_LOG`/`log_level` config; defaults are `info`.
+## Monitoring
+
+Pass `--metrics-port PORT` to each binary (use distinct ports, e.g. 9101–9103).
+The optional HTTP listener binds to `127.0.0.1`. Scrape `/metrics` under
+Prometheus job `workstream` and load `config/prometheus-alerts.yml` via
+`rule_files` to route component outages and RPC errors to Alertmanager.
+Counters are per process and reset on restart. `/healthz` checks HTTP liveness;
+`/readyz` returns 503 until the first successful component heartbeat or after
+30 seconds without one. Readiness measures local loop health, not chain sync
+or finality. Run the scraper in the same network namespace or use a tunnel.

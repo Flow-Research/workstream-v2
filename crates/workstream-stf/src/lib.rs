@@ -1214,18 +1214,35 @@ mod mvp_handler_tests {
         assert_eq!(state.mmr.size(), 2); // 1 review + 1 acceptance record
 
         // Relay the actual verified event to the funded bridge escrow.
-        use workstream_core::bridge::DurableBridgePool;
+        use ed25519_dalek::Signer;
+        use workstream_core::bridge::{DepositAuthority, DepositReceipt, DurableBridgePool};
         use workstream_core::privacy::{Asset, AssetKind, ShieldedNote};
         let dir = tempfile::tempdir().unwrap();
-        let mut pool = DurableBridgePool::create(dir.path()).unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[33; 32]);
+        let authority = DepositAuthority {
+            domain: content_hash(8),
+            public_key: signer.verifying_key().to_bytes(),
+        };
+        let mut pool = DurableBridgePool::create(dir.path(), authority).unwrap();
         let asset = Asset {
             id: content_hash(3),
             kind: AssetKind::BridgedStablecoin,
         };
         let amount = task_record.award;
         let note = ShieldedNote::new(asset.id, amount, content_hash(4));
-        pool.deposit_task(task, worker(), amount, asset, note)
-            .unwrap();
+        let receipt = DepositReceipt {
+            domain: authority.domain,
+            source_event: content_hash(5),
+            asset,
+            amount,
+            note_commitment: note.commitment(),
+            recipient: worker(),
+            task: Some(task),
+        };
+        let sig = signer
+            .sign(receipt.signing_digest().unwrap().as_bytes())
+            .to_bytes();
+        pool.accept_deposit(&receipt, &sig, note).unwrap();
         let payload = encode_payload(&handlers::AwardFulfillPayload { task }).unwrap();
         run(
             &stf,
@@ -1257,7 +1274,7 @@ mod mvp_handler_tests {
         let payout = pool.apply_finalized_award(&events[0]).unwrap();
         assert_eq!((payout.recipient, payout.amount), (worker(), amount));
         drop(pool);
-        let mut restarted = DurableBridgePool::open(dir.path()).unwrap();
+        let mut restarted = DurableBridgePool::open(dir.path(), authority).unwrap();
         assert!(
             matches!(restarted.apply_finalized_award(&events[0]), Err(Error::Validation(reason)) if reason.contains("already released"))
         );

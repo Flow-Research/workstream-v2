@@ -7,6 +7,7 @@
 //! - Error types
 
 pub mod account;
+pub mod bridge;
 pub mod config;
 pub mod error;
 pub mod fork;
@@ -15,6 +16,7 @@ pub mod privacy;
 pub mod types;
 
 pub use account::{Account, AccountKind, AccountStatus, Scope, ValidatorRef, ValidatorSet};
+pub use bridge::{BridgeEscrow, BridgePool};
 pub use error::{Error, ErrorCategory, ErrorCode, Result};
 pub use fork::{ForkActivationHook, ForkConfig, ForkSchedule, GuestHash, NoopForkHook};
 pub use hash::{Hash, Hashable, H256};

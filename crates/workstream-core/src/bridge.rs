@@ -8,7 +8,7 @@
 //! Release tracking here is local to this adapter. Canonical note spends
 //! are recorded separately by the rollup state transition function.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +19,8 @@ use crate::{Error, Result};
 
 mod durable;
 pub use durable::DurableBridgePool;
+mod receipt;
+pub use receipt::{DepositAuthority, DepositReceipt};
 
 /// Domain tag for task compensation payout escrow derivations.
 const PAYOUT_TAG: &[u8] = b"WS:v1:bridge:payout:";
@@ -42,6 +44,7 @@ pub struct BridgeEscrow {
 pub struct BridgePool {
     escrows: HashMap<H256, BridgeEscrow>,
     funded_notes: HashSet<H256>,
+    consumed_receipts: BTreeSet<H256>,
 }
 
 impl BridgePool {
@@ -281,11 +284,29 @@ mod tests {
 
     #[test]
     fn restarted_relay_rejects_finalized_award_replay() {
+        use ed25519_dalek::{Signer, SigningKey};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path();
         let task = H256::from_bytes([3; 32]);
         let token = asset(AssetKind::BridgedStablecoin);
         let note = ShieldedNote::new(token.id, 50, H256::from_bytes([8; 32]));
+        let signer = SigningKey::from_bytes(&[7; 32]);
+        let authority = DepositAuthority {
+            domain: task,
+            public_key: signer.verifying_key().to_bytes(),
+        };
+        let deposit = DepositReceipt {
+            domain: authority.domain,
+            source_event: H256::from_bytes([9; 32]),
+            amount: note.amount,
+            asset: token,
+            recipient: worker(),
+            note_commitment: note.commitment(),
+            task: Some(task),
+        };
+        let sig = signer
+            .sign(deposit.signing_digest().unwrap().as_bytes())
+            .to_bytes();
         let event = Event {
             event_type: "award.fulfilled".into(),
             data: postcard::to_allocvec(&(task, worker(), note.amount)).unwrap(),
@@ -293,25 +314,23 @@ mod tests {
             tx_index: 2,
         };
         let id = {
-            let mut relay = DurableBridgePool::create(path).unwrap();
-            assert!(DurableBridgePool::open(path).is_err());
-            relay
-                .deposit_task(task, worker(), 50, token.clone(), note.clone())
-                .unwrap()
+            let mut relay = DurableBridgePool::create(path, authority).unwrap();
+            assert!(DurableBridgePool::open(path, authority).is_err());
+            relay.accept_deposit(&deposit, &sig, note.clone()).unwrap()
         };
         let receipt = {
-            let mut relay = DurableBridgePool::open(path).unwrap();
+            let mut relay = DurableBridgePool::open(path, authority).unwrap();
             assert!(!relay.get(&id).unwrap().unwrap().spent);
             relay.apply_finalized_award(&event).unwrap()
         };
         assert_eq!(receipt.escrow_id, id);
         assert!(receipt.spent);
-        assert!(DurableBridgePool::create(path).is_err());
-        let mut relay = DurableBridgePool::open(path).unwrap();
+        assert!(DurableBridgePool::create(path, authority).is_err());
+        let mut relay = DurableBridgePool::open(path, authority).unwrap();
         assert!(
             matches!(relay.apply_finalized_award(&event), Err(Error::Validation(msg)) if msg.contains("already released"))
         );
-        assert!(relay.deposit(token, 50, worker(), note).is_err());
+        assert!(relay.accept_deposit(&deposit, &sig, note).is_err());
         assert_eq!(relay.get(&id).unwrap(), Some(receipt));
     }
 

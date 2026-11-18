@@ -2,13 +2,14 @@
 //!
 //! The prover executes the deterministic state-transition guest program over
 //! block transitions and asks a pluggable [`ZkvmBackend`] for the zero-knowledge
-//! proof. The default backend runs the guest logic in memory (local development
-//! and tests); a real RISC Zero/SP1 backend plugs in behind the same trait.
+//! proof. Local proving requires a configured RISC Zero guest image.
 
 use std::sync::Arc;
 
+pub mod risc0;
+
 use async_trait::async_trait;
-use workstream_core::hash::Hash;
+use workstream_core::hash::H256;
 use workstream_core::traits::prover::{
     GuestInfo, ProofBundleResponse, ProveBlockRequest, ProveBlockTransition, ProverApi,
     ProverStatus, ZkProof, ZkvmBackend,
@@ -30,7 +31,7 @@ impl Prover {
     /// Create a prover backed by the in-memory guest execution backend.
     pub fn new() -> Self {
         Self {
-            backend: Arc::new(InMemoryZkBackend::new()),
+            backend: Arc::new(RiscZeroBackend::default()),
         }
     }
 
@@ -94,59 +95,62 @@ impl ProverApi for Prover {
     }
 }
 
-/// In-memory guest-execution backend: applies block transitions locally and
-/// produces the proof envelope over the resulting state commitment. This is the
-/// development backend; production proves run inside the zkVM itself.
+/// A prover for a particular canonical pre-state, supplied by the block producer.
 #[derive(Clone)]
-pub struct InMemoryZkBackend {
-    stf: StateTransitionFunction,
+pub struct RiscZeroBackend {
     state: State,
-    tip: u64,
+    height: u64,
 }
 
-impl InMemoryZkBackend {
-    pub fn new() -> Self {
-        Self {
-            stf: StateTransitionFunction::new(),
-            state: State::new(),
-            tip: 0,
-        }
+impl RiscZeroBackend {
+    pub fn at(state: State, height: u64) -> Self {
+        Self { state, height }
     }
 }
 
-impl Default for InMemoryZkBackend {
+impl Default for RiscZeroBackend {
     fn default() -> Self {
-        Self::new()
+        Self::at(State::new(), 1)
     }
 }
 
 #[async_trait]
-impl ZkvmBackend for InMemoryZkBackend {
+impl ZkvmBackend for RiscZeroBackend {
     async fn prove_block_transition(&self, transition: &ProveBlockTransition) -> Result<ZkProof> {
         transition.validate()?;
 
-        let mut draft = self.state.clone();
-        let fork = self
-            .stf
-            .active_fork_at(self.tip + 1)
-            .ok_or_else(|| Error::State(format!("no active fork at height {}", self.tip + 1)))?;
-        for tx in &transition.transactions {
-            // Deterministically drop transactions that fail; the proof covers
-            // the transition that actually happened.
-            let _ = self.stf.execute_tx_with_fork(&mut draft, tx, fork);
+        let pre = self.state.root().hash();
+        if transition.stateroot_pre != pre {
+            return Err(Error::InvalidProof("witness pre-state mismatch".into()));
         }
-        let post_root = draft.root().smt_root;
-
-        let mut proof_input = Vec::with_capacity(64);
-        proof_input.extend_from_slice(transition.stateroot_pre.as_bytes());
-        proof_input.extend_from_slice(post_root.as_bytes());
-        let proof_hash = Hash::sha256(&proof_input);
+        let (image, approved) = risc0::configured_image()?;
+        let mut draft = self.state.clone();
+        let stf = StateTransitionFunction::with_schedule(workstream_stf::mvp_genesis_schedule()?)?;
+        let fork = stf
+            .active_fork_at(self.height)
+            .ok_or_else(|| Error::Fork("unknown fork".into()))?;
+        for tx in &transition.transactions {
+            stf.execute_tx_with_fork(&mut draft, tx, fork)?;
+        }
+        let post_root = draft.root().hash();
+        let witness = workstream_stf::receipt::Witness {
+            before: self.state.snapshot(),
+            height: self.height,
+            block_hash: H256::from_bytes(transition.block_hash),
+            pre,
+            post: post_root,
+            transactions: transition.transactions.clone(),
+        };
+        let proof_bytes =
+            tokio::task::spawn_blocking(move || risc0::prove(&image, approved, &witness))
+                .await
+                .map_err(|e| Error::Other(e.to_string()))??;
 
         Ok(ZkProof {
             version: 1,
-            proof_bytes: proof_hash.as_bytes().to_vec(),
+            proof_bytes,
             public_inputs: post_root.as_bytes().to_vec(),
-            guest_id: DEFAULT_GUEST_ID.to_string(),
+            guest_id: approved.to_hex(),
         })
     }
 }
@@ -167,22 +171,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn in_memory_backend_proves_transition() {
-        let backend = InMemoryZkBackend::new();
-        let proof = backend
+    async fn rejects_transition_without_matching_prestate() {
+        let backend = RiscZeroBackend::default();
+        let err = backend
             .prove_block_transition(&transition(1, vec![]))
             .await
-            .unwrap();
-        proof.validate().unwrap();
-        assert_eq!(proof.version, 1);
-        assert_eq!(proof.guest_id, DEFAULT_GUEST_ID);
-        assert_eq!(proof.public_inputs.len(), 32);
-        assert_eq!(proof.proof_bytes.len(), 32);
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidProof(_)));
     }
 
     #[tokio::test]
     async fn in_memory_backend_rejects_unsupported_version() {
-        let backend = InMemoryZkBackend::new();
+        let backend = RiscZeroBackend::default();
         let err = backend
             .prove_block_transition(&transition(2, vec![]))
             .await
@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prover_proves_block_transition() {
+    async fn prover_propagates_prestate_failure() {
         let prover = Prover::new();
         let req = ProveBlockRequest {
             version: 1,
@@ -200,12 +200,10 @@ mod tests {
             stateroot_pre: H256::ZERO,
             transactions: vec![],
         };
-        let bundle = prover.prove_block(req).await.unwrap();
-        assert_eq!(bundle.version, 1);
-        assert_eq!(bundle.api_version, 1);
-        assert_eq!(bundle.guest_id, DEFAULT_GUEST_ID);
-        assert!(!bundle.proof_bytes.is_empty());
-        assert_eq!(bundle.public_inputs.len(), 32);
+        assert!(matches!(
+            prover.prove_block(req).await,
+            Err(Error::InvalidProof(_))
+        ));
     }
 
     #[tokio::test]

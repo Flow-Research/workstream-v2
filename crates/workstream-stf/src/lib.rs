@@ -3587,7 +3587,6 @@ mod fork_gating_tests {
 mod policy_wiring_tests {
     use super::*;
     use std::collections::BTreeMap;
-    use workstream_core::hash::H256;
     use workstream_crypto::signature;
     use workstream_tx::TxBuilder;
 
@@ -3598,7 +3597,7 @@ mod policy_wiring_tests {
     }
 
     fn sponsor() -> AccountId {
-        H256::from_bytes([11u8; 32])
+        accounts::account(7)
     }
 
     fn signed_register_tx(acct: AccountId, seq: u64) -> Transaction {

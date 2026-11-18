@@ -18,6 +18,7 @@ use crate::policy::{OracleInput, Policy, PolicyError};
 
 pub(crate) mod authz;
 pub mod handlers;
+pub mod notes;
 pub mod policy;
 
 pub use handlers::{
@@ -270,6 +271,7 @@ impl StateTransitionFunction {
         }
 
         let event = match action.action_type {
+            ActionType::NoteTransfer | ActionType::NoteWithdraw => notes::apply(state, tx, action)?,
             ActionType::ActorRegister => handlers::handle_actor_register(state, account, payload)?,
             ActionType::ActorLink => handlers::handle_actor_link(state, account, payload)?,
             ActionType::ActorGrant => handlers::handle_actor_grant(state, account, payload)?,
@@ -378,6 +380,7 @@ fn decode<T: serde::de::DeserializeOwned>(action: &Action) -> Result<()> {
 /// Newer protocol behavior is gated by fork features per the upgrade design.
 fn required_feature_for(action: ActionType) -> Option<&'static str> {
     match action {
+        ActionType::NoteTransfer | ActionType::NoteWithdraw => Some(features::NOTE_SPENDS),
         ActionType::TaskCreate
         | ActionType::TaskScreen
         | ActionType::TaskRelease
@@ -2222,6 +2225,34 @@ mod mvp_handler_tests {
             })
             .unwrap(),
         );
+    }
+
+    #[test]
+    fn transfer_then_withdraw_same_note_preserves_canonical_root() {
+        let stf = StateTransitionFunction::new();
+        let mut state = State::new();
+        let key = ed25519_signing_key().verifying_key();
+        let note =
+            workstream_core::privacy::ShieldedNote::new(content_hash(1), 42, content_hash(2));
+        let input = notes::issue(&mut state, &note, Hash::sha256(key.as_bytes())).unwrap();
+        let payload = encode_payload(&notes::NoteSpend {
+            input,
+            recipient: worker(),
+        })
+        .unwrap();
+        let transfer = raw_tx(sponsor(), 0, 0, ActionType::NoteTransfer, payload.clone());
+        let withdraw = raw_tx(sponsor(), 0, 1, ActionType::NoteWithdraw, payload);
+        let funded = state.root();
+        assert_eq!(
+            stf.execute_tx(&mut state, &transfer).unwrap()[0].event_type,
+            "note.transferred"
+        );
+        let paid = state.root();
+        assert_ne!(funded, paid);
+        assert!(matches!(stf.execute_tx(&mut state, &withdraw),
+            Err(Error::InvalidTransition(reason)) if reason == "note already spent"));
+        assert_eq!(state.root(), paid);
+        assert_eq!(get_nonce(&state, &sponsor(), 0).unwrap(), 1);
     }
 
     #[test]

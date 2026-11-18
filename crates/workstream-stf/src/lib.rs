@@ -2229,7 +2229,7 @@ mod mvp_handler_tests {
     fn transfer_then_withdraw_same_note_preserves_canonical_root() {
         let stf = StateTransitionFunction::new();
         let mut state = State::new();
-        let key = ed25519_signing_key().verifying_key();
+        let key = accounts::signer(sponsor()).verifying_key();
         let note =
             workstream_core::privacy::ShieldedNote::new(content_hash(1), 42, content_hash(2));
         let input = notes::issue(&mut state, &note, Hash::sha256(key.as_bytes())).unwrap();

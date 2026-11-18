@@ -240,6 +240,7 @@ impl<S: BlockSource> Node<S> {
                 proof_bytes: proof.proof_data.clone(),
                 public_inputs: computed_state_root.smt_root.as_bytes().to_vec(),
                 guest_id: DEFAULT_GUEST_ID.to_string(),
+                guest_hash: Hash::sha256(DEFAULT_GUEST_ID.as_bytes()),
                 stateroot_pre,
             };
             let valid = self

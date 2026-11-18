@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use workstream_core::hash::{Hash, H256};
 use workstream_core::traits::da::{DaClient, PostBlockRequest};
+use workstream_core::traits::prover::ProverApi;
 use workstream_core::types::*;
 use workstream_core::{Error, Result};
 use workstream_state::State;
@@ -166,6 +167,8 @@ pub struct Sequencer {
     last_header: Option<BlockHeader>,
     /// Data availability client used to publish produced blocks (issue #82).
     da: Arc<dyn DaClient>,
+    /// zkVM prover used to generate block transition proofs (issue #83).
+    prover: Arc<dyn ProverApi>,
 }
 
 impl Sequencer {
@@ -174,14 +177,25 @@ impl Sequencer {
         Self::with_da(stf, Arc::new(crate::da::InMemoryDaClient::new()))
     }
 
-    /// Create a sequencer wired to a data availability client.
+    /// Create a sequencer wired to a data availability client (default prover).
     pub fn with_da(stf: StateTransitionFunction, da: Arc<dyn DaClient>) -> Self {
+        Self::with_da_and_prover(stf, da, Arc::new(workstream_prover::Prover::new()))
+    }
+
+    /// Create a sequencer wired to a data availability client and a zkVM
+    /// prover.
+    pub fn with_da_and_prover(
+        stf: StateTransitionFunction,
+        da: Arc<dyn DaClient>,
+        prover: Arc<dyn ProverApi>,
+    ) -> Self {
         Sequencer {
             stf,
             state: State::new(),
             mempool: Mempool::default(),
             last_header: None,
             da,
+            prover,
         }
     }
 
@@ -291,16 +305,36 @@ impl Sequencer {
             mempool: Mempool::default(),
             last_header,
             da,
+            prover: Arc::new(workstream_prover::Prover::new()),
         })
     }
 
-    /// Build the next block and publish it to the data availability layer,
-    /// recording the resulting DA reference in the block header.
+    /// Build the next block, generate its zkVM proof, publish it to the data
+    /// availability layer, and record the resulting DA reference in the block
+    /// header.
     ///
     /// Fails closed (typed error) when the DA submission is unavailable; a
     /// block that could not be made available must never be considered final.
     pub async fn build_and_submit_block(&mut self, max_txs: Option<u32>) -> Result<Block> {
+        let stateroot_pre = self.state.root().smt_root;
         let mut block = self.build_block(max_txs)?;
+        let block_hash: [u8; 32] = *header_hash(&block.header)?.as_bytes();
+        let bundle = self
+            .prover
+            .prove_block(workstream_core::traits::prover::ProveBlockRequest {
+                version: 1,
+                api_version: 1,
+                block_hash,
+                stateroot_pre,
+                transactions: block.transactions.clone(),
+            })
+            .await?;
+        block.header.guest_hash = bundle.guest_hash;
+        block.header.proof = Some(Proof {
+            proof_data: bundle.proof_bytes,
+            proof_type: ProofType::ZkVm,
+        });
+
         let block_bytes = serde_json::to_vec(&block)
             .map_err(|e| Error::Serialization(format!("block encode: {e}")))?;
         let post = self

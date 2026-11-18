@@ -618,3 +618,46 @@ fn e2e_varying_block_sizes() {
 
     println!("✓ Varying block sizes: {:?} → state converged", tx_counts);
 }
+
+/// End-to-end rollup loop (issue #83): execute -> prove -> publish -> verify.
+///
+/// The sequencer executes a block, generates the zkVM guest proof, attaches
+/// it (with the guest hash) to the block header, publishes the block to the
+/// data availability layer, and the verifying node accepts the proved block.
+#[tokio::test]
+async fn e2e_execute_prove_publish_verify() {
+    use std::sync::Arc;
+    use workstream_prover::{InMemoryZkBackend, Prover};
+    use workstream_sequencer::InMemoryDaClient;
+
+    let da = Arc::new(InMemoryDaClient::new());
+    let prover = Arc::new(Prover::new());
+    let mut sequencer = Sequencer::with_da_and_prover(mvp_stf(), da, prover);
+
+    // Execute: submit transactions and produce (and publish) a block.
+    sequencer.submit_tx(register_sponsor()).unwrap();
+    let block = sequencer.build_and_submit_block(Some(1)).await.unwrap();
+
+    // Prover output is integrated into the block header; the block reached
+    // availability.
+    assert!(block.header.proof.is_some());
+    assert_eq!(
+        block.header.proof.as_ref().unwrap().proof_type,
+        ProofType::ZkVm
+    );
+    assert_ne!(block.header.guest_hash, H256::ZERO);
+    assert_ne!(block.header.da_ref, H256::ZERO);
+
+    // Verify: the full node verifies the proved block and applies it.
+    let mut source = MemoryBlockSource::new();
+    source.push(block);
+    let mut node = Node::with_backend(
+        mvp_stf(),
+        mvp_genesis_schedule().unwrap(),
+        source,
+        Arc::new(InMemoryZkBackend::new()),
+    );
+    let results = node.sync().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(node.tip(), 1);
+}

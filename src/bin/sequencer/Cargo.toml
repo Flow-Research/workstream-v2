@@ -17,6 +17,7 @@ path = "src/lib.rs"
 workstream-core = { path = "../../../crates/workstream-core" }
 workstream-state = { path = "../../../crates/workstream-state" }
 workstream-stf = { path = "../../../crates/workstream-stf" }
+workstream-prover = { path = "../prover" }
 workstream-tx = { path = "../../../crates/workstream-tx" }
 postcard = { workspace = true }
 tokio = { workspace = true }

@@ -52,6 +52,8 @@ pub struct ZkProof {
     pub proof_bytes: Vec<u8>,
     pub public_inputs: Vec<u8>,
     pub guest_id: String,
+    /// Hash of the guest program that produced the proof.
+    pub guest_hash: H256,
     /// Pre-state root the guest proved from (the post-state root is the
     /// public input).
     pub stateroot_pre: H256,
@@ -126,6 +128,7 @@ pub struct ProofBundleResponse {
     pub proof_bytes: Vec<u8>,
     pub public_inputs: Vec<u8>,
     pub guest_id: String,
+    pub guest_hash: H256,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

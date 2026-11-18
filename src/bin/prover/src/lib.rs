@@ -22,7 +22,10 @@ use workstream_stf::StateTransitionFunction;
 
 /// Guest program identifier: the deterministic STF state-transition program
 /// (`stateroot_post = STF(stateroot_pre, txs)`) compiled to the zkVM guest.
-pub const DEFAULT_GUEST_ID: &str = "workstream-stf-guest-v1";
+///
+/// The identifier is the dev marker approved by the `genesis-mvp` fork, so
+/// prover output and fork policy stay aligned in the local pipeline.
+pub const DEFAULT_GUEST_ID: &str = "workstream/genesis-mvp/guest";
 
 /// Prover runtime that generates block-transition proofs through a backend.
 pub struct Prover {
@@ -74,7 +77,8 @@ impl ProverApi for Prover {
             api_version: 1,
             proof_bytes: proof.proof_bytes,
             public_inputs: proof.public_inputs,
-            guest_id: proof.guest_id,
+            guest_id: proof.guest_id.clone(),
+            guest_hash: Hash::sha256(proof.guest_id.as_bytes()),
         })
     }
 
@@ -83,7 +87,7 @@ impl ProverApi for Prover {
             version: 1,
             api_version: 1,
             guest_id: DEFAULT_GUEST_ID.to_string(),
-            name: "workstream-stf-guest-v1".to_string(),
+            name: DEFAULT_GUEST_ID.to_string(),
         }])
     }
 
@@ -141,6 +145,7 @@ impl ZkvmBackend for InMemoryZkBackend {
             && proof.proof_bytes == expected.proof_bytes
             && proof.public_inputs == expected.public_inputs
             && proof.guest_id == expected.guest_id
+            && proof.guest_hash == expected.guest_hash
             && proof.stateroot_pre == expected.stateroot_pre)
     }
 }
@@ -173,6 +178,7 @@ impl InMemoryZkBackend {
             proof_bytes: proof_hash.as_bytes().to_vec(),
             public_inputs: post_root.as_bytes().to_vec(),
             guest_id: DEFAULT_GUEST_ID.to_string(),
+            guest_hash: Hash::sha256(DEFAULT_GUEST_ID.as_bytes()),
             stateroot_pre: transition.stateroot_pre,
         })
     }
@@ -247,6 +253,7 @@ impl VerifierApi for InMemoryVerifier {
             proof_bytes: req.proof_bytes.clone(),
             public_inputs: req.public_inputs.clone(),
             guest_id: DEFAULT_GUEST_ID.to_string(),
+            guest_hash: Hash::sha256(DEFAULT_GUEST_ID.as_bytes()),
             stateroot_pre: req.stateroot_pre,
         };
         let valid = self.backend.verify_block_transition(&transition, &proof)?;

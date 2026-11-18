@@ -1212,6 +1212,60 @@ mod mvp_handler_tests {
         assert_eq!(sub_record.status, SubmissionStatus::Accepted);
         assert_eq!(state.mmr.size(), 2); // 1 review + 1 acceptance record
 
+        // Relay the actual verified event to the funded bridge escrow.
+        use workstream_core::privacy::{Asset, AssetKind, ShieldedNote};
+        let mut pool = workstream_core::BridgePool::new();
+        let asset = Asset {
+            id: content_hash(3),
+            kind: AssetKind::BridgedStablecoin,
+        };
+        let amount = task_record.award;
+        let note = ShieldedNote::new(asset.id, amount, content_hash(4));
+        pool.deposit_task(task, worker(), amount, asset, amount, note)
+            .unwrap();
+        let payload = encode_payload(&handlers::AwardFulfillPayload { task }).unwrap();
+        run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor2(),
+            ActionType::ActorRegister,
+            register_payload(ActorRole::Sponsor),
+        );
+        assert!(matches!(
+            attempt(
+                &stf,
+                &mut state,
+                &mut book,
+                sponsor2(),
+                ActionType::AwardFulfill,
+                payload.clone()
+            ),
+            Err(Error::Unauthorized(_))
+        ));
+        let events = run(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::AwardFulfill,
+            payload.clone(),
+        );
+        let payout = pool.apply_finalized_award(&events[0]).unwrap();
+        assert_eq!((payout.recipient, payout.amount), (worker(), amount));
+        assert!(pool.apply_finalized_award(&events[0]).is_err());
+        let paid_root = state.root();
+        assert!(attempt(
+            &stf,
+            &mut state,
+            &mut book,
+            sponsor(),
+            ActionType::AwardFulfill,
+            payload
+        )
+        .is_err());
+        assert_eq!(state.root(), paid_root);
+
         // Final root differs from start and is deterministic
         assert_ne!(state.root().hash(), initial_root);
     }

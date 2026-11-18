@@ -2386,7 +2386,7 @@ mod mvp_handler_tests {
         next.activation_height = 5;
         schedule.forks.push(next.clone());
         let stf = StateTransitionFunction::with_schedule(schedule).unwrap();
-        let governor = Hash::sha256(ed25519_signing_key().verifying_key().as_bytes());
+        let governor = accounts::account(7);
         let mut state = State::new();
         governance::initialize(&mut state, governor, 2).unwrap();
         let upgrade = encode_payload(&handlers::GovUpgradePayload {

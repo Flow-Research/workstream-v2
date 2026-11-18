@@ -156,15 +156,20 @@ impl InMemoryZkBackend {
     /// the transition transactions, then committed into the proof hash.
     pub fn compute_proof(&self, transition: &ProveBlockTransition) -> Result<ZkProof> {
         transition.validate()?;
-        let fork = self
-            .stf
-            .active_fork_at(self.tip + 1)
-            .ok_or_else(|| Error::State(format!("no active fork at height {}", self.tip + 1)))?;
+        let height = self
+            .tip
+            .checked_add(1)
+            .ok_or_else(|| Error::State("block height overflow".into()))?;
+        workstream_stf::governance::check_activation(
+            &self.state,
+            self.stf.fork_schedule(),
+            height,
+        )?;
         let mut draft = self.state.clone();
         for tx in &transition.transactions {
             // Deterministically drop transactions that fail; the proof covers
             // the transition that actually happened.
-            let _ = self.stf.execute_tx_with_fork(&mut draft, tx, fork);
+            let _ = self.stf.execute_tx_at_height(&mut draft, tx, height);
         }
         let post_root = draft.root().smt_root;
 

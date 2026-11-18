@@ -246,6 +246,11 @@ impl Sequencer {
     /// 3. commit draft state; compute tx root and header.
     pub fn build_block(&mut self, max_txs: Option<u32>) -> Result<Block> {
         let number = self.tip() + 1;
+        workstream_stf::governance::check_activation(
+            &self.state,
+            self.stf.fork_schedule(),
+            number,
+        )?;
         let fork = self
             .stf
             .active_fork_at(number)
@@ -256,7 +261,7 @@ impl Sequencer {
 
         let mut included: Vec<Transaction> = Vec::with_capacity(popped.len());
         for tx in popped {
-            match self.stf.execute_tx_with_fork(&mut draft, &tx, fork) {
+            match self.stf.execute_tx_at_height(&mut draft, &tx, number) {
                 Ok(_) => included.push(tx),
                 Err(_) => {
                     // Deterministically dropped: it fails identically for any

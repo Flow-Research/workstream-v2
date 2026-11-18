@@ -17,7 +17,9 @@ use crate::privacy::{Asset, ShieldedNote};
 use crate::types::{AccountId, Event, TaskId};
 use crate::{Error, Result};
 
+mod anvil;
 mod durable;
+pub use anvil::AnvilSettlement;
 pub use durable::{DurableBridgePool, Payout, SettlementRail};
 mod receipt;
 pub use receipt::{DepositAuthority, DepositReceipt};

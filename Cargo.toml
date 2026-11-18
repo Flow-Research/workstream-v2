@@ -4,6 +4,7 @@ members = [
     "crates/workstream-crypto",
     "crates/workstream-state",
     "crates/workstream-tx",
+    "crates/workstream-wallet",
     "crates/workstream-stf",
     "crates/workstream-rlp",
     "crates/workstream-tests",

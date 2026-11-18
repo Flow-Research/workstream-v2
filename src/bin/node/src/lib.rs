@@ -28,6 +28,8 @@ use workstream_sequencer::{
 use workstream_state::State;
 use workstream_stf::StateTransitionFunction;
 
+use workstream_core::account::{Account, ValidatorContext, ValidatorSet};
+
 pub mod indexer;
 pub mod rpc;
 
@@ -110,6 +112,8 @@ pub struct Node<S: BlockSource> {
     network: Arc<dyn P2pNetwork>,
     /// Indexed event/state views over applied blocks (issue #86).
     indexer: EventIndexer,
+    /// Account abstraction validator module system (issue #87).
+    validator_set: ValidatorSet,
     last_header: Option<BlockHeader>,
 }
 
@@ -151,6 +155,7 @@ impl<S: BlockSource> Node<S> {
             backend,
             network,
             indexer: EventIndexer::new(),
+            validator_set: ValidatorSet::new(),
             last_header: None,
         }
     }
@@ -183,6 +188,11 @@ impl<S: BlockSource> Node<S> {
     /// State root observed after applying a block, if indexed.
     pub fn state_root_at(&self, block_number: BlockNumber) -> Option<StateRoot> {
         self.indexer.state_root_at(block_number)
+    }
+
+    /// Validate an account through the configured validator module system.
+    pub fn validate_account(&self, account: &Account, ctx: &ValidatorContext) -> Result<()> {
+        self.validator_set.validate(account, ctx)
     }
 
     /// Last applied block header.
@@ -369,6 +379,9 @@ impl<S: BlockSource> Node<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use workstream_core::account::{
+        Account, AccountKind, AccountStatus, HumanValidator, ValidatorRef,
+    };
     use workstream_crypto::signature;
     use workstream_sequencer::Sequencer;
     use workstream_stf::{
@@ -565,6 +578,36 @@ mod tests {
 
         assert!(!node.events_for_block(1).is_empty());
         assert!(node.state_root_at(1).is_some());
+    }
+
+    #[test]
+    fn node_validates_accounts_through_validator_set() {
+        let mut node = Node::new(mvp_stf(), mvp_schedule(), MemoryBlockSource::new());
+        node.validator_set
+            .register(H256::from_bytes([9u8; 32]), Arc::new(HumanValidator));
+
+        let human = Account {
+            id: H256::from_bytes([1u8; 32]),
+            kind: AccountKind::Human,
+            status: AccountStatus::Active,
+            validator: ValidatorRef {
+                validator_id: H256::from_bytes([9u8; 32]),
+            },
+            controllers: vec![H256::from_bytes([2u8; 32])],
+            delegate_of: None,
+            scope: None,
+        };
+        let ok = ValidatorContext {
+            required_status: AccountStatus::Active,
+            now: 0,
+        };
+        assert!(node.validate_account(&human, &ok).is_ok());
+
+        let pending = Account {
+            status: AccountStatus::Pending,
+            ..human.clone()
+        };
+        assert!(node.validate_account(&pending, &ok).is_err());
     }
 
     #[test]

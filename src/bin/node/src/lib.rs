@@ -218,6 +218,10 @@ impl<S: BlockSource> Node<S> {
 }
 
 #[cfg(test)]
+#[path = "../../../../tests/support/accounts.rs"]
+mod accounts;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use workstream_crypto::signature;
@@ -227,14 +231,7 @@ mod tests {
     };
     use workstream_tx::TxBuilder;
 
-    fn account(tag: u8) -> AccountId {
-        H256::from_bytes([tag; 32])
-    }
-
-    /// Deterministic Ed25519 signer for admission fixtures.
-    fn ed25519_signing_key() -> ed25519_dalek::SigningKey {
-        ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
-    }
+    use super::accounts::{account, signer};
 
     fn test_tx(acct: AccountId, seq: u64, t: ActionType, payload: Vec<u8>) -> Transaction {
         let mut tx = TxBuilder::new()
@@ -249,7 +246,7 @@ mod tests {
             })
             .build()
             .unwrap();
-        signature::sign_tx_ed25519(&mut tx, &ed25519_signing_key()).unwrap();
+        signature::sign_tx_ed25519(&mut tx, &signer(acct)).unwrap();
         tx
     }
 

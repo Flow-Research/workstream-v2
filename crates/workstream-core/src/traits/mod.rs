@@ -4,11 +4,13 @@
 //! following the design in docs/design/interfaces-and-boundaries.md
 
 pub mod da;
+pub mod p2p;
 pub mod prover;
 pub mod sequencer;
 pub mod verifier;
 
 pub use da::DaClient;
+pub use p2p::P2pNetwork;
 pub use prover::ProverApi;
 pub use sequencer::SequencerApi;
 pub use verifier::VerifierApi;

@@ -30,6 +30,10 @@ use workstream_sequencer::{
 use workstream_state::State;
 use workstream_stf::StateTransitionFunction;
 
+pub mod rpc;
+
+pub use rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, RpcServer};
+
 /// Trait for sourcing blocks. Implementations may be in-memory queues,
 /// file readers, or (later) P2P network fetchers.
 pub trait BlockSource {

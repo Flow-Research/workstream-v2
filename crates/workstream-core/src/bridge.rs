@@ -18,7 +18,7 @@ use crate::types::{AccountId, Event, TaskId};
 use crate::{Error, Result};
 
 mod durable;
-pub use durable::DurableBridgePool;
+pub use durable::{DurableBridgePool, Payout, SettlementRail};
 mod receipt;
 pub use receipt::{DepositAuthority, DepositReceipt};
 
@@ -35,6 +35,9 @@ pub struct BridgeEscrow {
     pub note: ShieldedNote,
     /// Whether the escrowed note has already been spent (released).
     pub spent: bool,
+    /// External receipt, recorded only after durable acceptance. A spent
+    /// escrow without a receipt is a pending settlement outbox entry.
+    pub settlement_receipt: Option<H256>,
     task: Option<TaskId>,
 }
 
@@ -75,6 +78,7 @@ impl BridgePool {
             recipient,
             note,
             spent: false,
+            settlement_receipt: None,
             task: None,
         })?;
         Ok(escrow_id)
@@ -105,6 +109,7 @@ impl BridgePool {
             recipient: worker,
             note,
             spent: false,
+            settlement_receipt: None,
             task: Some(task),
         })?;
         Ok(escrow_id)
@@ -283,8 +288,29 @@ mod tests {
     }
 
     #[test]
-    fn restarted_relay_rejects_finalized_award_replay() {
+    fn restarted_relay_retries_accepted_award_without_paying_twice() {
         use ed25519_dalek::{Signer, SigningKey};
+        // The external ledger survives the relay. Its first payment succeeds
+        // but the acknowledgement is lost before local confirmation.
+        #[derive(Default)]
+        struct ExternalLedger {
+            accepted: HashMap<H256, Payout>,
+            calls: usize,
+            paid: u128,
+        }
+        impl SettlementRail for ExternalLedger {
+            fn pay_once(&mut self, payout: &Payout) -> Result<H256> {
+                self.calls += 1;
+                if let Some(previous) = self.accepted.get(&payout.escrow_id) {
+                    assert_eq!(previous, payout);
+                    return Ok(H256::from_bytes([12; 32]));
+                }
+                self.paid += payout.amount;
+                self.accepted.insert(payout.escrow_id, payout.clone());
+                Err(Error::Timeout("acknowledgement lost".into()))
+            }
+        }
+        let mut rail = ExternalLedger::default();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path();
         let task = H256::from_bytes([3; 32]);
@@ -321,7 +347,15 @@ mod tests {
         let receipt = {
             let mut relay = DurableBridgePool::open(path, authority).unwrap();
             assert!(!relay.get(&id).unwrap().unwrap().spent);
-            relay.apply_finalized_award(&event).unwrap()
+            assert!(relay.settle(id, &mut rail).is_err());
+            assert_eq!(rail.calls, 0);
+            let released = relay.apply_finalized_award(&event).unwrap();
+            assert!(matches!(
+                relay.settle(id, &mut rail),
+                Err(Error::Timeout(_))
+            ));
+            assert_eq!(rail.paid, 50);
+            released
         };
         assert_eq!(receipt.escrow_id, id);
         assert!(receipt.spent);
@@ -332,6 +366,14 @@ mod tests {
         );
         assert!(relay.accept_deposit(&deposit, &sig, note).is_err());
         assert_eq!(relay.get(&id).unwrap(), Some(receipt));
+        assert_eq!(relay.pending_settlements().unwrap(), vec![id]);
+        let confirmation = relay.settle(id, &mut rail).unwrap();
+        assert_eq!(rail.accepted[&id].recipient, worker());
+        drop(relay);
+        let mut relay = DurableBridgePool::open(path, authority).unwrap();
+        assert!(relay.pending_settlements().unwrap().is_empty());
+        assert_eq!(relay.settle(id, &mut rail).unwrap(), confirmation);
+        assert_eq!((rail.calls, rail.accepted.len(), rail.paid), (2, 1, 50));
     }
 
     #[test]

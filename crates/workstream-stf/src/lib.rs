@@ -410,6 +410,10 @@ pub fn mvp_genesis_schedule() -> Result<ForkSchedule> {
 }
 
 #[cfg(test)]
+#[path = "../../../tests/support/accounts.rs"]
+mod accounts;
+
+#[cfg(test)]
 mod mvp_handler_tests {
     use super::*;
     use workstream_core::hash::H256;
@@ -419,33 +423,27 @@ mod mvp_handler_tests {
     const TITLE: &str = "alpha";
 
     fn sponsor() -> AccountId {
-        H256::from_bytes([11u8; 32])
+        accounts::account(7)
     }
 
     fn worker() -> AccountId {
-        H256::from_bytes([22u8; 32])
+        accounts::account(22)
     }
 
     fn sponsor2() -> AccountId {
-        H256::from_bytes([33u8; 32])
+        accounts::account(33)
     }
 
     fn worker2() -> AccountId {
-        H256::from_bytes([44u8; 32])
+        accounts::account(44)
     }
 
     fn worker3() -> AccountId {
-        H256::from_bytes([55u8; 32])
+        accounts::account(55)
     }
 
     fn content_hash(b: u8) -> H256 {
         H256::from_bytes([b; 32])
-    }
-
-    /// Deterministic Ed25519 signer for admission fixtures: signatures must
-    /// be reproducible so retries and replay checks stay deterministic.
-    fn ed25519_signing_key() -> ed25519_dalek::SigningKey {
-        ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
     }
 
     fn mvp_stf() -> StateTransitionFunction {
@@ -489,7 +487,7 @@ mod mvp_handler_tests {
             })
             .build()
             .unwrap();
-        signature::sign_tx_ed25519(&mut tx, &ed25519_signing_key()).unwrap();
+        signature::sign_tx_ed25519(&mut tx, &accounts::signer(acct)).unwrap();
         tx
     }
 
@@ -2020,7 +2018,7 @@ mod mvp_handler_tests {
             })
             .build()
             .unwrap();
-        signature::sign_tx_ed25519(&mut bad, &ed25519_signing_key()).unwrap();
+        signature::sign_tx_ed25519(&mut bad, &accounts::signer(sponsor())).unwrap();
 
         let err = stf.execute_tx(&mut state, &bad).unwrap_err();
         assert!(matches!(err, Error::InvalidTransition(_)), "got {err:?}");
@@ -2442,7 +2440,7 @@ mod mvp_handler_tests {
             register_payload(ActorRole::Worker),
         );
 
-        let stranger = || H256::from_bytes([0xE1; 32]);
+        let stranger = || accounts::account(0xE1);
         // Note: ActorRegister is intentionally NOT on this list — it is
         // the open entry point into the identity layer.
         let cases: Vec<(ActionType, Vec<u8>)> = vec![
@@ -2578,7 +2576,7 @@ mod mvp_handler_tests {
 
         // A third worker, granted ClaimWork by sponsor2 ONLY — it holds no
         // grant from the task's sponsor at all.
-        let worker3 = H256::from_bytes([0xE2; 32]);
+        let worker3 = accounts::account(0xE2);
         run(
             &stf,
             &mut state,
@@ -3338,7 +3336,7 @@ mod fork_gating_tests {
     }
 
     fn task_tx() -> Transaction {
-        let account = H256::from_bytes([7u8; 32]);
+        let account = accounts::account(7);
         let mut tx = TxBuilder::new()
             .chain_id(1)
             .account(account)
@@ -3409,7 +3407,7 @@ mod fork_gating_tests {
     fn test_task_action_allowed_after_fork() {
         let stf = StateTransitionFunction::with_schedule(schedule_with_task_fork()).unwrap();
         let mut state = State::new();
-        let sponsor = H256::from_bytes([7u8; 32]);
+        let sponsor = accounts::account(7);
         let title = "bootstrap";
 
         // Register the sponsor and create a project under fork 1
@@ -3503,7 +3501,7 @@ mod fork_gating_tests {
         let stf = StateTransitionFunction::with_schedule(schedule_with_task_fork()).unwrap();
         let fork1 = stf.active_fork_at(5).unwrap();
 
-        let account = H256::from_bytes([7u8; 32]);
+        let account = accounts::account(7);
         let payload = encode_payload(&ActorRegisterPayload {
             role: ActorRole::Worker,
         })

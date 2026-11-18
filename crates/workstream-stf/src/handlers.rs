@@ -1058,6 +1058,8 @@ pub(crate) fn action_key(action_type: ActionType) -> &'static str {
         ActionType::GovUpgrade => "gov_upgrade",
         ActionType::GovSetSequencer => "gov_set_sequencer",
         ActionType::GovSetParameters => "gov_set_parameters",
+        ActionType::NoteTransfer => "note_transfer",
+        ActionType::NoteWithdraw => "note_withdraw",
     }
 }
 

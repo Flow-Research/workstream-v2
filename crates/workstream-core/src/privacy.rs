@@ -2,8 +2,7 @@
 //!
 //! Implements the cryptographic core of the value model (design §2.4):
 //! - shielded note commitments (domain-separated, blinding-aware),
-//! - one-time note nullifiers per action family,
-//! - spend derivation,
+//! - note-wide nullifiers for canonical spend tracking,
 //! - recipient viewing keys,
 //! - asset registry for the canonical asset kinds (native gas, bridged
 //!   stablecoins, project points).
@@ -11,7 +10,6 @@
 use std::collections::HashMap;
 
 use crate::hash::{Hash, H256};
-use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 /// Domain tag for shielded note commitments.
@@ -50,12 +48,6 @@ impl ShieldedNote {
         ])
     }
 
-    /// One-time nullifier for an action family against this note: the note
-    /// can be spent exactly once per family.
-    pub fn nullifier(&self, family: &[u8]) -> H256 {
-        Hash::sha256_concat(&[NOTE_NULLIFIER_TAG, family, self.commitment().as_bytes()])
-    }
-
     /// Recipient viewing key for the note: derives the per-recipient
     /// authorization material from the note commitment.
     pub fn viewing_key(&self, recipient: H256) -> H256 {
@@ -67,15 +59,9 @@ impl ShieldedNote {
     }
 }
 
-/// Spend an input note: derives the one-time spend nullifier for an action
-/// family and fails closed on zero-value spends.
-pub fn spend(note: &ShieldedNote, family: &[u8]) -> Result<H256> {
-    if note.amount == 0 {
-        return Err(Error::Validation(
-            "cannot spend a zero-amount shielded note".to_string(),
-        ));
-    }
-    Ok(note.nullifier(family))
+/// Identity consumed by all spend paths for a single issued note.
+pub fn note_nullifier(note_id: H256) -> H256 {
+    Hash::sha256_concat(&[NOTE_NULLIFIER_TAG, note_id.as_bytes()])
 }
 
 /// Kind of asset in the canonical asset registry.
@@ -157,28 +143,11 @@ mod tests {
     }
 
     #[test]
-    fn note_nullifier_is_one_time_per_family() {
-        let n = note(H256::ZERO, 10, H256::from_bytes([3u8; 32]));
-        assert_eq!(n.nullifier(b"transfer"), n.nullifier(b"transfer"));
-        assert_ne!(n.nullifier(b"transfer"), n.nullifier(b"release"));
-    }
-
-    #[test]
     fn note_viewing_key_derives_per_recipient() {
         let n = note(H256::ZERO, 10, H256::from_bytes([3u8; 32]));
         let recipient = H256::from_bytes([7u8; 32]);
         assert_eq!(n.viewing_key(recipient), n.viewing_key(recipient));
         assert_ne!(n.viewing_key(recipient), n.viewing_key(H256::ZERO));
-    }
-
-    #[test]
-    fn spend_rejects_zero_amount_and_derives_nullifier() {
-        let n = note(H256::ZERO, 10, H256::from_bytes([3u8; 32]));
-        let spent = spend(&n, b"transfer").unwrap();
-        assert_eq!(spent, n.nullifier(b"transfer"));
-
-        let zero = note(H256::ZERO, 0, H256::from_bytes([3u8; 32]));
-        assert!(spend(&zero, b"transfer").is_err());
     }
 
     #[test]

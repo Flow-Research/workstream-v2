@@ -545,7 +545,7 @@ mod tests {
         let server = in_memory_server();
         let mut tx = TxBuilder::new()
             .chain_id(1)
-            .account(H256::from_bytes([0x11; 32]))
+            .account(crate::accounts::account(7))
             .nonce(0, 0)
             .add_action(ActionType::ActorRegister, b"x".to_vec())
             .fee(FeeSpec {

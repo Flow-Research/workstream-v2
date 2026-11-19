@@ -294,11 +294,14 @@ impl RpcServer {
             | "workstream.indexer.getEvents"
             | "workstream.indexer.getEventsByType"
             | "workstream.indexer.getStateRootAt" => self.handle_request(&request).await,
-            _ => self.error_response(
-                request.id,
-                RPC_ERROR_METHOD_NOT_FOUND,
-                "method unavailable on this listener",
-            ),
+            _ => {
+                workstream_ops::RPC_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.error_response(
+                    request.id,
+                    RPC_ERROR_METHOD_NOT_FOUND,
+                    "method unavailable on this listener",
+                )
+            }
         }
     }
 

@@ -11,6 +11,7 @@ pub mod config;
 pub mod error;
 pub mod fork;
 pub mod hash;
+pub mod privacy;
 pub mod proof;
 pub mod types;
 

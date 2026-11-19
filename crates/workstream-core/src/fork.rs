@@ -22,6 +22,7 @@ pub type GuestHash = H256;
 
 /// Well-known feature flags for gating behavior by fork
 pub mod features {
+    pub const NOTE_SPENDS: &str = "note-spends";
     /// Task lifecycle operations (TaskCreate..TaskStart)
     pub const TASK_LIFECYCLE: &str = "task-lifecycle";
     /// Submission, review and acceptance operations

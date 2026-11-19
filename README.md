@@ -62,6 +62,27 @@ cargo test
 RUST_LOG=debug cargo test
 ```
 
+### Browser extension (pilot)
+
+The Manifest V3 wallet lives in `extension/`. Build it and load the output as
+an unpacked extension:
+
+```bash
+cd extension
+npm ci
+npm run build          # writes extension/dist/ with the version from package.json
+npm test               # builds, then loads dist/ into a fresh Playwright profile
+```
+
+To load it manually, open `chrome://extensions`, enable **Developer mode**,
+choose **Load unpacked** and select `extension/dist/`. Press **Reload** on that
+card after each rebuild. The pinned `key` in `extension/src/manifest.json`
+keeps the extension ID stable across machines. Service worker logs are under
+**Inspect views** on the extension card.
+
+For automated browser tests, `npx playwright install chromium` installs a
+Chromium build that supports `--load-extension`.
+
 ### Makefile Targets
 
 | Command | Description |

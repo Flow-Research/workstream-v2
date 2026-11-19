@@ -37,3 +37,9 @@ node_modules/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Browser extension build/test artifacts
+/extension/dist/
+/extension/node_modules/
+/extension/playwright-report/
+/extension/test-results/

@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "WorkStream Wallet (pilot)",
+  "short_name": "WorkStream",
+  "description": "Pilot browser wallet for WorkStream work orders (#148).",
+  "version": "0.0.0",
+  "minimum_chrome_version": "120",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA8yQvIwnAetlD5YCOWIyoZqCCU1swEtyre6ScwIOU5EBEnpTACAEtV0LKfv/Y1iR9QLN2S654VMcH4+KxshjFkmv3LF6RPD/2YQgphlA+Is1blfaVu0hvBdDQf95Xm052f0IilWiF8/6cJ+Cc4Z6Fh8JErdTzRhf5ETip4CgDnc66pZJyUWKzK29Xfd8iLC9Y+L3VMaGu2RhyMUK6+2I+5T6pHkGMvX6RyJZcFr/6z/Bwtv7eZz1VWQZ6wyc9wPQKgOC/Z7GOUUUFOICCzs8y4RX7VB/t5xDDePsM6qJFHihbaiNrPp4Q2r/CZ65UwLFn/JAnYDW7LtnTk8k/H6KAfwIDAQAB",
+  "permissions": ["storage", "windows", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "WorkStream Wallet"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/content-script.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["content/inpage.js", "approval.html", "approval.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

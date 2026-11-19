@@ -11,6 +11,7 @@
 //! produce identical headers — the consensus property this module affords.
 
 use std::collections::{HashSet, VecDeque};
+use std::path::Path;
 
 use workstream_core::hash::{Hash, H256};
 use workstream_core::types::*;
@@ -249,10 +250,29 @@ impl Sequencer {
             proof: None, // proofs are prover work (not part of #16)
         };
         self.last_header = Some(header.clone());
+        self.state.last_header = Some(header.clone());
 
         Ok(Block {
             header,
             transactions: included,
+        })
+    }
+
+    /// Persist the sequencer state (SMT/MMR snapshot + last applied header)
+    /// to `<dir>/state.json` so a restart resumes at the same tip.
+    pub fn save_state(&self, dir: &Path) -> Result<()> {
+        self.state.save_to_dir(dir)
+    }
+
+    /// Rebuild a sequencer from a previously persisted state directory.
+    pub fn load_state(stf: StateTransitionFunction, dir: &Path) -> Result<Self> {
+        let state = State::load_from_dir(dir)?;
+        let last_header = state.last_header.clone();
+        Ok(Sequencer {
+            stf,
+            state,
+            mempool: Mempool::default(),
+            last_header,
         })
     }
 }
@@ -294,6 +314,20 @@ mod tests {
     fn mvp_sequencer() -> Sequencer {
         let stf = StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap()).unwrap();
         Sequencer::new(stf)
+    }
+
+    #[test]
+    fn sequencer_state_round_trips_through_disk() {
+        let stf = StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap()).unwrap();
+        let sequencer = Sequencer::new(stf.clone());
+        let dir =
+            std::env::temp_dir().join(format!("workstream-sequencer-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        sequencer.save_state(&dir).unwrap();
+        let restored = Sequencer::load_state(stf, &dir).unwrap();
+        assert_eq!(restored.tip(), sequencer.tip());
+        assert_eq!(restored.state().root(), sequencer.state().root());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

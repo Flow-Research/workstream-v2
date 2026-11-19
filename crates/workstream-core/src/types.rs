@@ -41,7 +41,7 @@ impl StateRoot {
 }
 
 // Block header
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BlockHeader {
     pub number: BlockNumber,
     pub parent_hash: H256,
@@ -58,13 +58,13 @@ pub struct BlockHeader {
     pub proof: Option<Proof>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Proof {
     pub proof_data: Vec<u8>,
     pub proof_type: ProofType,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProofType {
     ZkVm,      // General zkVM proof
     Recursive, // Recursive composition

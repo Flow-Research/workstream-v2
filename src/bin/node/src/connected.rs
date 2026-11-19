@@ -138,13 +138,24 @@ pub async fn serve(
                 .ok_or_else(|| Error::Consensus("height exhausted".into()))?;
             let fetched = match &object_da {
                 Some(da) => {
-                    let Some((published_height, da_ref)) = ipc::call::<_, Option<(u64, H256)>>(
+                    // The writer may be restarting after a crash. A transport
+                    // error is a retryable miss, never a reason to stop the
+                    // verifier or roll back its locally verified tip.
+                    let published = match ipc::call::<_, Option<(u64, H256)>>(
                         &client,
                         &writer,
                         &Request::DaRef(height),
                     )
-                    .await?
-                    else {
+                    .await
+                    {
+                        Ok(value) => value,
+                        Err(_) => {
+                            monitor.heartbeat(false);
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            continue;
+                        }
+                    };
+                    let Some((published_height, da_ref)) = published else {
                         monitor.heartbeat(true);
                         tokio::time::sleep(Duration::from_millis(250)).await;
                         continue;
@@ -176,12 +187,21 @@ pub async fn serve(
                     }
                     Some((block, da_ref))
                 }
-                None => ipc::call::<_, Option<Block>>(&client, &writer, &Request::Block(height))
-                    .await?
-                    .map(|block| {
-                        let da_ref = block.header.da_ref;
-                        (block, da_ref)
-                    }),
+                None => {
+                    match ipc::call::<_, Option<Block>>(&client, &writer, &Request::Block(height))
+                        .await
+                    {
+                        Ok(block) => block.map(|block| {
+                            let da_ref = block.header.da_ref;
+                            (block, da_ref)
+                        }),
+                        Err(_) => {
+                            monitor.heartbeat(false);
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            continue;
+                        }
+                    }
+                }
             };
             match fetched {
                 Some((block, da_ref)) => {

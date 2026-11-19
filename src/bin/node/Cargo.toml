@@ -10,6 +10,10 @@ license.workspace = true
 name = "node"
 path = "main.rs"
 
+[[bin]]
+name = "workstream-restore"
+path = "src/restore.rs"
+
 [lib]
 path = "src/lib.rs"
 

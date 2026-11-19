@@ -7,6 +7,7 @@
 //! job finishes. Public status exposes only timing, attempts and rejection.
 use super::*;
 use tokio_postgres::{types::ToSql, Client, Config, NoTls};
+use workstream_core::dev::crash_point;
 
 pub(super) struct Jobs {
     client: tokio::sync::Mutex<Client>,
@@ -264,6 +265,9 @@ impl Jobs {
         }
         delete_witness(&tx, &self.chain, guest, key).await?;
         tx.commit().await.map_err(db)?;
+        // Proof completion is durable. A crash here leaves a replayable
+        // result; the writer's retry resolves to this same keyed proof.
+        crash_point("proof-completed");
         Ok(proof)
     }
 

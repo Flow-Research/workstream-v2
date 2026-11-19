@@ -34,9 +34,22 @@ pub mod sequencer_api;
 #[cfg(unix)]
 pub mod writer;
 
-pub use da::InMemoryDaClient;
+pub use da::{object::ObjectDaClient, InMemoryDaClient};
 pub use p2p::InMemoryP2pNetwork;
 pub use sequencer_api::SequencerApiImpl;
+
+/// Select the DA implementation from the operator environment.
+///
+/// When `WORKSTREAM_DA_ENDPOINT` is present the S3-compatible adapter is
+/// configured; a missing or malformed configuration fails closed. Otherwise
+/// the development-only in-memory store is used.
+pub fn da_from_env() -> Result<Arc<dyn DaClient>> {
+    if std::env::var_os("WORKSTREAM_DA_ENDPOINT").is_some() {
+        Ok(Arc::new(da::object::ObjectDaClient::from_env()?))
+    } else {
+        Ok(Arc::new(InMemoryDaClient::new()))
+    }
+}
 
 /// Fixed block slot spacing in seconds (consensus-derived timestamp).
 pub const SLOT_SECONDS: u64 = 12;

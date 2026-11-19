@@ -5,6 +5,8 @@
 //! Celestia/EigenDA deployment. A production DA client plugs in behind the
 //! same [`DaClient`] trait.
 
+pub mod object;
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 

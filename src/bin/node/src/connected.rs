@@ -7,13 +7,19 @@ use std::{
     time::Duration,
 };
 use workstream_core::{
-    traits::sequencer::SubmitTxRequest,
+    traits::{
+        da::{DaClient, GetBlockRequest},
+        sequencer::SubmitTxRequest,
+    },
     types::{Block, StateRoot},
     Error, Result, H256,
 };
 use workstream_ops::{ipc, Monitor};
 use workstream_prover::Prover;
-use workstream_sequencer::writer::{Receipt, Request};
+use workstream_sequencer::{
+    writer::{Receipt, Request},
+    ObjectDaClient,
+};
 use workstream_stf::StateTransitionFunction;
 
 #[derive(Clone)]
@@ -107,6 +113,14 @@ pub async fn serve(
     let writer = dir.join("writer.sock");
     let included = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     let client = ipc::tls::Client::load("sequencer.workstream.internal")?;
+    // In object-DA mode the writer publishes only a reference. The node is
+    // then independent of producer-local block storage: it fetches the exact
+    // bytes from the configured provider and verifies the header binding.
+    let object_da = if std::env::var_os("WORKSTREAM_DA_ENDPOINT").is_some() {
+        Some(ObjectDaClient::from_env()?)
+    } else {
+        None
+    };
     let rpc = serve_endpoint(
         listener,
         Gateway {
@@ -122,9 +136,55 @@ pub async fn serve(
                 .tip()
                 .checked_add(1)
                 .ok_or_else(|| Error::Consensus("height exhausted".into()))?;
-            match ipc::call::<_, Option<Block>>(&client, &writer, &Request::Block(height)).await {
-                Ok(Some(block)) => {
-                    let da_ref = block.header.da_ref;
+            let fetched = match &object_da {
+                Some(da) => {
+                    let Some((published_height, da_ref)) = ipc::call::<_, Option<(u64, H256)>>(
+                        &client,
+                        &writer,
+                        &Request::DaRef(height),
+                    )
+                    .await?
+                    else {
+                        monitor.heartbeat(true);
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        continue;
+                    };
+                    if published_height != height {
+                        return Err(Error::State(
+                            "writer returned a reference for another height".into(),
+                        ));
+                    }
+                    let response = da
+                        .get_block(GetBlockRequest {
+                            version: 1,
+                            api_version: 1,
+                            da_id: format!("da:{}", da_ref.to_hex()),
+                        })
+                        .await?;
+                    let bytes = response
+                        .block_bytes
+                        .ok_or_else(|| Error::NotFound("DA response had no block bytes".into()))?;
+                    let block: Block = serde_json::from_slice(&bytes)
+                        .map_err(|e| Error::Serialization(format!("DA block decode: {e}")))?;
+                    if da_ref == H256::ZERO
+                        || block.header.number != height
+                        || block.header.da_ref != da_ref
+                    {
+                        return Err(Error::Validation(
+                            "DA block does not match its committed reference".into(),
+                        ));
+                    }
+                    Some((block, da_ref))
+                }
+                None => ipc::call::<_, Option<Block>>(&client, &writer, &Request::Block(height))
+                    .await?
+                    .map(|block| {
+                        let da_ref = block.header.da_ref;
+                        (block, da_ref)
+                    }),
+            };
+            match fetched {
+                Some((block, da_ref)) => {
                     let ids = block
                         .transactions
                         .iter()
@@ -137,10 +197,8 @@ pub async fn serve(
                         .extend(ids.into_iter().map(|id| (id, height)));
                     tx.send_replace((node.tip(), node.state_root(), Some(da_ref)));
                     monitor.heartbeat(true);
-                    continue;
                 }
-                Ok(None) => monitor.heartbeat(true),
-                Err(_) => monitor.heartbeat(false),
+                None => monitor.heartbeat(true),
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }

@@ -5,17 +5,18 @@ use workstream_tx::TxBuilder;
 
 fn main() -> workstream_core::Result<()> {
     let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
+    let argument = std::env::args().nth(1);
+    let nonce = match argument.as_deref() {
+        Some("future-nonce") => 99,
+        Some(value) if value.starts_with("nonce=") => value[6..]
+            .parse()
+            .map_err(|_| workstream_core::Error::Validation("invalid fixture nonce".into()))?,
+        _ => 0,
+    };
     let mut tx = TxBuilder::new()
         .chain_id(1)
         .account(Hash::sha256(key.verifying_key().as_bytes()))
-        .nonce(
-            0,
-            if std::env::args().nth(1).as_deref() == Some("future-nonce") {
-                99
-            } else {
-                0
-            },
-        )
+        .nonce(0, nonce)
         .add_action(
             ActionType::ActorRegister,
             encode_payload(&ActorRegisterPayload {

@@ -4,14 +4,40 @@ pub use crate::error::ErrorCode;
 
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-/// Initialize tracing subscriber with default configuration
-pub fn init_tracing() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+/// Build the default environment filter used by all initializers.
+fn filter(default: &str) -> EnvFilter {
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default))
+}
 
-    let _ = tracing_subscriber::registry()
-        .with(fmt::layer())
-        .with(env_filter)
-        .try_init();
+/// The service role is a safe, operator-controlled correlation field. It is
+/// read once from the runtime directory selection and never from the network.
+pub fn service_role() -> &'static str {
+    match std::env::var("WORKSTREAM_ROLE").as_deref() {
+        Ok("sequencer") => "sequencer",
+        Ok("prover") => "prover",
+        Ok("node") => "node",
+        _ => "unknown",
+    }
+}
+
+/// Initialize tracing subscriber with default configuration.
+///
+/// When `WORKSTREAM_LOG_FORMAT=json`, events are emitted as JSON so trace ids,
+/// transaction/block hashes and proof-job keys can be joined across services
+/// by an OpenTelemetry collector or the local drill. Structured fields are
+/// attached by callers at safe boundaries; this layer only changes encoding,
+/// never the set of recorded fields, so no secret is introduced here.
+pub fn init_tracing() {
+    let env_filter = filter("info");
+    let registry = tracing_subscriber::registry();
+    if std::env::var("WORKSTREAM_LOG_FORMAT").as_deref() == Ok("json") {
+        let _ = registry
+            .with(fmt::layer().json())
+            .with(env_filter)
+            .try_init();
+    } else {
+        let _ = registry.with(fmt::layer()).with(env_filter).try_init();
+    }
 }
 
 /// Initialize tracing subscriber with custom filter

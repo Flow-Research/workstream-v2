@@ -85,6 +85,9 @@ pub async fn serve(
     loop {
         tokio::select! {
             _=tick.tick()=>{
+                // Admission backlog is a safe count, not a payload. It is the
+                // first stall category on the operations dashboard.
+                monitor.set_admission_backlog(seq.pending());
                 let Some(first)=seq.mempool.pending.front() else {
                     monitor.heartbeat(true);
                     continue;
@@ -93,7 +96,10 @@ pub async fn serve(
                 let outcome = async {
                     let mut prepared = seq.prepare_block(Some(1)).await?;
                     journal.record_publication(prepared.block())?;
-                    prepared.publish().await?;
+                    if let Err(e) = prepared.publish().await {
+                        monitor.inc_da_failure();
+                        return Err(e);
+                    }
                     // After DA acceptance but before the local checkpoint is
                     // committed. Replay in a fresh writer reproduces the same
                     // publication key and bytes.
@@ -114,6 +120,17 @@ pub async fn serve(
                 let Ok(req)=ipc::read::<Request>(&mut s,ipc::ADMISSION_LIMIT).await else {continue};
                 match req {
                     Request::Submit(tx)=>{
+                        // Correlate this transaction's whole journey by its
+                        // immutable signed hash. Only the hash is a field: the
+                        // transaction body (and any witness) is never logged.
+                        // A malformed transaction must not stop the writer, so
+                        // correlation is best-effort; admission does validation.
+                        let _guard = crate::tx_hash(&tx).ok().map(|id| {
+                            let context = workstream_ops::trace::Correlation::new(id.as_bytes(), "admit");
+                            let span = context.span();
+                            tracing::info!(tx_hash = %id, "transaction admitted");
+                            span.entered()
+                        });
                         let r=journal.admit(&mut seq,*tx).map_err(|e|e.to_string());
                         if r.is_ok() {
                             // Signed bytes are durable before the acknowledgement.

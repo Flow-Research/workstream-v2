@@ -11,7 +11,7 @@ name = "prover"
 path = "main.rs"
 
 [dependencies]
-risc0-zkvm = { version = "=3.0.3", default-features = false, features = ["std", "disable-dev-mode"] }
+risc0-zkvm = { version = "=3.0.3", default-features = false, features = ["client", "disable-dev-mode"] }
 risc0-binfmt = "=3.0.2"
 risc0-zkos-v1compat = "=2.2.0"
 # Receipt control IDs and seal formats must match the r0vm 3.0.3 binary.

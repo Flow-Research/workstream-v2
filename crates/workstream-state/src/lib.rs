@@ -96,6 +96,18 @@ impl State {
         let bytes = std::fs::read(&path).map_err(|e| Error::Io(e.to_string()))?;
         let snapshot: StateSnapshot =
             serde_json::from_slice(&bytes).map_err(|e| Error::Serialization(e.to_string()))?;
+        Self::from_snapshot(snapshot)
+    }
+
+    pub fn from_snapshot(snapshot: StateSnapshot) -> Result<Self> {
+        if snapshot
+            .mmr_leaves
+            .iter()
+            .enumerate()
+            .any(|(i, (index, _))| *index != i as u64)
+        {
+            return Err(Error::State("noncontiguous MMR witness".into()));
+        }
         let mut state = State::new();
         for (key, value) in snapshot.smt_entries {
             state.smt.update_hashed(&key, &value)?;

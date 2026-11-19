@@ -95,7 +95,7 @@ pub fn header_hash(header: &BlockHeader) -> Result<H256> {
 /// Admission performs basic well-formedness validation only; semantic validation
 /// happens at execution time in `build_block` (a transaction that fails to
 /// execute is dropped, deterministically, because execution is deterministic).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Mempool {
     max_size: usize,
     validator: TxValidator,
@@ -160,6 +160,7 @@ impl Default for Mempool {
 /// Sequencer core: canonical state copy + mempool + deterministic block
 /// builder. Produces one block per call; the chain is a linear hash-linked
 /// header sequence from the genesis boundary.
+#[derive(Clone)]
 pub struct Sequencer {
     stf: StateTransitionFunction,
     state: State,
@@ -168,7 +169,7 @@ pub struct Sequencer {
     /// Data availability client used to publish produced blocks (issue #82).
     da: Arc<dyn DaClient>,
     /// zkVM prover used to generate block transition proofs (issue #83).
-    prover: Arc<dyn ProverApi>,
+    prover: Option<Arc<dyn ProverApi>>,
 }
 
 impl Sequencer {
@@ -179,7 +180,10 @@ impl Sequencer {
 
     /// Create a sequencer wired to a data availability client (default prover).
     pub fn with_da(stf: StateTransitionFunction, da: Arc<dyn DaClient>) -> Self {
-        Self::with_da_and_prover(stf, da, Arc::new(workstream_prover::Prover::new()))
+        let mut sequencer =
+            Self::with_da_and_prover(stf, da, Arc::new(workstream_prover::Prover::new()));
+        sequencer.prover = None;
+        sequencer
     }
 
     /// Create a sequencer wired to a data availability client and a zkVM
@@ -195,7 +199,7 @@ impl Sequencer {
             mempool: Mempool::default(),
             last_header: None,
             da,
-            prover,
+            prover: Some(prover),
         }
     }
 
@@ -305,7 +309,7 @@ impl Sequencer {
             mempool: Mempool::default(),
             last_header,
             da,
-            prover: Arc::new(workstream_prover::Prover::new()),
+            prover: None,
         })
     }
 
@@ -316,11 +320,16 @@ impl Sequencer {
     /// Fails closed (typed error) when the DA submission is unavailable; a
     /// block that could not be made available must never be considered final.
     pub async fn build_and_submit_block(&mut self, max_txs: Option<u32>) -> Result<Block> {
-        let stateroot_pre = self.state.root().smt_root;
-        let mut block = self.build_block(max_txs)?;
+        let stateroot_pre = self.state.root().hash();
+        let mut staged = self.clone();
+        let mut block = staged.build_block(max_txs)?;
         let block_hash: [u8; 32] = *header_hash(&block.header)?.as_bytes();
-        let bundle = self
-            .prover
+        let prover = self.prover.clone().unwrap_or_else(|| {
+            Arc::new(workstream_prover::Prover::with_backend(Arc::new(
+                workstream_prover::RiscZeroBackend::at(self.state.clone(), block.header.number),
+            )))
+        });
+        let bundle = prover
             .prove_block(workstream_core::traits::prover::ProveBlockRequest {
                 version: 1,
                 api_version: 1,
@@ -329,7 +338,14 @@ impl Sequencer {
                 transactions: block.transactions.clone(),
             })
             .await?;
-        block.header.guest_hash = bundle.guest_hash;
+        let claim = workstream_stf::receipt::Claim::new(
+            block.header.number,
+            H256::from_bytes(block_hash),
+            stateroot_pre,
+            block.header.state_root.hash(),
+            &block.transactions,
+        )?;
+        workstream_prover::risc0::verify(&bundle.proof_bytes, block.header.guest_hash, &claim)?;
         block.header.proof = Some(Proof {
             proof_data: bundle.proof_bytes,
             proof_type: ProofType::ZkVm,
@@ -351,6 +367,9 @@ impl Sequencer {
             ));
         }
         block.header.da_ref = Hash::sha256(&block_bytes);
+        staged.last_header = Some(block.header.clone());
+        staged.state.last_header = staged.last_header.clone();
+        *self = staged;
         Ok(block)
     }
 
@@ -436,8 +455,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires configured RISC Zero guest"]
     async fn sequencer_build_and_submit_block_publishes_to_da() {
-        let stf = StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap()).unwrap();
+        let mut schedule = mvp_genesis_schedule().unwrap();
+        schedule.forks[0].guest_hash = workstream_prover::risc0::configured_id().unwrap();
+        let stf = StateTransitionFunction::with_schedule(schedule).unwrap();
         let da = Arc::new(crate::da::InMemoryDaClient::new());
         let mut sequencer = Sequencer::with_da(stf, da);
 

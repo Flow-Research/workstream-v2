@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 clap.workspace = true
+tokio.workspace = true
 workstream-core = { path = "../workstream-core" }
 workstream-crypto = { path = "../workstream-crypto" }
 workstream-tx = { path = "../workstream-tx" }
@@ -20,4 +21,3 @@ serde_json.workspace = true
 tempfile = "3"
 workstream-stf = { path = "../workstream-stf" }
 workstream-sequencer = { path = "../../src/bin/sequencer" }
-tokio.workspace = true

@@ -153,6 +153,25 @@ def run(directory, binaries, fixtures, unauthorized):
         assert status()['indexed_height'] == 1 and status()['lag'] == 0
         print('Mid-batch restart: verifier replayed block 1 and indexed it once', flush=True)
 
+        # Hold the real verifier at block 1 and vary only the disposable read
+        # cursor. All three commands must distinguish an available stale read
+        # from a current one, without changing the writer or verifier.
+        for indexed in (1, 0, 1):
+            sql(f"UPDATE projection_meta SET indexed_height={indexed} WHERE chain='1'")
+            for cmd in ('status', 'doctor', 'smoke'):
+                run_cli = subprocess.run([binaries / 'workstream-chain', '--port', str(rpc_port), cmd],
+                                         capture_output=True, text=True, timeout=8)
+                expected = 0 if indexed or cmd == 'status' else 2
+                assert run_cli.returncode == expected, (cmd, run_cli.stderr, run_cli.stdout)
+                summary = json.loads(run_cli.stdout)
+                assert (summary['verified_height'], summary['indexed_height']) == (1, indexed)
+                assert summary['freshness'] == ('current' if indexed else 'stale')
+                if cmd == 'doctor':
+                    assert summary['pending_transactions'] == 0
+                if cmd == 'smoke':
+                    assert summary['receipt_page_read'] is True
+        print('Wallet diagnostics: status, doctor and smoke distinguished 1/1, 1/0 and recovered 1/1', flush=True)
+
         for fixture in fixtures[1:]:
             submit(fixture)
         tip = wait(lambda: (t if (t := verified())['height'] == len(fixtures) else None))
@@ -237,15 +256,20 @@ def run(directory, binaries, fixtures, unauthorized):
         print('Projection authority: forged grant visible in read model, chain rejected the action', flush=True)
 
         # Rebuild removes the forged row without changing the verified chain.
+        # The writer can return Rejected before the node observes the empty
+        # block that finalized it. Wait for that block before stopping replay.
+        final_height = len(fixtures) + 1
+        final_tip = wait(lambda: (t if (t := verified())['height'] == final_height else None))
         replay_status = reindex()
         assert snapshot() == before
-        assert replay_status['verified_height'] == len(fixtures)
+        assert replay_status['verified_height'] == final_height
+        assert replay_status['indexed_state_root'] == final_tip['state_root']
         print('Authority rebuild: forged projection row removed; authoritative tip unchanged', flush=True)
 
 
 if __name__ == '__main__':
     subprocess.run(['cargo', 'build', '--quiet', '--bin', 'node', '--bin', 'sequencer',
-                    '--bin', 'prover', '--bin', 'workstream-reindex'], check=True)
+                    '--bin', 'prover', '--bin', 'workstream-reindex', '--bin', 'workstream-chain'], check=True)
     raw = subprocess.check_output(['cargo', 'run', '--quiet', '-p', 'workstream-tests',
                                    '--example', 'projection_fixture'])
     fixtures = json.loads(raw)

@@ -9,6 +9,16 @@ use workstream_core::types::*;
 use workstream_core::{Error, Result};
 use workstream_crypto::signature::{self, PublicKey, Signature, SignatureAlgorithm};
 
+/// Consensus commitment to a signed transaction, including the signature and key.
+pub fn tx_hash(tx: &Transaction) -> Result<workstream_core::H256> {
+    let bytes = postcard::to_allocvec(tx)
+        .map_err(|e| Error::Serialization(format!("transaction encode: {e}")))?;
+    Ok(workstream_core::Hash::sha256_concat(&[
+        b"WS:v1:tx:",
+        &bytes,
+    ]))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TxValidator;
 

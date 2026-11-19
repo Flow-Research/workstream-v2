@@ -1,0 +1,21 @@
+[package]
+name = "workstream-wallet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+workstream-core = { path = "../workstream-core" }
+workstream-crypto = { path = "../workstream-crypto" }
+workstream-tx = { path = "../workstream-tx" }
+ed25519-dalek.workspace = true
+age = "0.11"
+getrandom = "0.4"
+zeroize = "1"
+serde_json.workspace = true
+
+[dev-dependencies]
+workstream-stf = { path = "../workstream-stf" }
+workstream-sequencer = { path = "../../src/bin/sequencer" }
+tokio.workspace = true

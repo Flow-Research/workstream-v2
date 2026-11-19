@@ -66,3 +66,39 @@ async fn restored_wallet_submits_a_transaction_that_executes_in_a_block() {
     assert_eq!(block.tx_count, 1);
     assert_eq!(api.get_mempool_status().await.unwrap().pending_count, 1);
 }
+
+#[test]
+fn reviewed_signature_binds_restored_account_network_and_payload() {
+    use workstream_crypto::signature::tx_message_hash;
+    let wallet = Wallet::generate(7).unwrap();
+    let recovery = RecoveryKey::generate();
+    let backup = wallet.backup(&recovery.to_public()).unwrap();
+    let restored = Wallet::restore(7, &backup, &recovery).unwrap();
+    let draft = workstream_tx::TxBuilder::new()
+        .chain_id(7)
+        .account(wallet.account())
+        .nonce(0, 12)
+        .fee(FeeSpec {
+            payer: FeePayer::Self_,
+            asset_id: 0,
+            max_fee: 100,
+        })
+        .add_action(ActionType::ActorRegister, vec![1])
+        .build()
+        .unwrap();
+    let approved = tx_message_hash(&draft).unwrap();
+    let signed = restored.sign_reviewed(draft.clone(), approved).unwrap();
+    assert_eq!(tx_message_hash(&signed).unwrap(), approved);
+    assert!(restored.sign_reviewed(signed, approved).is_err());
+    let mut edited = draft.clone();
+    edited.actions[0].payload.push(2);
+    assert!(restored.sign_reviewed(edited, approved).is_err());
+    assert!(Wallet::restore(8, &backup, &recovery)
+        .unwrap()
+        .sign_reviewed(draft.clone(), approved)
+        .is_err());
+    assert!(Wallet::generate(7)
+        .unwrap()
+        .sign_reviewed(draft, approved)
+        .is_err());
+}

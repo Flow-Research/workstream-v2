@@ -99,6 +99,8 @@ impl State {
         Self::from_snapshot(snapshot)
     }
 
+    /// Rebuild state from a durable snapshot, rejecting noncontiguous MMR
+    /// witnesses before any tree is mutated.
     pub fn from_snapshot(snapshot: StateSnapshot) -> Result<Self> {
         if snapshot
             .mmr_leaves

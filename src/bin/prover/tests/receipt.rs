@@ -1,6 +1,7 @@
 use workstream_core::{FeePayer, FeeSpec, Nonce, Transaction, H256};
 use workstream_prover::risc0;
 use workstream_state::State;
+use workstream_stf::mvp_genesis_schedule;
 use workstream_stf::receipt::{Claim, Witness};
 
 #[test]
@@ -17,6 +18,7 @@ fn real_receipt_binds_image_roots_and_execution() {
         pre: root,
         post: root,
         transactions: vec![],
+        schedule: mvp_genesis_schedule().unwrap(),
     };
     let bytes = risc0::prove(&image, approved, &w).unwrap();
     let mut claim = Claim::new(1, w.block_hash, root, root, &[]).unwrap();

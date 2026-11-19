@@ -20,7 +20,7 @@ use workstream_stf::StateTransitionFunction;
 struct Gateway {
     client: ipc::tls::Client,
     writer: PathBuf,
-    tip: tokio::sync::watch::Receiver<(u64, StateRoot)>,
+    tip: tokio::sync::watch::Receiver<(u64, StateRoot, Option<H256>)>,
 }
 
 impl Gateway {
@@ -53,8 +53,8 @@ impl LineEndpoint for Gateway {
                         })
                     }
                     ("2.0", "workstream.node.verifiedTip") => {
-                        let (height, root) = self.tip.borrow().clone();
-                        Ok(json!({"height":height,"state_root":root}))
+                        let (height, root, da_ref) = self.tip.borrow().clone();
+                        Ok(json!({"height":height,"state_root":root,"da_ref":da_ref}))
                     }
                     ("2.0", _) => Err((RPC_ERROR_METHOD_NOT_FOUND, "unknown method")),
                     _ => Err((RPC_ERROR_INVALID_REQUEST, "unsupported JSON-RPC version")),
@@ -95,7 +95,7 @@ pub async fn serve(
     let schedule = stf.fork_schedule().clone();
     let mut node = Node::with_backend(stf, schedule, MemoryBlockSource::new(), prover.backend())
         .require_proof();
-    let (tx, tip) = tokio::sync::watch::channel((0, node.state_root()));
+    let (tx, tip) = tokio::sync::watch::channel((0, node.state_root(), None));
     let writer = dir.join("writer.sock");
     let client = ipc::tls::Client::load("sequencer.workstream.internal")?;
     let rpc = serve_endpoint(
@@ -114,8 +114,9 @@ pub async fn serve(
                 .ok_or_else(|| Error::Consensus("height exhausted".into()))?;
             match ipc::call::<_, Option<Block>>(&client, &writer, &Request::Block(height)).await {
                 Ok(Some(block)) => {
+                    let da_ref = block.header.da_ref;
                     node.apply_block(block)?;
-                    tx.send_replace((node.tip(), node.state_root()));
+                    tx.send_replace((node.tip(), node.state_root(), Some(da_ref)));
                     monitor.heartbeat(true);
                     continue;
                 }

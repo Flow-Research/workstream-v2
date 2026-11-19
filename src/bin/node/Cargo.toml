@@ -14,6 +14,10 @@ path = "main.rs"
 name = "workstream-restore"
 path = "src/restore.rs"
 
+[[bin]]
+name = "workstream-reindex"
+path = "src/reindex.rs"
+
 [lib]
 path = "src/lib.rs"
 
@@ -32,6 +36,7 @@ clap = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tokio-postgres = "0.7"
 
 [dev-dependencies]
 workstream-crypto = { path = "../../../crates/workstream-crypto" }

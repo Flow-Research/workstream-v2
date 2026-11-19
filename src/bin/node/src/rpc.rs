@@ -359,18 +359,19 @@ mod tests {
     use tokio::io::AsyncReadExt;
     use workstream_core::hash::H256;
     use workstream_core::types::{ActionType, FeePayer, FeeSpec};
-    use workstream_prover::{InMemoryVerifier, Prover};
+    use workstream_prover::{Prover, ReceiptVerifier};
     use workstream_sequencer::{InMemoryDaClient, InMemoryP2pNetwork, SequencerApiImpl};
     use workstream_stf::{mvp_genesis_schedule, StateTransitionFunction};
     use workstream_tx::TxBuilder;
 
     fn in_memory_server() -> Arc<RpcServer> {
         let stf = StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap()).unwrap();
+        let verifier = ReceiptVerifier::new(stf.fork_schedule().forks[0].guest_hash);
         let sequencer = SequencerApiImpl::new(stf);
         RpcServer::new(
             Arc::new(sequencer) as Arc<dyn SequencerApi>,
             Arc::new(Prover::new()) as Arc<dyn ProverApi>,
-            Arc::new(InMemoryVerifier::new()) as Arc<dyn VerifierApi>,
+            Arc::new(verifier) as Arc<dyn VerifierApi>,
             Arc::new(InMemoryDaClient::new()) as Arc<dyn DaClient>,
             Arc::new(InMemoryP2pNetwork::new()) as Arc<dyn P2pNetwork>,
         )

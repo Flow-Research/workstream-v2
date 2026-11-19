@@ -23,6 +23,12 @@ pub const ENV_PREFIX: &str = "WORKSTREAM";
 /// Default log level when none is specified
 pub const DEFAULT_LOG_LEVEL: &str = "info";
 
+/// Maximum accepted sequencer mempool capacity (transactions)
+pub const MAX_MEMPOOL_SIZE: usize = 1_000_000;
+
+/// Maximum accepted sequencer block production interval (milliseconds)
+pub const MAX_BLOCK_INTERVAL_MS: u64 = 86_400_000; // 24 hours
+
 // ---------------------------------------------------------------------------
 // Component configs
 // ---------------------------------------------------------------------------
@@ -79,10 +85,22 @@ impl SequencerConfig {
                 "sequencer mempool_size must be greater than 0".to_string(),
             ));
         }
+        if self.mempool_size > MAX_MEMPOOL_SIZE {
+            return Err(Error::Config(format!(
+                "sequencer mempool_size {} exceeds maximum {}",
+                self.mempool_size, MAX_MEMPOOL_SIZE
+            )));
+        }
         if self.block_interval_ms == 0 {
             return Err(Error::Config(
                 "sequencer block_interval_ms must be greater than 0".to_string(),
             ));
+        }
+        if self.block_interval_ms > MAX_BLOCK_INTERVAL_MS {
+            return Err(Error::Config(format!(
+                "sequencer block_interval_ms {} exceeds maximum {}",
+                self.block_interval_ms, MAX_BLOCK_INTERVAL_MS
+            )));
         }
         if self.log_level.is_empty() {
             return Err(Error::Config(
@@ -213,6 +231,13 @@ impl NodeConfig {
     pub fn validate(&self) -> Result<()> {
         if self.p2p_port == 0 {
             return Err(Error::Config("node p2p_port cannot be 0".to_string()));
+        }
+        if let Some(rpc_port) = self.rpc_port {
+            if rpc_port == 0 {
+                return Err(Error::Config(
+                    "node rpc_port cannot be 0 when set".to_string(),
+                ));
+            }
         }
         if self.data_dir.is_empty() {
             return Err(Error::Config("node data_dir cannot be empty".to_string()));
@@ -488,6 +513,33 @@ guest_id = "workstream-guest"
 
         let cfg = ProverConfig {
             zkvm: String::new(),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_sequencer_mempool_size_upper_bound_enforced() {
+        let cfg = SequencerConfig {
+            mempool_size: MAX_MEMPOOL_SIZE + 1,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_sequencer_block_interval_ms_upper_bound_enforced() {
+        let cfg = SequencerConfig {
+            block_interval_ms: MAX_BLOCK_INTERVAL_MS + 1,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_node_rpc_port_zero_rejected_when_set() {
+        let cfg = NodeConfig {
+            rpc_port: Some(0),
             ..Default::default()
         };
         assert!(cfg.validate().is_err());

@@ -16,3 +16,5 @@ serde_json = { workspace = true }
 proptest = { workspace = true }
 rstest = { workspace = true }
 ed25519-dalek = { workspace = true }
+k256 = { workspace = true }
+rand = { workspace = true }

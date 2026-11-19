@@ -30,6 +30,10 @@ pub mod features {
     pub const REPUTATION: &str = "reputation";
     /// Governance upgrade operations
     pub const GOVERNANCE: &str = "governance";
+    /// Transaction signature requirement (SEC-001): signing keys are
+    /// verified fail-closed at admission. Activated by the "tx-signature"
+    /// fork.
+    pub const TX_SIGNATURE: &str = "tx-signature";
 }
 
 /// A single hard fork definition
@@ -466,6 +470,29 @@ mod tests {
 
         let fork3 = schedule.active_fork_at(200).unwrap();
         assert!(fork3.has_feature(features::REPUTATION));
+    }
+
+    #[test]
+    fn test_tx_signature_feature_flag() {
+        let fork = ForkConfig {
+            fork_id: 2,
+            name: "tx-signature".to_string(),
+            activation_height: 1,
+            guest_hash: guest_hash(2),
+            min_proof_system: 1,
+            features: vec![features::TX_SIGNATURE.to_string()],
+        };
+        assert!(fork.has_feature(features::TX_SIGNATURE));
+
+        let genesis = ForkConfig {
+            fork_id: 1,
+            name: "genesis".to_string(),
+            activation_height: 0,
+            guest_hash: guest_hash(1),
+            min_proof_system: 1,
+            features: vec![],
+        };
+        assert!(!genesis.has_feature(features::TX_SIGNATURE));
     }
 
     fn header(

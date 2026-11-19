@@ -91,21 +91,51 @@ impl StateTransitionFunction {
         self.fork_schedule.active_fork_at(height)
     }
 
-    /// Execute a single transaction under the given fork context
-    ///
-    /// Contract: the caller (sequencer #16 / node #32) must only supply
-    /// transactions that are valid for the current state. Execution is atomic:
-    /// actions run against an isolated draft of the state, and the shared
-    /// state is replaced only when every action succeeds — a mid-transaction
-    /// failure discards the draft, so no partial changes leak into live state
-    /// while the transaction's nonce stays reusable for a retry. Payload
-    /// well-formedness is pre-checked here so malformed payloads abort before
-    /// any state mutation.
+    /// Execute a single transaction with fail-closed validation (SEC-001):
+    /// structural checks plus signature verification.
     pub fn execute_tx(&self, state: &mut State, tx: &Transaction) -> Result<Vec<Event>> {
+        // No fork context here: keep the fail-closed SEC-001 validation path
+        // (structural checks plus signature verification).
+        self.execute_tx_checked(state, tx, true)
+    }
+
+    /// Execute a single transaction under an explicit fork context.
+    ///
+    /// Actions requiring features not enabled by `fork` are rejected. The
+    /// signature requirement (SEC-001) is active only when the fork enables it
+    /// (see the "tx-signature" fork): at or after the fork's activation height
+    /// transactions must carry a valid signature, while before activation
+    /// execution keeps the structural validation path so transactions produced
+    /// before the requirement can still replay.
+    pub fn execute_tx_with_fork(
+        &self,
+        state: &mut State,
+        tx: &Transaction,
+        fork: &ForkConfig,
+    ) -> Result<Vec<Event>> {
+        // Pre-fork enforcement: reject post-fork actions before activation
+        for action in &tx.actions {
+            self.check_action_gated(fork, action)?;
+        }
+
+        self.execute_tx_checked(state, tx, fork.has_feature(features::TX_SIGNATURE))
+    }
+
+    fn execute_tx_checked(
+        &self,
+        state: &mut State,
+        tx: &Transaction,
+        signature_required: bool,
+    ) -> Result<Vec<Event>> {
         debug!("Executing transaction for account {:?}", tx.account);
 
-        // Validate transaction (structural checks: non-empty actions, fee).
-        self.tx_validator.validate(tx)?;
+        // Validate transaction: structural checks always, signature
+        // verification when the active fork requires it (SEC-001).
+        if signature_required {
+            self.tx_validator.validate(tx)?;
+        } else {
+            self.tx_validator.validate_structural(tx)?;
+        }
 
         // Replay protection: the nonce sequence must be exactly the next one
         // expected for this (account, key_id). A lower value is a replay of an
@@ -150,22 +180,6 @@ impl StateTransitionFunction {
         // Commit: replace the shared state only after full success.
         *state = draft;
         Ok(events)
-    }
-
-    /// Execute a single transaction under an explicit fork context.
-    /// Actions requiring features not enabled by `fork` are rejected.
-    pub fn execute_tx_with_fork(
-        &self,
-        state: &mut State,
-        tx: &Transaction,
-        fork: &ForkConfig,
-    ) -> Result<Vec<Event>> {
-        // Pre-fork enforcement: reject post-fork actions before activation
-        for action in &tx.actions {
-            self.check_action_gated(fork, action)?;
-        }
-
-        self.execute_tx(state, tx)
     }
 
     /// Enforce feature gating for a single action
@@ -334,23 +348,39 @@ impl Default for StateTransitionFunction {
 
 /// Convenience schedule for the MVP era: genesis fork at height 0 enabling
 /// `TASK_LIFECYCLE` and `SUBMISSION_REVIEW` so the M0.5 handlers run without
-/// waiting on a later fork. Reused by sequencer/node/e2e work in this
-/// milestone; its fork_id/name are consensus constants.
+/// waiting on a later fork, plus the `tx-signature` fork at height 1 enabling
+/// the SEC-001 transaction signature requirement (activation height + feature).
+/// Reused by sequencer/node/e2e work in this milestone; its fork_id/name are
+/// consensus constants.
 pub fn mvp_genesis_schedule() -> Result<ForkSchedule> {
     ForkSchedule::new(
         1,
-        vec![ForkConfig {
-            fork_id: 1,
-            name: "genesis-mvp".to_string(),
-            activation_height: 0,
-            // Deterministic, constant guest marker for the MVP era.
-            guest_hash: Hash::sha256(b"workstream/genesis-mvp/guest"),
-            min_proof_system: 1,
-            features: vec![
-                features::TASK_LIFECYCLE.to_string(),
-                features::SUBMISSION_REVIEW.to_string(),
-            ],
-        }],
+        vec![
+            ForkConfig {
+                fork_id: 1,
+                name: "genesis-mvp".to_string(),
+                activation_height: 0,
+                // Deterministic, constant guest marker for the MVP era.
+                guest_hash: Hash::sha256(b"workstream/genesis-mvp/guest"),
+                min_proof_system: 1,
+                features: vec![
+                    features::TASK_LIFECYCLE.to_string(),
+                    features::SUBMISSION_REVIEW.to_string(),
+                ],
+            },
+            ForkConfig {
+                fork_id: 2,
+                name: "tx-signature".to_string(),
+                activation_height: 1,
+                guest_hash: Hash::sha256(b"workstream/tx-signature/guest"),
+                min_proof_system: 1,
+                features: vec![
+                    features::TASK_LIFECYCLE.to_string(),
+                    features::SUBMISSION_REVIEW.to_string(),
+                    features::TX_SIGNATURE.to_string(),
+                ],
+            },
+        ],
     )
 }
 
@@ -701,6 +731,14 @@ mod mvp_handler_tests {
     }
 
     fn mvp_block(number: BlockNumber, parent: H256, txs: Vec<Transaction>) -> Block {
+        // At height 0 the genesis-mvp fork (fork_id 1) is active; from height 1
+        // the signature-requirement fork activates (fork_id 2), see
+        // mvp_genesis_schedule().
+        let (fork_id, guest_hash) = if number == 0 {
+            (1, Hash::sha256(b"workstream/genesis-mvp/guest"))
+        } else {
+            (2, Hash::sha256(b"workstream/tx-signature/guest"))
+        };
         Block {
             header: BlockHeader {
                 number,
@@ -709,9 +747,8 @@ mod mvp_handler_tests {
                 tx_root: H256::ZERO,
                 state_root: StateRoot::new(H256::ZERO, H256::ZERO),
                 da_ref: H256::ZERO,
-                fork_id: 1,
-                // Must match the guest marker defined in mvp_genesis_schedule()
-                guest_hash: Hash::sha256(b"workstream/genesis-mvp/guest"),
+                fork_id,
+                guest_hash,
                 proof_system_version: 1,
                 proof: None,
             },
@@ -3215,6 +3252,53 @@ mod mvp_handler_tests {
             handlers::get_task(&state, &draft).unwrap().unwrap().status,
             TaskStatus::Draft
         );
+    }
+
+    #[test]
+    fn signature_requirement_applies_at_fork_height() {
+        let stf = mvp_stf();
+        let schedule = mvp_genesis_schedule().unwrap();
+        let genesis = schedule.active_fork_at(0).unwrap();
+        let signature_fork = schedule.active_fork_at(1).unwrap();
+        assert!(!genesis.has_feature(features::TX_SIGNATURE));
+        assert!(signature_fork.has_feature(features::TX_SIGNATURE));
+
+        let mut unsigned = raw_tx(
+            accounts::account(7),
+            0,
+            0,
+            ActionType::ActorRegister,
+            encode_payload(&ActorRegisterPayload {
+                role: ActorRole::Worker,
+            })
+            .unwrap(),
+        );
+        // raw_tx signs; derive a genuinely unsigned transaction from it.
+        unsigned.signature = None;
+        unsigned.public_key = None;
+
+        // Unsigned transaction: rejected under the signature fork (which
+        // activates at height 1), allowed on the structural path pre-fork.
+        let mut state = State::new();
+        assert!(stf
+            .execute_tx_with_fork(&mut state, &unsigned, signature_fork)
+            .is_err());
+        let mut state = State::new();
+        assert!(stf
+            .execute_tx_with_fork(&mut state, &unsigned, genesis)
+            .is_ok());
+
+        // Signed transaction: executes under both forks.
+        let mut signed = unsigned.clone();
+        signature::sign_tx_ed25519(&mut signed, &accounts::signer(accounts::account(7))).unwrap();
+        let mut state = State::new();
+        assert!(stf
+            .execute_tx_with_fork(&mut state, &signed, signature_fork)
+            .is_ok());
+        let mut state = State::new();
+        assert!(stf
+            .execute_tx_with_fork(&mut state, &signed, genesis)
+            .is_ok());
     }
 }
 

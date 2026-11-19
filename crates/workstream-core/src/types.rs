@@ -87,9 +87,10 @@ pub struct Transaction {
     pub fee: FeeSpec,
     pub auth: Vec<u8>, // Opaque to base layer
     pub signature: Option<Vec<u8>>,
-    /// Verifying public key for `account` (raw: 33/65 bytes secp256k1 or
-    /// 32 bytes Ed25519). Required for signature-bearing transactions; the
-    /// signature is verified against this key at admission (SEC-001).
+    /// Verifying public key for `account` (raw: 33 bytes compressed secp256k1
+    /// or 32 bytes Ed25519; admission rejects other encodings).
+    /// Required for signature-bearing transactions; the signature is
+    /// verified against this key at admission (SEC-001).
     pub public_key: Option<Vec<u8>>,
 }
 

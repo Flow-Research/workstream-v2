@@ -24,6 +24,19 @@ impl TxValidator {
     /// fail-closed: an unsigned transaction or one signed by an unknown key is
     /// rejected before any state transition can be attempted.
     pub fn validate(&self, tx: &Transaction) -> Result<()> {
+        self.validate_structural(tx)?;
+        self.verify_signature(tx)
+    }
+
+    /// Validate the structural well-formedness of a transaction without the
+    /// signature requirement.
+    ///
+    /// Used for execution under forks that have not yet activated the
+    /// signature requirement (SEC-001): before the requirement activates, the
+    /// pre-activation validation path runs structurally so transactions
+    /// produced before the change can still replay, while malformed
+    /// transactions (empty action lists, zero fees) are still rejected.
+    pub fn validate_structural(&self, tx: &Transaction) -> Result<()> {
         // Basic validation
         if tx.actions.is_empty() {
             return Err(Error::Transaction("Empty transaction".to_string()));
@@ -31,7 +44,14 @@ impl TxValidator {
         if tx.fee.max_fee == 0 {
             return Err(Error::Transaction("Zero fee".to_string()));
         }
-        self.verify_signature(tx)?;
+        // Admission accepts only one canonical encoding per verifying key:
+        // the 32-byte Ed25519 or 33-byte compressed secp256k1 form. The
+        // 65-byte uncompressed secp256k1 form is rejected so a validly signed
+        // transaction cannot be admitted twice under different canonical
+        // hashes (SEC-001 canonical-encoding review).
+        if let Some(public_key) = &tx.public_key {
+            Self::algorithm_for(public_key)?;
+        }
         Ok(())
     }
 
@@ -65,13 +85,19 @@ impl TxValidator {
     }
 
     /// Map raw verifying-key bytes to the signature algorithm they encode.
+    ///
+    /// Admission accepts only canonical encodings: the 32-byte Ed25519 form
+    /// or the 33-byte compressed secp256k1 form. The 65-byte uncompressed
+    /// secp256k1 encoding is rejected (SEC-001 canonical-encoding review), so
+    /// each logical key has exactly one admitted encoding and therefore one
+    /// admission-time identity (signature + account checks + canonical hash).
     fn algorithm_for(public_key: &[u8]) -> Result<SignatureAlgorithm> {
         match public_key.len() {
             32 => Ok(SignatureAlgorithm::Ed25519),
-            33 | 65 => Ok(SignatureAlgorithm::Secp256k1),
-            _ => Err(Error::Crypto(format!(
-                "invalid public key length: {}",
-                public_key.len()
+            33 => Ok(SignatureAlgorithm::Secp256k1),
+            other => Err(Error::Crypto(format!(
+                "invalid or non-canonical public key length: {}",
+                other
             ))),
         }
     }
@@ -173,6 +199,7 @@ impl TxBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k256::ecdsa::SigningKey as Secp256k1SigningKey;
     use workstream_crypto::signature;
 
     fn ed25519_signing_key() -> ed25519_dalek::SigningKey {
@@ -225,6 +252,69 @@ mod tests {
     fn rejects_malformed_public_key() {
         let mut tx = signed_tx();
         tx.public_key = Some(vec![0u8; 16]);
+        assert!(TxValidator::new().validate(&tx).is_err());
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn secp256k1_admission_round_trip() {
+        let signing_key = Secp256k1SigningKey::random(&mut rand::rng());
+        let verifying_key = signing_key.verifying_key();
+        let account = workstream_core::Hash::sha256(&verifying_key.to_sec1_bytes());
+
+        let mut tx = TxBuilder::new()
+            .chain_id(1)
+            .account(account)
+            .nonce(0, 0)
+            .add_action(ActionType::ActorRegister, b"payload".to_vec())
+            .fee(FeeSpec {
+                payer: FeePayer::Self_,
+                asset_id: 0,
+                max_fee: 1_000,
+            })
+            .build()
+            .unwrap();
+        signature::sign_tx_secp256k1(&mut tx, &signing_key).unwrap();
+        let compressed = verifying_key.to_sec1_bytes().to_vec();
+        assert_eq!(compressed.len(), 33);
+        assert_eq!(tx.public_key, Some(compressed.clone()));
+        assert!(TxValidator::new().validate(&tx).is_ok());
+        assert_eq!(
+            PublicKey::secp256k1(compressed).account_id().unwrap(),
+            account
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn rejects_non_canonical_secp256k1_key_encoding() {
+        let signing_key = Secp256k1SigningKey::random(&mut rand::rng());
+        let verifying_key = signing_key.verifying_key();
+        let compressed = verifying_key.to_sec1_bytes();
+        let uncompressed = verifying_key.to_sec1_point(false).as_bytes().to_vec();
+        assert_eq!(compressed.len(), 33);
+        assert_eq!(uncompressed.len(), 65);
+
+        let account = workstream_core::Hash::sha256(&compressed);
+        let mut tx = TxBuilder::new()
+            .chain_id(1)
+            .account(account)
+            .nonce(0, 0)
+            .add_action(ActionType::ActorRegister, b"payload".to_vec())
+            .fee(FeeSpec {
+                payer: FeePayer::Self_,
+                asset_id: 0,
+                max_fee: 1_000,
+            })
+            .build()
+            .unwrap();
+        signature::sign_tx_secp256k1(&mut tx, &signing_key).unwrap();
+        assert!(TxValidator::new().validate(&tx).is_ok());
+
+        // Re-encode the same key with the 65-byte uncompressed form: the
+        // signature and account checks would still pass, but admission must
+        // reject the alternate encoding (one canonical encoding per key).
+        tx.public_key = Some(uncompressed);
         assert!(TxValidator::new().validate(&tx).is_err());
     }
 }

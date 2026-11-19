@@ -16,7 +16,7 @@ risc0-zkvm = { version = "=3.0.3", default-features = false, features = ["client
 risc0-binfmt = "=3.0.2"
 risc0-zkos-v1compat = "=2.2.0"
 # Receipt control IDs and seal formats must match the r0vm 3.0.3 binary.
-risc0-circuit-rv32im = { version = "=4.0.2", default-features = false }
+risc0-circuit-rv32im = { version = "=4.1.0", default-features = false }
 risc0-circuit-recursion = { version = "=4.0.2", default-features = false }
 risc0-circuit-keccak = { version = "=4.0.2", default-features = false }
 risc0-zkp = { version = "=3.0.2", default-features = false }

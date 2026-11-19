@@ -12,6 +12,8 @@ pub mod fold;
 pub mod risc0;
 pub mod runtime;
 mod verifier;
+#[cfg(unix)]
+pub mod worker;
 pub use verifier::ReceiptVerifier;
 
 use async_trait::async_trait;

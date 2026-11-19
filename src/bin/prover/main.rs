@@ -43,6 +43,10 @@ async fn main() -> Result<()> {
     let (_, prover) =
         workstream_prover::runtime::load_checked(Some(&config.zkvm), config.guest_id.as_deref())?;
     let monitor = workstream_ops::Monitor::start(args.metrics_port).await?;
+    #[cfg(unix)]
+    if let Some(dir) = workstream_ops::ipc::directory()? {
+        return workstream_prover::worker::serve(&dir, prover, monitor).await;
+    }
 
     info!("Starting WorkStream Prover");
     // Idle loop keeps the process alive until real event loops land; each

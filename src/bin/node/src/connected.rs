@@ -200,6 +200,7 @@ pub async fn serve(
                     {
                         Ok(value) => value,
                         Err(_) => {
+                            monitor.inc_da_failure();
                             monitor.heartbeat(false);
                             tokio::time::sleep(Duration::from_millis(250)).await;
                             continue;
@@ -215,13 +216,23 @@ pub async fn serve(
                             "writer returned a reference for another height".into(),
                         ));
                     }
-                    let response = da
+                    let response = match da
                         .get_block(GetBlockRequest {
                             version: 1,
                             api_version: 1,
                             da_id: format!("da:{}", da_ref.to_hex()),
                         })
-                        .await?;
+                        .await
+                    {
+                        Ok(response) => response,
+                        Err(e) => {
+                            monitor.inc_da_failure();
+                            monitor.heartbeat(false);
+                            tracing::warn!(error = %e, height, "DA fetch failed");
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            continue;
+                        }
+                    };
                     let bytes = response
                         .block_bytes
                         .ok_or_else(|| Error::NotFound("DA response had no block bytes".into()))?;
@@ -261,7 +272,29 @@ pub async fn serve(
                         .iter()
                         .map(workstream_sequencer::tx_hash)
                         .collect::<Result<Vec<_>>>()?;
-                    let applied = node.apply_block(block)?;
+                    // Correlate verification by the DA reference: a public
+                    // hash committed by the writer and shared by every node.
+                    // Block bodies (and their witnesses) are never fields.
+                    let context =
+                        workstream_ops::trace::Correlation::new(da_ref.as_bytes(), "verify");
+                    let span = context.span();
+                    let _entered = span.enter();
+                    let applied = match node.apply_block(block) {
+                        Ok(applied) => applied,
+                        Err(e) => {
+                            monitor.inc_verification_rejection();
+                            tracing::warn!(height, da_ref = %da_ref, "block rejected by verification");
+                            return Err(e);
+                        }
+                    };
+                    // Emit the safe identifiers a block joins on. `da_ref`
+                    // equals the proof commitment, so the prover's job key and
+                    // this verification share one trace id; each transaction
+                    // hash links back to its admission and receipt trace.
+                    tracing::info!(height, da_ref = %da_ref, txs = ids.len(), "block verified");
+                    for id in &ids {
+                        tracing::info!(tx_hash = %id, height, "transaction verified");
+                    }
                     if let Some(projection) = projection.as_ref() {
                         projection
                             .apply(ProjectionInput {
@@ -273,6 +306,9 @@ pub async fn serve(
                                 tx_hashes: &ids,
                             })
                             .await?;
+                        // Index lag is a safe derived count used by the stall
+                        // alert and the read-only status endpoint.
+                        monitor.set_index_lag(projection.status().await?.lag);
                     }
                     included
                         .write()

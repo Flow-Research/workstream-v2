@@ -1,0 +1,61 @@
+{
+  "uid": "workstream-stalls",
+  "title": "WorkStream — transaction journey and stalls",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "tagging": [],
+  "time": {"from": "now-15m", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Admission backlog (pending signed transactions)",
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 0},
+      "targets": [{"expr": "workstream_admission_backlog", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Proof delay (oldest queued job, ms)",
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 0},
+      "targets": [{"expr": "workstream_proof_delay_ms{service=\"prover\"}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "DA failures (5m increase)",
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 0},
+      "targets": [{"expr": "increase(workstream_da_failures_total[5m])", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Verification rejections (5m increase)",
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 6},
+      "targets": [{"expr": "increase(workstream_verification_rejections_total[5m])", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Index lag (verified blocks not projected)",
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 6},
+      "targets": [{"expr": "workstream_index_lag_blocks{service=\"node\"}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Liveness vs readiness by service",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12},
+      "targets": [
+        {"expr": "workstream_up", "legendFormat": "{{service}} live", "refId": "A"},
+        {"expr": "workstream_ready", "legendFormat": "{{service}} ready", "refId": "B"}
+      ]
+    }
+  ]
+}

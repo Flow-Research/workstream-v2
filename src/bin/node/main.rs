@@ -46,7 +46,9 @@ async fn main() -> Result<()> {
     }
     config.validate()?;
 
-    // Configure logging from config
+    // Configure logging from config. The role is a safe, static correlation
+    // label; it is never taken from the network.
+    std::env::set_var("WORKSTREAM_ROLE", "node");
     std::env::set_var("RUST_LOG", &config.log_level);
     logging::init_tracing();
     let (stf, prover) = workstream_prover::runtime::load()?;

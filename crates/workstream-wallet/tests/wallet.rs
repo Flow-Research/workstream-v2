@@ -56,7 +56,7 @@ async fn restored_wallet_submits_a_transaction_that_executes_in_a_block() {
         workstream_sequencer::tx_hash(&tx).unwrap()
     );
     let block = api
-        .build_block(BuildBlockRequest {
+        .preview_block(BuildBlockRequest {
             version: 1,
             api_version: 1,
             max_txs: None,
@@ -64,4 +64,5 @@ async fn restored_wallet_submits_a_transaction_that_executes_in_a_block() {
         .await
         .unwrap();
     assert_eq!(block.tx_count, 1);
+    assert_eq!(api.get_mempool_status().await.unwrap().pending_count, 1);
 }

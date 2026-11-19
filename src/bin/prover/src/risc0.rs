@@ -9,10 +9,14 @@ use workstream_stf::receipt::{Claim, Witness};
 pub fn configured_image() -> Result<(Vec<u8>, H256)> {
     let path = std::env::var_os("WORKSTREAM_GUEST_IMAGE")
         .ok_or_else(|| Error::Config("missing WORKSTREAM_GUEST_IMAGE".into()))?;
+    Ok((fs::read(path).map_err(io)?, configured_id()?))
+}
+
+pub fn configured_id() -> Result<H256> {
     let id = std::env::var("WORKSTREAM_GUEST_ID")
         .map_err(|_| Error::Config("missing WORKSTREAM_GUEST_ID".into()))?;
     let approved = H256::from_hex(id.trim_start_matches("0x"))?;
-    Ok((fs::read(path).map_err(io)?, approved))
+    Ok(approved)
 }
 
 pub fn package(user_elf: &[u8]) -> Vec<u8> {
@@ -21,7 +25,8 @@ pub fn package(user_elf: &[u8]) -> Vec<u8> {
 
 pub fn image_id(image: &[u8]) -> Result<H256> {
     let digest = risc0_binfmt::compute_image_id(image).map_err(|e| Error::Crypto(e.to_string()))?;
-    H256::from_hex(&digest.to_string())
+    let id = H256::from_hex(&digest.to_string())?;
+    Ok(id)
 }
 
 /// Run the external local prover. No dev-mode receipt can pass the final check.
@@ -67,6 +72,13 @@ pub fn prove(image: &[u8], approved: H256, input: &Witness) -> Result<Vec<u8>> {
 }
 
 pub fn verify(bytes: &[u8], approved: H256, expected: &Claim) -> Result<()> {
+    if verified_claim(bytes, approved)? != *expected {
+        return Err(Error::InvalidProof("transition journal mismatch".into()));
+    }
+    Ok(())
+}
+
+pub fn verified_claim(bytes: &[u8], approved: H256) -> Result<Claim> {
     const LIMIT: u64 = 64 << 20;
     if bytes.len() as u64 > LIMIT {
         return Err(Error::InvalidProof("oversized receipt".into()));
@@ -82,12 +94,12 @@ pub fn verify(bytes: &[u8], approved: H256, expected: &Claim) -> Result<()> {
     receipt
         .verify(digest)
         .map_err(|e| Error::InvalidProof(e.to_string()))?;
-    let journal =
-        postcard::to_allocvec(expected).map_err(|e| Error::Serialization(e.to_string()))?;
-    if receipt.journal.bytes != journal {
-        return Err(Error::InvalidProof("transition journal mismatch".into()));
+    let (claim, rest) = postcard::take_from_bytes::<Claim>(&receipt.journal.bytes)
+        .map_err(|e| Error::InvalidProof(e.to_string()))?;
+    if claim.version != 1 || !rest.is_empty() {
+        return Err(Error::InvalidProof("invalid transition journal".into()));
     }
-    Ok(())
+    Ok(claim)
 }
 
 fn io(e: std::io::Error) -> Error {

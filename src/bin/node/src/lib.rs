@@ -18,6 +18,7 @@ use workstream_core::fork::{validate_header_fork, ForkSchedule};
 use workstream_core::hash::{Hash, H256};
 use workstream_core::types::*;
 use workstream_core::{Error, Result};
+use workstream_prover::risc0;
 use workstream_sequencer::{header_hash, tx_hash, tx_root, GENESIS_PARENT_HASH};
 use workstream_state::State;
 use workstream_stf::StateTransitionFunction;
@@ -204,6 +205,31 @@ impl<S: BlockSource> Node<S> {
                 computed_state_root.hash(),
                 block.header.state_root.hash()
             )));
+        }
+
+        // 7. zkVM proof verification (SEC-002): reject blocks whose attached
+        //    proof fails verification before any state is committed. Blocks
+        //    without a proof are not yet attributable to a prover and are
+        //    deferred to the prover/header integration (issue #83).
+        let fork = self
+            .schedule
+            .active_fork_at(height)
+            .ok_or_else(|| Error::Fork("missing fork".into()))?;
+        if let Some(proof) = &block.header.proof {
+            let claim = workstream_stf::receipt::Claim::new(
+                height,
+                header_hash(&block.header)?,
+                self.state.root().hash(),
+                computed_state_root.hash(),
+                &block.transactions,
+            )?;
+            risc0::verify(&proof.proof_data, fork.guest_hash, &claim).map_err(|e| {
+                Error::Consensus(format!(
+                    "zk proof verification failed at height {height}: {e}"
+                ))
+            })?;
+        } else if fork.has_feature("risc0-receipts") {
+            return Err(Error::Consensus("missing required zkVM receipt".into()));
         }
 
         // Commit
@@ -422,6 +448,70 @@ mod tests {
         let err = node.apply_next().unwrap_err();
         assert!(matches!(err, Error::Consensus(_)));
         assert!(err.to_string().contains("state root mismatch"));
+    }
+
+    #[test]
+    #[ignore = "requires r0vm and WORKSTREAM_GUEST_IMAGE"]
+    fn node_commits_only_the_receipted_state_transition() {
+        let (mut blocks, _) = build_chain(vec![vec![register_tx(0x11, ActorRole::Sponsor)]]);
+        let mut block = blocks.pop().unwrap();
+        let image = std::fs::read(std::env::var("WORKSTREAM_GUEST_IMAGE").unwrap()).unwrap();
+        let approved = risc0::image_id(&image).unwrap();
+        let mut schedule = mvp_schedule();
+        schedule.forks[0].guest_hash = approved;
+        schedule.forks[0].features.push("risc0-receipts".into());
+        block.header.guest_hash = approved;
+        let mut node = Node::new(
+            StateTransitionFunction::with_schedule(schedule.clone()).unwrap(),
+            schedule,
+            MemoryBlockSource::new(),
+        );
+        let pre = node.state_root();
+        assert!(node.apply_block(block.clone()).is_err());
+        let witness = workstream_stf::receipt::Witness {
+            before: node.state().snapshot(),
+            height: 1,
+            block_hash: header_hash(&block.header).unwrap(),
+            pre: pre.hash(),
+            post: block.header.state_root.hash(),
+            transactions: block.transactions.clone(),
+        };
+        let proof_data = risc0::prove(&image, approved, &witness).unwrap();
+        block.header.proof = Some(Proof {
+            proof_data,
+            proof_type: ProofType::ZkVm,
+        });
+        let mut mismatch = block.clone();
+        mismatch.header.timestamp += 1;
+        assert!(
+            matches!(node.apply_block(mismatch),Err(Error::Consensus(msg)) if msg.contains("zk proof verification failed"))
+        );
+        let mut mismatch = block.clone();
+        mismatch.header.state_root = pre.clone();
+        assert!(node.apply_block(mismatch).is_err());
+        assert_eq!(node.tip(), 0);
+        assert_eq!(node.state_root(), pre);
+        node.apply_block(block).unwrap();
+        assert_eq!(node.tip(), 1);
+        assert_ne!(node.state_root(), pre);
+    }
+
+    #[test]
+    fn node_rejects_invalid_proof() {
+        let (mut blocks, _) = build_chain(vec![vec![register_tx(0x11, ActorRole::Sponsor)]]);
+        let mut block = blocks.pop().unwrap();
+        block.header.proof = Some(Proof {
+            proof_data: vec![0u8; 32],
+            proof_type: ProofType::ZkVm,
+        });
+
+        let mut source = MemoryBlockSource::new();
+        source.push(block);
+        let mut node = Node::new(mvp_stf(), mvp_schedule(), source);
+        let err = node.apply_next().unwrap_err();
+        assert!(matches!(err, Error::Consensus(_)));
+        assert!(err.to_string().contains("zk proof verification failed"));
+        assert_eq!(node.tip(), 0); // unchanged after rejection
     }
 
     #[test]

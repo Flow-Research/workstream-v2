@@ -18,6 +18,7 @@ workstream-core = { path = "../../../crates/workstream-core" }
 workstream-state = { path = "../../../crates/workstream-state" }
 workstream-stf = { path = "../../../crates/workstream-stf" }
 workstream-sequencer = { path = "../sequencer" }
+workstream-prover = { path = "../prover" }
 workstream-tx = { path = "../../../crates/workstream-tx" }
 tokio = { workspace = true }
 clap = { workspace = true }

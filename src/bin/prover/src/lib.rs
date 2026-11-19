@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 pub mod fold;
 pub mod risc0;
+mod verifier;
+pub use verifier::ReceiptVerifier;
 
 use async_trait::async_trait;
 use workstream_core::hash::H256;
@@ -152,7 +154,31 @@ impl ZkvmBackend for RiscZeroBackend {
             proof_bytes,
             public_inputs: post_root.as_bytes().to_vec(),
             guest_id: approved.to_hex(),
+            stateroot_pre: pre,
         })
+    }
+
+    fn verify_block_transition(
+        &self,
+        transition: &ProveBlockTransition,
+        proof: &ZkProof,
+    ) -> Result<bool> {
+        transition.validate()?;
+        proof.validate()?;
+        let approved = risc0::configured_id()?;
+        let Ok(post) = proof.public_inputs.as_slice().try_into() else {
+            return Ok(false);
+        };
+        let claim = workstream_stf::receipt::Claim::new(
+            self.height,
+            H256::from_bytes(transition.block_hash),
+            transition.stateroot_pre,
+            H256::from_bytes(post),
+            &transition.transactions,
+        )?;
+        Ok(proof.stateroot_pre == transition.stateroot_pre
+            && proof.guest_id == approved.to_hex()
+            && risc0::verify(&proof.proof_bytes, approved, &claim).is_ok())
     }
 }
 

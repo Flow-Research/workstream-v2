@@ -37,6 +37,10 @@ async fn main() -> Result<()> {
     logging::init_tracing();
     let (stf, prover) = workstream_prover::runtime::load()?;
     let monitor = workstream_ops::Monitor::start(args.metrics_port).await?;
+    #[cfg(unix)]
+    if let Some(dir) = workstream_ops::ipc::directory()? {
+        return workstream_sequencer::writer::serve(&dir, stf, prover, monitor).await;
+    }
 
     info!("Starting WorkStream Sequencer on port {}", config.port);
     info!("Sovereign zkRollup for governed work coordination");

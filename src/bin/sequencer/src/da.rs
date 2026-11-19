@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use workstream_core::hash::Hash;
+use workstream_core::hash::{Hash, H256};
 use workstream_core::traits::da::{
     AvailabilityInfo, DaClient, GetBlockRequest, GetBlockResponse, PostBlockRequest,
     PostBlockResponse, PostTxRequest, PostTxResponse,
@@ -19,6 +19,11 @@ use workstream_core::{Error, Result};
 /// `da_id` assigned to a published payload: domain-tagged SHA-256 of its bytes.
 fn da_id_for(bytes: &[u8]) -> String {
     format!("da:{}", Hash::sha256(bytes).to_hex())
+}
+
+/// DA key for a producer-committed logical reference in `header.da_ref`.
+pub fn da_id_for_hash(hash: H256) -> String {
+    format!("da:{}", hash.to_hex())
 }
 
 /// Published payloads kept by the in-memory DA client.
@@ -85,7 +90,10 @@ impl DaClient for InMemoryDaClient {
 
     async fn post_block(&self, req: PostBlockRequest) -> Result<PostBlockResponse> {
         req.validate()?;
-        let da_id = da_id_for(&req.block_bytes);
+        let da_id = req
+            .commitment
+            .map(da_id_for_hash)
+            .unwrap_or_else(|| da_id_for(&req.block_bytes));
         self.store
             .lock()
             .expect("in-memory da store")
@@ -154,6 +162,7 @@ mod tests {
                 version: 1,
                 api_version: 1,
                 block_bytes: vec![1, 2, 3, 4],
+                commitment: None,
             })
             .await
             .unwrap();
@@ -179,6 +188,7 @@ mod tests {
                 version: 1,
                 api_version: 1,
                 block_bytes: vec![],
+                commitment: None,
             })
             .await
             .unwrap_err();

@@ -6,6 +6,7 @@ use workstream_core::config::{load_config, ProverConfig};
 use workstream_core::traits::prover::ProverApi;
 use workstream_core::{logging, Result};
 use workstream_prover::{Prover, DEFAULT_GUEST_ID};
+use workstream_stf::{mvp_genesis_schedule, StateTransitionFunction};
 
 #[derive(Parser, Debug)]
 #[command(name = "workstream-prover")]
@@ -44,8 +45,11 @@ async fn main() -> Result<()> {
     info!("Guest program: {DEFAULT_GUEST_ID}");
 
     // zkVM proof generation runtime (issue #80): the prover drives guest
-    // transitions through a pluggable backend and reports status.
-    let prover = Prover::new();
+    // transitions through a pluggable backend and reports status. The default
+    // backend is in-memory; set WORKSTREAM_PROVER_BACKEND=risc0 (plus the
+    // guest image/id variables) to opt into real receipt generation.
+    let stf = StateTransitionFunction::with_schedule(mvp_genesis_schedule()?)?;
+    let prover = Prover::from_env(stf)?;
 
     // Idle loop keeps the process alive until real event loops land; each
     // tick reports prover availability through the live backend.

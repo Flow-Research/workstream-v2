@@ -14,9 +14,13 @@ workstream-stf = { path = "../workstream-stf" }
 workstream-tx = { path = "../workstream-tx" }
 workstream-sequencer = { path = "../../src/bin/sequencer" }
 workstream-node = { path = "../../src/bin/node" }
+workstream-prover = { path = "../../src/bin/prover" }
 workstream-crypto = { path = "../workstream-crypto" }
 
 [dev-dependencies]
 proptest = { workspace = true }
 rstest = { workspace = true }
 ed25519-dalek = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }

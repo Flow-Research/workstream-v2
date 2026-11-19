@@ -519,7 +519,7 @@ fn e2e_deterministic_replay() {
         let mut header_hashes = Vec::new();
         while sequencer.pending() > 0 || blocks.is_empty() {
             let block = sequencer.build_block(Some(2)).unwrap();
-            header_hashes.push(workstream_sequencer::header_hash(&block.header));
+            header_hashes.push(workstream_sequencer::header_hash(&block.header).unwrap());
             blocks.push(block);
             if blocks.len() >= 9 {
                 break;

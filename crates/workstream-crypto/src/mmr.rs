@@ -49,7 +49,7 @@ fn bag_peaks(peaks: &[H256], size: u64) -> H256 {
     }
 
     // Right-to-left fold: start from rightmost peak, bag toward left
-    let mut acc = *peaks.last().unwrap();
+    let mut acc = peaks[peaks.len() - 1];
     for peak in peaks.iter().rev().skip(1) {
         acc = hash_inner(*peak, acc);
     }

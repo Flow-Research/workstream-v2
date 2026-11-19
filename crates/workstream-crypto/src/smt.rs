@@ -405,7 +405,9 @@ impl<S: NodeStore> SmTree<S> {
             return Ok(self.store.put(leaf));
         }
 
-        let node = self.store.get(&node_hash).expect("node must exist");
+        let node = self.store.get(&node_hash).ok_or_else(|| {
+            Error::State(format!("missing SMT node {node_hash} at depth {depth}"))
+        })?;
         match node {
             SmtNode::Leaf {
                 key: leaf_key,

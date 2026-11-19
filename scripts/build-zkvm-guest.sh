@@ -10,3 +10,5 @@ RUSTC_BOOTSTRAP=1 \
     -Zbuild-std-features=compiler-builtins-mem
 cargo run -q -p workstream-prover --example package_guest -- \
     zkvm/guest/target/riscv32im-risc0-zkvm-elf/release/workstream-stf-guest "$out"
+cargo run -q -p workstream-prover --example package_guest -- \
+    zkvm/guest/target/riscv32im-risc0-zkvm-elf/release/fold "$out.fold"

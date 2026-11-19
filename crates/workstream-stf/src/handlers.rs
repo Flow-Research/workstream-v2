@@ -904,59 +904,6 @@ pub(crate) fn handle_reputation_project(
     )
 }
 
-/// gov.upgrade: governance action to schedule a protocol upgrade.
-pub(crate) fn handle_gov_upgrade(
-    state: &mut State,
-    account: H256,
-    payload: &[u8],
-) -> Result<Event> {
-    let p: GovUpgradePayload = decode_payload(payload)?;
-
-    let actor = load_actor(state, &account)?;
-    authz::require_sponsor(&actor, "execute a governance upgrade")?;
-
-    event(
-        "gov.upgraded",
-        &postcard::to_allocvec(&p.target_fork_id)
-            .map_err(|e| Error::Serialization(e.to_string()))?,
-    )
-}
-
-/// gov.set_sequencer: governance action to set the sequencer account.
-pub(crate) fn handle_gov_set_sequencer(
-    state: &mut State,
-    account: H256,
-    payload: &[u8],
-) -> Result<Event> {
-    let p: GovSetSequencerPayload = decode_payload(payload)?;
-
-    let actor = load_actor(state, &account)?;
-    authz::require_sponsor(&actor, "set the sequencer")?;
-
-    event(
-        "gov.sequencer_set",
-        &postcard::to_allocvec(&p.sequencer).map_err(|e| Error::Serialization(e.to_string()))?,
-    )
-}
-
-/// gov.set_parameters: governance action to set protocol parameters.
-pub(crate) fn handle_gov_set_parameters(
-    state: &mut State,
-    account: H256,
-    payload: &[u8],
-) -> Result<Event> {
-    let p: GovSetParametersPayload = decode_payload(payload)?;
-
-    let actor = load_actor(state, &account)?;
-    authz::require_sponsor(&actor, "set governance parameters")?;
-
-    event(
-        "gov.parameters_set",
-        &postcard::to_allocvec(&(p.param_key, p.param_value))
-            .map_err(|e| Error::Serialization(e.to_string()))?,
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Id derivation (deterministic)
 // ---------------------------------------------------------------------------
@@ -1056,6 +1003,7 @@ pub(crate) fn action_key(action_type: ActionType) -> &'static str {
         ActionType::AwardFulfill => "award_fulfill",
         ActionType::ReputationProject => "reputation_project",
         ActionType::GovUpgrade => "gov_upgrade",
+        ActionType::GovExecuteUpgrade => "gov_execute_upgrade",
         ActionType::GovSetSequencer => "gov_set_sequencer",
         ActionType::GovSetParameters => "gov_set_parameters",
         ActionType::NoteTransfer => "note_transfer",

@@ -176,6 +176,7 @@ pub enum ActionType {
     GovSetParameters,
     NoteTransfer,
     NoteWithdraw,
+    GovExecuteUpgrade,
 }
 
 // Events

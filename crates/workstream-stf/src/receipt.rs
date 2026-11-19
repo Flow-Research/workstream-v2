@@ -85,6 +85,7 @@ pub fn execute(w: Witness) -> Result<Claim> {
         ));
     }
     let stf = StateTransitionFunction::with_schedule(w.schedule)?;
+    crate::governance::check_activation(&state, stf.fork_schedule(), w.height)?;
     let fork = stf
         .active_fork_at(w.height)
         .ok_or_else(|| Error::Fork("unknown height".into()))?;

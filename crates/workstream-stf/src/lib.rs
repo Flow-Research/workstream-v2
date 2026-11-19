@@ -17,6 +17,7 @@ use workstream_tx::TxValidator;
 use crate::policy::{OracleInput, Policy, PolicyError};
 
 pub(crate) mod authz;
+pub mod governance;
 pub mod handlers;
 pub mod notes;
 pub mod policy;
@@ -143,6 +144,15 @@ impl StateTransitionFunction {
     /// well-formedness is pre-checked here so malformed payloads abort before
     /// any state mutation.
     pub fn execute_tx(&self, state: &mut State, tx: &Transaction) -> Result<Vec<Event>> {
+        self.execute_tx_inner(state, tx, None)
+    }
+
+    fn execute_tx_inner(
+        &self,
+        state: &mut State,
+        tx: &Transaction,
+        height: Option<BlockNumber>,
+    ) -> Result<Vec<Event>> {
         debug!("Executing transaction for account {:?}", tx.account);
 
         // Validate transaction (structural checks: non-empty actions, fee).
@@ -173,7 +183,7 @@ impl StateTransitionFunction {
         let mut events = Vec::new();
         for (idx, action) in tx.actions.iter().enumerate() {
             debug!("Executing action {}: {:?}", idx, action.action_type);
-            let action_events = self.execute_action(&mut draft, tx, action)?;
+            let action_events = self.execute_action(&mut draft, tx, action, height)?;
             events.extend(action_events);
         }
 
@@ -209,7 +219,22 @@ impl StateTransitionFunction {
         self.execute_tx(state, tx)
     }
 
-    /// Enforce feature gating for a single action
+    /// Execute under the scheduled fork at the consensus-supplied block height.
+    pub fn execute_tx_at_height(
+        &self,
+        state: &mut State,
+        tx: &Transaction,
+        height: BlockNumber,
+    ) -> Result<Vec<Event>> {
+        let fork = self
+            .active_fork_at(height)
+            .ok_or_else(|| Error::Fork("no active fork".into()))?;
+        for action in &tx.actions {
+            self.check_action_gated(fork, action)?;
+        }
+        self.execute_tx_inner(state, tx, Some(height))
+    }
+
     fn check_action_gated(&self, fork: &ForkConfig, action: &Action) -> Result<()> {
         if let Some(required) = required_feature_for(action.action_type) {
             if !fork.has_feature(required) {
@@ -252,6 +277,7 @@ impl StateTransitionFunction {
         state: &mut State,
         tx: &Transaction,
         action: &Action,
+        height: Option<BlockNumber>,
     ) -> Result<Vec<Event>> {
         let account = tx.account;
         let payload = action.payload.as_slice();
@@ -313,13 +339,16 @@ impl StateTransitionFunction {
             ActionType::ReputationProject => {
                 handlers::handle_reputation_project(state, account, payload)?
             }
-            ActionType::GovUpgrade => handlers::handle_gov_upgrade(state, account, payload)?,
-            ActionType::GovSetSequencer => {
-                handlers::handle_gov_set_sequencer(state, account, payload)?
-            }
-            ActionType::GovSetParameters => {
-                handlers::handle_gov_set_parameters(state, account, payload)?
-            }
+            ActionType::GovUpgrade
+            | ActionType::GovExecuteUpgrade
+            | ActionType::GovSetSequencer
+            | ActionType::GovSetParameters => governance::apply(
+                state,
+                tx,
+                action,
+                &self.fork_schedule,
+                height.ok_or_else(|| Error::Fork("governance requires block context".into()))?,
+            )?,
         };
         Ok(vec![event])
     }
@@ -344,6 +373,7 @@ impl StateTransitionFunction {
 
         // 2. Header validation (rejects unknown fork_id / unapproved guest)
         validate_header_fork(&block.header, &self.fork_schedule)?;
+        governance::check_activation(state, &self.fork_schedule, block.header.number)?;
 
         // 3. Activation hook at the exact boundary, before processing
         if block.header.number == fork.activation_height {
@@ -356,7 +386,7 @@ impl StateTransitionFunction {
         //    addressable by (block, index) without recomputing them.
         let mut all_events = Vec::new();
         for (tx_idx, tx) in block.transactions.iter().enumerate() {
-            let mut events = self.execute_tx_with_fork(state, tx, fork)?;
+            let mut events = self.execute_tx_at_height(state, tx, block.header.number)?;
             for ev in events.iter_mut() {
                 ev.block_number = block.header.number;
                 ev.tx_index = tx_idx as TxIndex;
@@ -400,9 +430,10 @@ fn required_feature_for(action: ActionType) -> Option<&'static str> {
 
         ActionType::ReputationProject => Some(features::REPUTATION),
 
-        ActionType::GovUpgrade | ActionType::GovSetSequencer | ActionType::GovSetParameters => {
-            Some(features::GOVERNANCE)
-        }
+        ActionType::GovUpgrade
+        | ActionType::GovExecuteUpgrade
+        | ActionType::GovSetSequencer
+        | ActionType::GovSetParameters => Some(features::GOVERNANCE),
 
         // Genesis-era actions: no feature requirement
         _ => None,
@@ -2345,22 +2376,95 @@ mod mvp_handler_tests {
     }
 
     #[test]
-    fn gov_set_sequencer_action_executable() {
-        let mut book = NonceBook::default();
-        let (stf, mut state, _project, _task) = setup_task_ready(&mut book);
-        let events = run(
-            &stf,
-            &mut state,
-            &mut book,
-            sponsor(),
+    fn governance_timelock_and_setters_execute_in_canonical_blocks() {
+        let mut schedule = mvp_genesis_schedule().unwrap();
+        schedule.forks[0].features.push(features::GOVERNANCE.into());
+        let mut next = schedule.forks[0].clone();
+        next.fork_id += 1;
+        next.activation_height = 5;
+        schedule.forks.push(next.clone());
+        let stf = StateTransitionFunction::with_schedule(schedule).unwrap();
+        let governor = accounts::account(7);
+        let mut state = State::new();
+        governance::initialize(&mut state, governor, 2).unwrap();
+        let upgrade = encode_payload(&handlers::GovUpgradePayload {
+            target_fork_id: next.fork_id,
+        })
+        .unwrap();
+        let propose = raw_tx(governor, 0, 0, ActionType::GovUpgrade, upgrade.clone());
+        let mut forged = propose.clone();
+        signature::sign_tx_ed25519(
+            &mut forged,
+            &ed25519_dalek::SigningKey::from_bytes(&[43; 32]),
+        )
+        .unwrap();
+        let block = |height, txs| mvp_block(height, H256::ZERO, txs);
+        let initial = state.root();
+        assert!(matches!(
+            stf.execute_block(&mut state, &block(1, vec![forged])),
+            Err(Error::Unauthorized(_))
+        ));
+        assert_eq!(state.root(), initial);
+        stf.execute_block(&mut state, &block(1, vec![propose]))
+            .unwrap();
+        let execute = raw_tx(governor, 0, 1, ActionType::GovExecuteUpgrade, upgrade);
+        let proposed = state.root();
+        assert!(matches!(
+            stf.execute_block(&mut state, &block(2, vec![execute.clone()])),
+            Err(Error::InvalidTransition(_))
+        ));
+        assert_eq!(state.root(), proposed);
+        let mut activation = block(5, vec![]);
+        activation.header.fork_id = next.fork_id;
+        assert!(matches!(
+            stf.execute_block(&mut state, &activation),
+            Err(Error::Fork(_))
+        ));
+        stf.execute_block(&mut state, &block(3, vec![execute]))
+            .unwrap();
+        let replay = raw_tx(
+            governor,
+            0,
+            2,
+            ActionType::GovExecuteUpgrade,
+            encode_payload(&handlers::GovUpgradePayload {
+                target_fork_id: next.fork_id,
+            })
+            .unwrap(),
+        );
+        assert!(matches!(
+            stf.execute_block(&mut state, &block(4, vec![replay])),
+            Err(Error::InvalidTransition(_))
+        ));
+        let setter = raw_tx(
+            governor,
+            0,
+            2,
             ActionType::GovSetSequencer,
             encode_payload(&handlers::GovSetSequencerPayload {
                 sequencer: worker(),
             })
             .unwrap(),
         );
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, "gov.sequencer_set");
+        let param = raw_tx(
+            governor,
+            0,
+            3,
+            ActionType::GovSetParameters,
+            encode_payload(&handlers::GovSetParametersPayload {
+                param_key: "limit".into(),
+                param_value: "12".into(),
+            })
+            .unwrap(),
+        );
+        stf.execute_block(&mut state, &block(4, vec![setter, param]))
+            .unwrap();
+        stf.execute_block(&mut state, &activation).unwrap();
+        assert_eq!(governance::sequencer(&state).unwrap(), Some(worker()));
+        assert_eq!(
+            governance::parameter(&state, "limit").unwrap().as_deref(),
+            Some("12")
+        );
     }
 
     #[test]

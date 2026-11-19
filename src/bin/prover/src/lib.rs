@@ -358,6 +358,11 @@ impl ZkvmBackend for RiscZeroBackend {
             ));
         }
 
+        workstream_stf::governance::check_activation(
+            &state,
+            self.stf.fork_schedule(),
+            transition.height,
+        )?;
         let mut draft = state.clone();
         for tx in &transition.transactions {
             self.stf.execute_tx_with_fork(&mut draft, tx, fork)?;

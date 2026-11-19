@@ -12,7 +12,7 @@ use workstream_core::traits::verifier::VerifierApi;
 use workstream_core::{logging, Result};
 use workstream_node::rpc::RpcServer;
 use workstream_node::EventIndexer;
-use workstream_prover::{InMemoryVerifier, Prover};
+use workstream_prover::{Prover, ReceiptVerifier};
 use workstream_sequencer::{InMemoryDaClient, InMemoryP2pNetwork, SequencerApiImpl};
 use workstream_stf::{mvp_genesis_schedule, StateTransitionFunction};
 
@@ -61,12 +61,13 @@ async fn main() -> Result<()> {
     // RPC server (issue #85): JSON-RPC 2.0 over TCP, dispatching over the
     // versioned component traits (sequencer/prover/verifier/DA/P2P).
     let stf = StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap()).unwrap();
+    let verifier = ReceiptVerifier::new(stf.fork_schedule().forks[0].guest_hash);
     let sequencer = SequencerApiImpl::new(stf);
     let indexer = Arc::new(EventIndexer::new());
     let rpc_server = RpcServer::new(
         Arc::new(sequencer) as Arc<dyn SequencerApi>,
         Arc::new(Prover::new()) as Arc<dyn ProverApi>,
-        Arc::new(InMemoryVerifier::new()) as Arc<dyn VerifierApi>,
+        Arc::new(verifier) as Arc<dyn VerifierApi>,
         Arc::new(InMemoryDaClient::new()) as Arc<dyn DaClient>,
         Arc::new(InMemoryP2pNetwork::new()) as Arc<dyn P2pNetwork>,
         indexer,

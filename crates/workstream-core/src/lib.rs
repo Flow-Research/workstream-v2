@@ -7,6 +7,7 @@
 //! - Error types
 
 pub mod account;
+#[cfg(not(target_os = "zkvm"))]
 pub mod bridge;
 pub mod config;
 pub mod error;
@@ -16,6 +17,7 @@ pub mod privacy;
 pub mod types;
 
 pub use account::{Account, AccountKind, AccountStatus, Scope, ValidatorRef, ValidatorSet};
+#[cfg(not(target_os = "zkvm"))]
 pub use bridge::{BridgeEscrow, BridgePool};
 pub use error::{Error, ErrorCategory, ErrorCode, Result};
 pub use fork::{ForkActivationHook, ForkConfig, ForkSchedule, GuestHash, NoopForkHook};

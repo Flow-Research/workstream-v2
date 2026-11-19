@@ -258,8 +258,13 @@ impl Sequencer {
 }
 
 #[cfg(test)]
+#[path = "../../../../tests/support/accounts.rs"]
+mod accounts;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use workstream_crypto::signature;
     use workstream_stf::encode_payload;
     use workstream_stf::{
         mvp_genesis_schedule, ActorGrantPayload, ActorRegisterPayload, ActorRole, Capability,
@@ -267,12 +272,10 @@ mod tests {
     };
     use workstream_tx::TxBuilder;
 
-    fn account(tag: u8) -> AccountId {
-        H256::from_bytes([tag; 32])
-    }
+    use super::accounts::{account, signer};
 
     fn seq_tx(acct: AccountId, seq: u64, t: ActionType, payload: Vec<u8>) -> Transaction {
-        TxBuilder::new()
+        let mut tx = TxBuilder::new()
             .chain_id(1)
             .account(acct)
             .nonce(0, seq)
@@ -283,7 +286,9 @@ mod tests {
                 max_fee: 1_000,
             })
             .build()
-            .unwrap()
+            .unwrap();
+        signature::sign_tx_ed25519(&mut tx, &signer(acct)).unwrap();
+        tx
     }
 
     fn mvp_sequencer() -> Sequencer {

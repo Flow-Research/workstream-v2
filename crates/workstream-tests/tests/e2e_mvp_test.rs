@@ -11,6 +11,7 @@
 
 use workstream_core::hash::H256;
 use workstream_core::types::*;
+use workstream_crypto::signature;
 use workstream_node::{MemoryBlockSource, Node};
 use workstream_sequencer::Sequencer;
 use workstream_stf::{
@@ -25,18 +26,20 @@ use workstream_stf::{
 use workstream_tx::TxBuilder;
 
 // Test accounts
+#[path = "../../../tests/support/accounts.rs"]
+mod accounts;
 fn sponsor() -> AccountId {
-    H256::from_bytes([0x11; 32])
+    accounts::account(0x11)
 }
 
 fn worker() -> AccountId {
-    H256::from_bytes([0x22; 32])
+    accounts::account(0x22)
 }
 
 /// A second worker acting as an independent reviewer. The review policy
 /// forbids the submission's author and the task's sponsor from reviewing.
 fn reviewer() -> AccountId {
-    H256::from_bytes([0x33; 32])
+    accounts::account(0x33)
 }
 
 fn content_hash() -> H256 {
@@ -45,7 +48,7 @@ fn content_hash() -> H256 {
 
 // Transaction builders
 fn tx(acct: AccountId, seq: u64, action_type: ActionType, payload: Vec<u8>) -> Transaction {
-    TxBuilder::new()
+    let mut tx = TxBuilder::new()
         .chain_id(1)
         .account(acct)
         .nonce(0, seq)
@@ -56,7 +59,9 @@ fn tx(acct: AccountId, seq: u64, action_type: ActionType, payload: Vec<u8>) -> T
             max_fee: 1_000,
         })
         .build()
-        .unwrap()
+        .unwrap();
+    signature::sign_tx_ed25519(&mut tx, &accounts::signer(acct)).unwrap();
+    tx
 }
 
 fn register_sponsor() -> Transaction {
@@ -69,6 +74,32 @@ fn register_sponsor() -> Transaction {
         })
         .unwrap(),
     )
+}
+
+#[test]
+fn unrelated_valid_signer_cannot_spend_another_accounts_nonce() {
+    let stf = StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap()).unwrap();
+    let mut sequencer = Sequencer::new(stf.clone());
+    let mut state = workstream_state::State::new();
+    let before = state.root();
+    let valid = register_sponsor();
+    let mut unrelated = valid.clone();
+    signature::sign_tx_ed25519(&mut unrelated, &accounts::signer(worker())).unwrap();
+    assert!(matches!(
+        sequencer.submit_tx(unrelated.clone()),
+        Err(workstream_core::Error::Unauthorized(_))
+    ));
+    assert!(matches!(
+        stf.execute_tx(&mut state, &unrelated),
+        Err(workstream_core::Error::Unauthorized(_))
+    ));
+    assert_eq!(sequencer.pending(), 0);
+    assert_eq!(sequencer.state().root(), before);
+    assert_eq!(state.root(), before);
+    assert_eq!(workstream_stf::get_nonce(&state, &sponsor(), 0).unwrap(), 0);
+    sequencer.submit_tx(valid.clone()).unwrap();
+    stf.execute_tx(&mut state, &valid).unwrap();
+    assert_eq!(workstream_stf::get_nonce(&state, &sponsor(), 0).unwrap(), 1);
 }
 
 fn register_worker() -> Transaction {

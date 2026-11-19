@@ -1,6 +1,7 @@
 use workstream_core::H256;
 use workstream_prover::{fold, risc0};
 use workstream_state::State;
+use workstream_stf::mvp_genesis_schedule;
 use workstream_stf::receipt::{Claim, Pair, Witness};
 
 #[test]
@@ -21,6 +22,7 @@ fn recursive_pair_checks_both_receipts_and_intermediate_root() {
             pre: root,
             post: root,
             transactions: vec![],
+            schedule: mvp_genesis_schedule().unwrap(),
         };
         let bytes = risc0::prove(&leaf, leaf_image, &w).unwrap();
         (

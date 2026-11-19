@@ -15,10 +15,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use workstream_core::hash::{Hash, H256};
+use workstream_core::proof::ProofCommitment;
 use workstream_core::traits::da::{DaClient, PostBlockRequest};
-use workstream_core::traits::prover::ProverApi;
+use workstream_core::traits::prover::{
+    ProofBundleResponse, ProveBlockRequest, ProveBlockTransition, ProverApi, ZkProof, ZkvmBackend,
+};
 use workstream_core::types::*;
 use workstream_core::{Error, Result};
+use workstream_prover::{encode_header_proof, InMemoryZkBackend, Prover};
 use workstream_state::State;
 use workstream_stf::StateTransitionFunction;
 use workstream_tx::TxValidator;
@@ -169,7 +173,11 @@ pub struct Sequencer {
     /// Data availability client used to publish produced blocks (issue #82).
     da: Arc<dyn DaClient>,
     /// zkVM prover used to generate block transition proofs (issue #83).
-    prover: Option<Arc<dyn ProverApi>>,
+    prover: Arc<dyn ProverApi>,
+    /// Optional backend used by the sequencer to verify the produced proof
+    /// before DA publication. Constructors that only receive a `ProverApi`
+    /// leave this unset and rely on the prover's own fail-closed behavior.
+    backend: Option<Arc<dyn ZkvmBackend>>,
 }
 
 impl Sequencer {
@@ -178,16 +186,55 @@ impl Sequencer {
         Self::with_da(stf, Arc::new(crate::da::InMemoryDaClient::new()))
     }
 
-    /// Create a sequencer wired to a data availability client (default prover).
+    /// Create a sequencer wired to a data availability client (default
+    /// in-memory prover/backend).
     pub fn with_da(stf: StateTransitionFunction, da: Arc<dyn DaClient>) -> Self {
-        let mut sequencer =
-            Self::with_da_and_prover(stf, da, Arc::new(workstream_prover::Prover::new()));
-        sequencer.prover = None;
-        sequencer
+        let backend: Arc<dyn ZkvmBackend> = Arc::new(InMemoryZkBackend::new(stf.clone()));
+        Self::with_da_and_backend(stf, da, backend)
     }
 
-    /// Create a sequencer wired to a data availability client and a zkVM
-    /// prover.
+    /// Create a sequencer whose proving backend is selected from the
+    /// environment (see [`workstream_prover::PROVER_BACKEND_ENV`]).
+    pub fn with_da_from_env(stf: StateTransitionFunction, da: Arc<dyn DaClient>) -> Result<Self> {
+        let prover = Prover::from_env(stf.clone())?;
+        let backend = prover.backend();
+        Ok(Sequencer {
+            stf,
+            state: State::new(),
+            mempool: Mempool::default(),
+            last_header: None,
+            da,
+            prover: Arc::new(prover),
+            backend: Some(backend),
+        })
+    }
+
+    /// Create a sequencer with a custom zkVM proving backend.
+    pub fn with_backend(stf: StateTransitionFunction, backend: Arc<dyn ZkvmBackend>) -> Self {
+        Self::with_da_and_backend(stf, Arc::new(crate::da::InMemoryDaClient::new()), backend)
+    }
+
+    /// Create a sequencer with custom DA and proving backends.
+    pub fn with_da_and_backend(
+        stf: StateTransitionFunction,
+        da: Arc<dyn DaClient>,
+        backend: Arc<dyn ZkvmBackend>,
+    ) -> Self {
+        let prover = Arc::new(Prover::with_backend(backend.clone()));
+        Sequencer {
+            stf,
+            state: State::new(),
+            mempool: Mempool::default(),
+            last_header: None,
+            da,
+            prover,
+            backend: Some(backend),
+        }
+    }
+
+    /// Create a sequencer wired to a data availability client and a `ProverApi`
+    /// adapter. Use [`Sequencer::with_da_and_backend`] when the sequencer
+    /// should also verify the produced proof before publication.
     pub fn with_da_and_prover(
         stf: StateTransitionFunction,
         da: Arc<dyn DaClient>,
@@ -199,7 +246,8 @@ impl Sequencer {
             mempool: Mempool::default(),
             last_header: None,
             da,
-            prover: Some(prover),
+            prover,
+            backend: None,
         }
     }
 
@@ -221,6 +269,29 @@ impl Sequencer {
     /// Current committed state.
     pub fn state(&self) -> &State {
         &self.state
+    }
+
+    fn validate_bundle(
+        bundle: &ProofBundleResponse,
+        transition: &ProveBlockTransition,
+        commitment: H256,
+        stateroot_pre: H256,
+        stateroot_post: H256,
+    ) -> Result<()> {
+        if bundle.version != 1
+            || bundle.api_version != 1
+            || bundle.guest_hash != transition.guest_hash
+            || bundle.commitment != commitment
+            || bundle.stateroot_pre != stateroot_pre
+            || bundle.stateroot_post != stateroot_post
+            || bundle.public_inputs != stateroot_post.as_bytes().to_vec()
+            || bundle.proof_bytes.is_empty()
+        {
+            return Err(Error::InvalidProof(
+                "prover bundle does not match the candidate transition".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Build the next block from up to `max_txs` mempool transactions.
@@ -301,64 +372,134 @@ impl Sequencer {
         da: Arc<dyn DaClient>,
         dir: &Path,
     ) -> Result<Self> {
+        let backend: Arc<dyn ZkvmBackend> = Arc::new(InMemoryZkBackend::new(stf.clone()));
+        Self::load_state_with_backend(stf, da, backend, dir)
+    }
+
+    /// Rebuild a sequencer from disk with a custom proving backend.
+    pub fn load_state_with_backend(
+        stf: StateTransitionFunction,
+        da: Arc<dyn DaClient>,
+        backend: Arc<dyn ZkvmBackend>,
+        dir: &Path,
+    ) -> Result<Self> {
         let state = State::load_from_dir(dir)?;
         let last_header = state.last_header.clone();
+        let prover = Arc::new(Prover::with_backend(backend.clone()));
         Ok(Sequencer {
             stf,
             state,
             mempool: Mempool::default(),
             last_header,
             da,
-            prover: None,
+            prover,
+            backend: Some(backend),
         })
     }
 
-    /// Build the next block, generate its zkVM proof, publish it to the data
-    /// availability layer, and record the resulting DA reference in the block
-    /// header.
+    /// Build the next block, generate its zkVM proof, publish the finalized
+    /// block to DA, and commit the staged sequencer only on success.
     ///
-    /// Fails closed (typed error) when the DA submission is unavailable; a
-    /// block that could not be made available must never be considered final.
+    /// Every fallible step (execution, proving, proof verification and DA)
+    /// operates on a clone. State, tip, mempool and seen hashes are installed
+    /// as one atomic commit, so an unavailable DA layer or failed proof leaves
+    /// the sequencer exactly as it was.
     pub async fn build_and_submit_block(&mut self, max_txs: Option<u32>) -> Result<Block> {
-        let stateroot_pre = self.state.root().hash();
+        let pre_state = self.state.clone();
+        let stateroot_pre = pre_state.root().hash();
+        let backend_witness = postcard::to_allocvec(&pre_state.snapshot())
+            .map_err(|e| Error::Serialization(format!("backend witness encode: {e}")))?;
+
         let mut staged = self.clone();
         let mut block = staged.build_block(max_txs)?;
-        let block_hash: [u8; 32] = *header_hash(&block.header)?.as_bytes();
-        let prover = self.prover.clone().unwrap_or_else(|| {
-            Arc::new(workstream_prover::Prover::with_backend(Arc::new(
-                workstream_prover::RiscZeroBackend::at(self.state.clone(), block.header.number),
-            )))
-        });
-        let bundle = prover
-            .prove_block(workstream_core::traits::prover::ProveBlockRequest {
+
+        // The fork is resolved from the candidate height, not the committed
+        // tip. Reject before proving if the header advertises another guest.
+        let fork = staged
+            .stf
+            .active_fork_at(block.header.number)
+            .ok_or_else(|| {
+                Error::Fork(format!("no active fork at height {}", block.header.number))
+            })?;
+        if fork.guest_hash != block.header.guest_hash {
+            return Err(Error::Fork(format!(
+                "block {} guest hash is not approved for fork {}",
+                block.header.number, fork.fork_id
+            )));
+        }
+
+        let stateroot_post = block.header.state_root.hash();
+        let proof_commitment =
+            ProofCommitment::new(&block.header, stateroot_pre, &block.transactions)?;
+        let commitment = proof_commitment.hash()?;
+        let block_hash = *commitment.as_bytes();
+        let transition = ProveBlockTransition {
+            version: 1,
+            height: block.header.number,
+            block_hash,
+            stateroot_pre,
+            stateroot_post,
+            guest_hash: block.header.guest_hash,
+            commitment: proof_commitment,
+            transactions: block.transactions.clone(),
+            backend_witness,
+        };
+        transition.validate()?;
+
+        let bundle: ProofBundleResponse = staged
+            .prover
+            .prove_block(ProveBlockRequest {
                 version: 1,
                 api_version: 1,
-                block_hash,
-                stateroot_pre,
-                transactions: block.transactions.clone(),
+                height: transition.height,
+                block_hash: transition.block_hash,
+                stateroot_pre: transition.stateroot_pre,
+                stateroot_post: transition.stateroot_post,
+                guest_hash: transition.guest_hash,
+                commitment: transition.commitment.clone(),
+                transactions: transition.transactions.clone(),
+                backend_witness: transition.backend_witness.clone(),
             })
             .await?;
-        let claim = workstream_stf::receipt::Claim::new(
-            block.header.number,
-            H256::from_bytes(block_hash),
+        Self::validate_bundle(
+            &bundle,
+            &transition,
+            commitment,
             stateroot_pre,
-            block.header.state_root.hash(),
-            &block.transactions,
+            stateroot_post,
         )?;
-        workstream_prover::risc0::verify(&bundle.proof_bytes, block.header.guest_hash, &claim)?;
-        block.header.proof = Some(Proof {
-            proof_data: bundle.proof_bytes,
-            proof_type: ProofType::ZkVm,
-        });
 
+        let proof = ZkProof {
+            version: 1,
+            proof_bytes: bundle.proof_bytes,
+            public_inputs: bundle.public_inputs,
+            guest_id: bundle.guest_id,
+            guest_hash: bundle.guest_hash,
+            stateroot_pre: bundle.stateroot_pre,
+            commitment: bundle.commitment,
+        };
+        if let Some(backend) = staged.backend.as_ref() {
+            if !backend.verify_block_transition(&transition, &proof)? {
+                return Err(Error::InvalidProof(
+                    "produced proof failed backend verification".into(),
+                ));
+            }
+        }
+
+        // Attach the self-describing envelope and stable DA key before
+        // publication. `header_hash` excludes `proof` and `da_ref` does not
+        // participate in the proof commitment, so the binding stays stable.
+        block.header.proof = Some(encode_header_proof(&proof)?);
+        block.header.da_ref = commitment;
         let block_bytes = serde_json::to_vec(&block)
             .map_err(|e| Error::Serialization(format!("block encode: {e}")))?;
-        let post = self
+        let post = staged
             .da
             .post_block(PostBlockRequest {
                 version: 1,
                 api_version: 1,
                 block_bytes: block_bytes.clone(),
+                commitment: Some(commitment),
             })
             .await?;
         if !post.available {
@@ -366,7 +507,9 @@ impl Sequencer {
                 "data availability submission unavailable".to_string(),
             ));
         }
-        block.header.da_ref = Hash::sha256(&block_bytes);
+
+        // Single commit point: all of state, header, mempool and seen hashes
+        // come from `staged` together.
         staged.last_header = Some(block.header.clone());
         staged.state.last_header = staged.last_header.clone();
         *self = staged;
@@ -401,10 +544,6 @@ impl Sequencer {
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/support/accounts.rs"]
-mod accounts;
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use workstream_crypto::signature;
@@ -415,12 +554,23 @@ mod tests {
     };
     use workstream_tx::TxBuilder;
 
-    use super::accounts::{account, signer};
+    /// Deterministic Ed25519 signer for admission fixtures: signatures must
+    /// be reproducible so identical transactions hash identically (dedup) and
+    /// replay enforcement stays deterministic.
+    fn signing_key(tag: u8) -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[tag; 32])
+    }
 
-    fn seq_tx(acct: AccountId, seq: u64, t: ActionType, payload: Vec<u8>) -> Transaction {
+    /// Account IDs are derived from the signing key so the fixture satisfies
+    /// transaction admission's signer/account ownership check.
+    fn account(tag: u8) -> AccountId {
+        workstream_core::Hash::sha256(signing_key(tag).verifying_key().as_bytes())
+    }
+
+    fn seq_tx(tag: u8, seq: u64, t: ActionType, payload: Vec<u8>) -> Transaction {
         let mut tx = TxBuilder::new()
             .chain_id(1)
-            .account(acct)
+            .account(account(tag))
             .nonce(0, seq)
             .add_action(t, payload)
             .fee(FeeSpec {
@@ -430,7 +580,7 @@ mod tests {
             })
             .build()
             .unwrap();
-        signature::sign_tx_ed25519(&mut tx, &signer(acct)).unwrap();
+        signature::sign_tx_ed25519(&mut tx, &signing_key(tag)).unwrap();
         tx
     }
 
@@ -455,11 +605,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires configured RISC Zero guest"]
     async fn sequencer_build_and_submit_block_publishes_to_da() {
-        let mut schedule = mvp_genesis_schedule().unwrap();
-        schedule.forks[0].guest_hash = workstream_prover::risc0::configured_id().unwrap();
-        let stf = StateTransitionFunction::with_schedule(schedule).unwrap();
+        let stf = StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap()).unwrap();
         let da = Arc::new(crate::da::InMemoryDaClient::new());
         let mut sequencer = Sequencer::with_da(stf, da);
 
@@ -476,19 +623,14 @@ mod tests {
 
         let pending_before = sequencer.pending();
         let da_ref = sequencer
-            .submit_tx_direct(seq_tx(
-                account(0x11),
-                0,
-                ActionType::ActorRegister,
-                b"x".to_vec(),
-            ))
+            .submit_tx_direct(seq_tx(0x11, 0, ActionType::ActorRegister, b"x".to_vec()))
             .await
             .unwrap();
         assert_ne!(da_ref, H256::ZERO);
         // Direct submission bypasses mempool admission/queueing.
         assert_eq!(sequencer.pending(), pending_before);
 
-        let mut bad = seq_tx(account(0x11), 1, ActionType::ActorRegister, b"y".to_vec());
+        let mut bad = seq_tx(0x11, 1, ActionType::ActorRegister, b"y".to_vec());
         bad.signature = None;
         let err = sequencer.submit_tx_direct(bad).await.unwrap_err();
         assert!(matches!(err, Error::Validation(_)), "got {err:?}");
@@ -499,20 +641,8 @@ mod tests {
         let empty = tx_root(&[]);
         assert_eq!(empty, tx_root(&[]));
 
-        let a = tx_hash(&seq_tx(
-            account(1),
-            0,
-            ActionType::ActorRegister,
-            b"x".to_vec(),
-        ))
-        .unwrap();
-        let b = tx_hash(&seq_tx(
-            account(2),
-            0,
-            ActionType::ActorRegister,
-            b"y".to_vec(),
-        ))
-        .unwrap();
+        let a = tx_hash(&seq_tx(1, 0, ActionType::ActorRegister, b"x".to_vec())).unwrap();
+        let b = tx_hash(&seq_tx(2, 0, ActionType::ActorRegister, b"y".to_vec())).unwrap();
 
         assert_ne!(a, b);
         assert_eq!(tx_root(&[a]), tx_root(&[a]));
@@ -555,7 +685,7 @@ mod tests {
     #[test]
     fn mempool_admission_and_dedup() {
         let mut mempool = Mempool::new(3);
-        let tx = seq_tx(account(1), 0, ActionType::ActorRegister, b"a".to_vec());
+        let tx = seq_tx(1, 0, ActionType::ActorRegister, b"a".to_vec());
         let hash = mempool.submit(tx.clone()).unwrap();
         assert_eq!(mempool.len(), 1);
 
@@ -565,7 +695,7 @@ mod tests {
         assert_ne!(hash, H256::ZERO);
 
         // well-formedness: empty actions and Zero fee rejected
-        let mut bad = seq_tx(account(2), 0, ActionType::ActorRegister, b"b".to_vec());
+        let mut bad = seq_tx(2, 0, ActionType::ActorRegister, b"b".to_vec());
         bad.actions.clear();
         assert!(matches!(
             mempool.submit(bad),
@@ -577,26 +707,16 @@ mod tests {
     fn mempool_bounded() {
         let mut mempool = Mempool::new(1);
         mempool
-            .submit(seq_tx(
-                account(1),
-                0,
-                ActionType::ActorRegister,
-                b"a".to_vec(),
-            ))
+            .submit(seq_tx(1, 0, ActionType::ActorRegister, b"a".to_vec()))
             .unwrap();
         assert!(mempool
-            .submit(seq_tx(
-                account(1),
-                1,
-                ActionType::ActorRegister,
-                b"b".to_vec()
-            ))
+            .submit(seq_tx(1, 1, ActionType::ActorRegister, b"b".to_vec()))
             .is_err());
     }
 
     fn actor_set() -> (Transaction, Transaction) {
         let sponsor = seq_tx(
-            account(0x11),
+            0x11,
             0,
             ActionType::ActorRegister,
             encode_payload(&ActorRegisterPayload {
@@ -605,7 +725,7 @@ mod tests {
             .unwrap(),
         );
         let worker = seq_tx(
-            account(0x22),
+            0x22,
             0,
             ActionType::ActorRegister,
             encode_payload(&ActorRegisterPayload {
@@ -618,7 +738,7 @@ mod tests {
 
     fn grant_tx(cap: Capability) -> Transaction {
         seq_tx(
-            account(0x11),
+            0x11,
             1,
             ActionType::ActorGrant,
             encode_payload(&ActorGrantPayload {
@@ -633,7 +753,7 @@ mod tests {
     /// next expected nonce (0 register, 1 grant, 2 project in the full flow).
     fn project_tx(seq: u64) -> Transaction {
         seq_tx(
-            account(0x11),
+            0x11,
             seq,
             ActionType::ProjectCreate,
             encode_payload(&ProjectCreatePayload {
@@ -685,7 +805,7 @@ mod tests {
         // block) but references a nonexistent task: dropped at execution
         sequencer
             .submit_tx(seq_tx(
-                account(0x22),
+                0x22,
                 1,
                 ActionType::TaskClaim,
                 encode_payload(&workstream_stf::TaskIdPayload { task: H256::ZERO }).unwrap(),

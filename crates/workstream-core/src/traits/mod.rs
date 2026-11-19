@@ -11,7 +11,7 @@ pub mod verifier;
 pub use da::DaClient;
 pub use prover::ProverApi;
 pub use sequencer::SequencerApi;
-pub use verifier::VerifierApi;
+pub use verifier::{BlockProofVerifier, VerifierApi};
 
 /// Status message for version negotiation during component handshake
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

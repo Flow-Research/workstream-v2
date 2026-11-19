@@ -1,11 +1,16 @@
-//! Deterministic MVP guest statement. The private witness contains leaf
-//! data, not trusted cached tree nodes. The verifier supplies its own claim.
+//! Deterministic guest statement for an authenticated STF transition.
+//!
+//! The private witness contains leaf state data and the fork schedule, not
+//! trusted cached tree nodes. The verifier supplies its own claim; no value
+//! from the receipt's journal is treated as a trust root.
 use crate::{mvp_genesis_schedule, StateTransitionFunction};
 use serde::{Deserialize, Serialize};
+use workstream_core::fork::ForkSchedule;
+use workstream_core::proof::transactions_commitment;
 use workstream_core::{Error, Hash, Result, Transaction, H256};
 use workstream_state::{State, StateSnapshot};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Witness {
     pub before: StateSnapshot,
     pub height: u64,
@@ -13,6 +18,9 @@ pub struct Witness {
     pub pre: H256,
     pub post: H256,
     pub transactions: Vec<Transaction>,
+    /// Fork rules the guest executes under. Bound by the host before proving;
+    /// the guest rebuilds its STF from this schedule.
+    pub schedule: ForkSchedule,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,15 +66,13 @@ impl Claim {
         post: H256,
         transactions: &[Transaction],
     ) -> Result<Self> {
-        let bytes =
-            postcard::to_allocvec(transactions).map_err(|e| Error::Serialization(e.to_string()))?;
         Ok(Self {
             version: 1,
             height,
             block_hash,
             pre,
             post,
-            transactions_hash: Hash::sha256_concat(&[b"WS:v1:zk-transactions:", &bytes]),
+            transactions_hash: transactions_commitment(transactions)?,
         })
     }
 }
@@ -78,7 +84,7 @@ pub fn execute(w: Witness) -> Result<Claim> {
             "incorrect starting state or height".into(),
         ));
     }
-    let stf = StateTransitionFunction::with_schedule(mvp_genesis_schedule()?)?;
+    let stf = StateTransitionFunction::with_schedule(w.schedule)?;
     let fork = stf
         .active_fork_at(w.height)
         .ok_or_else(|| Error::Fork("unknown height".into()))?;
@@ -92,4 +98,24 @@ pub fn execute(w: Witness) -> Result<Claim> {
         return Err(Error::InvalidProof("incorrect resulting state".into()));
     }
     Claim::new(w.height, w.block_hash, w.pre, w.post, &w.transactions)
+}
+
+/// Default helper for tests and tooling that do not carry an explicit schedule.
+pub fn mvp_witness(
+    before: StateSnapshot,
+    height: u64,
+    transactions: Vec<Transaction>,
+) -> Result<Witness> {
+    let schedule = mvp_genesis_schedule()?;
+    let state = State::from_snapshot(before.clone())?;
+    let pre = state.root().hash();
+    Ok(Witness {
+        before,
+        height,
+        block_hash: Hash::sha256(b"workstream/default-witness"),
+        pre,
+        post: pre,
+        transactions,
+        schedule,
+    })
 }

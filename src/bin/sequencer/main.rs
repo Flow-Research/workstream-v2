@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
     // Event loop: mempool -> block production -> DA submission, with the
     // censorship-resistance escape hatch (DA-direct transaction submissions).
     let stf = StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap()).unwrap();
-    let mut sequencer = Sequencer::with_da(stf, Arc::new(InMemoryDaClient::new()));
+    let mut sequencer = Sequencer::with_da_from_env(stf, Arc::new(InMemoryDaClient::new()))?;
 
     let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(10));
     loop {

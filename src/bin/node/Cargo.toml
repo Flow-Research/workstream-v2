@@ -21,6 +21,7 @@ workstream-stf = { path = "../../../crates/workstream-stf" }
 workstream-sequencer = { path = "../sequencer" }
 workstream-prover = { path = "../prover" }
 workstream-tx = { path = "../../../crates/workstream-tx" }
+postcard = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

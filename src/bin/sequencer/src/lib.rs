@@ -798,6 +798,25 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn preview_preserves_pending_candidate() {
+        use workstream_core::traits::sequencer::{BuildBlockRequest, SequencerApi};
+        let mut writer = mvp_sequencer();
+        writer.submit_tx(actor_set().0).unwrap();
+        let api = SequencerApiImpl::from_sequencer(writer);
+        let request = BuildBlockRequest {
+            version: 1,
+            api_version: 1,
+            max_txs: Some(1),
+        };
+        let first = api.preview_block(request.clone()).await.unwrap();
+        let second = api.preview_block(request).await.unwrap();
+        assert_eq!(first.tx_count, 1);
+        assert_eq!(first.block_hash, second.block_hash);
+        assert_eq!(first.state_root, second.state_root);
+        assert_eq!(api.get_mempool_status().await.unwrap().pending_count, 1);
+    }
+
     #[test]
     fn build_empty_block_links_genesis() {
         let mut sequencer = mvp_sequencer();

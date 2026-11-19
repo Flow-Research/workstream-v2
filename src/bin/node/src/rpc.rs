@@ -286,11 +286,11 @@ impl RpcServer {
                     .map_err(|e| rpc_internal(&e))?;
                 Ok(serde_json::to_value(resp).map_err(rpc_encode)?)
             }
-            "workstream.sequencer.buildBlock" => {
+            "workstream.sequencer.previewBlock" => {
                 let req = parse_params::<BuildBlockRequest>(params)?;
                 let resp = self
                     .sequencer
-                    .build_block(req)
+                    .preview_block(req)
                     .await
                     .map_err(|e| rpc_internal(&e))?;
                 Ok(serde_json::to_value(resp).map_err(rpc_encode)?)

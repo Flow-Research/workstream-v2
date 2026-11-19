@@ -22,8 +22,8 @@ pub trait SequencerApi: Send + Sync {
     /// Get mempool status
     async fn get_mempool_status(&self) -> Result<MempoolStatus>;
 
-    /// Build a block from mempool transactions
-    async fn build_block(&self, req: BuildBlockRequest) -> Result<BlockHeaderDraft>;
+    /// Preview a candidate without draining transactions, publishing, or advancing the tip.
+    async fn preview_block(&self, req: BuildBlockRequest) -> Result<BlockHeaderDraft>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

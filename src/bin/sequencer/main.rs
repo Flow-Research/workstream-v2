@@ -12,6 +12,9 @@ use workstream_stf::{mvp_genesis_schedule, StateTransitionFunction};
 #[command(name = "workstream-sequencer")]
 #[command(about = "WorkStream sequencer - orders transactions into blocks", long_about = None)]
 struct Args {
+    /// Serve Prometheus metrics and health checks on loopback.
+    #[arg(long)]
+    metrics_port: Option<u16>,
     #[arg(short, long)]
     port: Option<u16>,
 
@@ -33,6 +36,7 @@ async fn main() -> Result<()> {
     // Configure logging from config
     std::env::set_var("RUST_LOG", &config.log_level);
     logging::init_tracing();
+    let monitor = workstream_ops::Monitor::start(args.metrics_port).await?;
 
     info!("Starting WorkStream Sequencer on port {}", config.port);
     info!("Sovereign zkRollup for governed work coordination");
@@ -52,5 +56,6 @@ async fn main() -> Result<()> {
                 block.header.number, block.header.da_ref
             );
         }
+        monitor.heartbeat(true);
     }
 }

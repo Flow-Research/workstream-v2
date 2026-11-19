@@ -11,6 +11,7 @@ name = "prover"
 path = "main.rs"
 
 [dependencies]
+workstream-ops = { path = "../../../crates/workstream-ops" }
 risc0-zkvm = { version = "=3.0.3", default-features = false, features = ["client", "disable-dev-mode"] }
 risc0-binfmt = "=3.0.2"
 risc0-zkos-v1compat = "=2.2.0"

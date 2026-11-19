@@ -149,6 +149,7 @@ impl ProverApi for Prover {
         let transition = req.into_transition();
         let proof = self.backend.prove_block_transition(&transition).await?;
         proof.validate()?;
+        workstream_ops::PROOFS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let public_inputs = proof.public_inputs;
         let stateroot_post = H256::from_bytes(
             public_inputs

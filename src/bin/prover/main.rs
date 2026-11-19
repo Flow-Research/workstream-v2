@@ -12,6 +12,9 @@ use workstream_stf::{mvp_genesis_schedule, StateTransitionFunction};
 #[command(name = "workstream-prover")]
 #[command(about = "WorkStream prover - generates zkVM proofs for state transitions", long_about = None)]
 struct Args {
+    /// Serve Prometheus metrics and health checks on loopback.
+    #[arg(long)]
+    metrics_port: Option<u16>,
     #[arg(short, long)]
     blocks: Option<String>,
 
@@ -39,6 +42,7 @@ async fn main() -> Result<()> {
     // Configure logging from config
     std::env::set_var("RUST_LOG", &config.log_level);
     logging::init_tracing();
+    let monitor = workstream_ops::Monitor::start(args.metrics_port).await?;
 
     info!("Starting WorkStream Prover");
     info!("Using zkVM: {}", config.zkvm);
@@ -57,6 +61,7 @@ async fn main() -> Result<()> {
     loop {
         tick.tick().await;
         let status = prover.get_prover_status().await?;
+        monitor.heartbeat(status.available);
         debug!("prover heartbeat: available={}", status.available);
     }
 }

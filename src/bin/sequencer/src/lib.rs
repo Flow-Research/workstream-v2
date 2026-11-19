@@ -541,6 +541,7 @@ impl Sequencer {
                 block: block.clone(),
             })
             .await?;
+        workstream_ops::BLOCKS_SUBMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Single commit point: all of state, header, mempool and seen hashes
         // come from `staged` together.

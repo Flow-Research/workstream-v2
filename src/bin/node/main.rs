@@ -20,6 +20,9 @@ use workstream_stf::{mvp_genesis_schedule, StateTransitionFunction};
 #[command(name = "workstream-node")]
 #[command(about = "WorkStream full node - validates proofs and maintains canonical state", long_about = None)]
 struct Args {
+    /// Serve Prometheus metrics and health checks on loopback.
+    #[arg(long)]
+    metrics_port: Option<u16>,
     #[arg(short, long)]
     p2p_port: Option<u16>,
 
@@ -47,6 +50,7 @@ async fn main() -> Result<()> {
     // Configure logging from config
     std::env::set_var("RUST_LOG", &config.log_level);
     logging::init_tracing();
+    let monitor = workstream_ops::Monitor::start(args.metrics_port).await?;
 
     info!(
         "Starting WorkStream Full Node on P2P port {}",
@@ -68,25 +72,22 @@ async fn main() -> Result<()> {
         Arc::new(InMemoryP2pNetwork::new()) as Arc<dyn P2pNetwork>,
         indexer,
     );
-    if let Some(port) = config.rpc_port {
+    let rpc_task = if let Some(port) = config.rpc_port {
         let server = rpc_server.clone();
-        tokio::spawn(async move {
-            server
-                .serve(
-                    tokio::net::TcpListener::bind(("127.0.0.1", port))
-                        .await
-                        .expect("rpc bind"),
-                )
-                .await;
-        });
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .map_err(|e| workstream_core::Error::Io(format!("RPC bind: {e}")))?;
+        Some(tokio::spawn(async move { server.serve(listener).await }))
     } else {
         info!("RPC server disabled (no rpc_port configured)");
-    }
+        None
+    };
 
     // Idle loop keeps the process alive until real event loops land.
     let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(10));
     loop {
         tick.tick().await;
+        monitor.heartbeat(rpc_task.as_ref().is_none_or(|task| !task.is_finished()));
         debug!("node heartbeat");
     }
 }

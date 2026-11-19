@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Approve WorkStream action</title>
+    <style>
+      body { font: 14px/1.5 system-ui, sans-serif; margin: 16px; }
+      h1 { font-size: 16px; }
+      dt { font-weight: 600; margin-top: 8px; }
+      dd { margin: 0; overflow-wrap: anywhere; }
+      button { margin: 16px 8px 0 0; padding: 6px 12px; }
+      #status { color: #444; }
+    </style>
+  </head>
+  <body>
+    <h1>Approve WorkStream action</h1>
+    <dl>
+      <dt>Origin</dt><dd id="origin">loading…</dd>
+      <dt>Chain</dt><dd id="chain">loading…</dd>
+      <dt>Account</dt><dd id="account">loading…</dd>
+      <dt>Action</dt><dd id="action">loading…</dd>
+      <dt>Request ID</dt><dd id="request-id">loading…</dd>
+    </dl>
+    <button id="approve" type="button">Approve</button>
+    <button id="reject" type="button">Reject</button>
+    <p id="status" role="status"></p>
+    <script type="module" src="approval.js"></script>
+  </body>
+</html>

@@ -18,12 +18,15 @@ use std::sync::Arc;
 use workstream_core::fork::{validate_header_fork, ForkSchedule};
 use workstream_core::hash::{Hash, H256};
 use workstream_core::proof::ProofCommitment;
+use workstream_core::traits::p2p::{GetBlockRequest, P2pNetwork};
 use workstream_core::traits::prover::{ProveBlockTransition, ZkvmBackend};
 use workstream_core::traits::verifier::BlockProofVerifier;
 use workstream_core::types::*;
 use workstream_core::{Error, Result};
 use workstream_prover::{decode_header_proof, InMemoryVerifier};
-use workstream_sequencer::{header_hash, tx_hash, tx_root, GENESIS_PARENT_HASH};
+use workstream_sequencer::{
+    header_hash, tx_hash, tx_root, InMemoryP2pNetwork, GENESIS_PARENT_HASH,
+};
 use workstream_state::State;
 use workstream_stf::StateTransitionFunction;
 
@@ -90,6 +93,8 @@ pub struct Node<S: BlockSource> {
     schedule: ForkSchedule,
     state: State,
     source: S,
+    /// P2P gossip network for block propagation (issue #84).
+    network: Arc<dyn P2pNetwork>,
     /// zkVM proof verifier (SEC-002/#83); attached proofs are checked before
     /// any state is committed.
     verifier: Arc<dyn BlockProofVerifier>,
@@ -110,6 +115,19 @@ impl<S: BlockSource> Node<S> {
             source,
             Arc::new(InMemoryVerifier::new(stf)),
         )
+    }
+
+    /// Create a node that syncs from the supplied P2P network.
+    pub fn with_network(
+        stf: StateTransitionFunction,
+        schedule: ForkSchedule,
+        source: S,
+        network: Arc<dyn P2pNetwork>,
+    ) -> Self {
+        Self {
+            network,
+            ..Self::new(stf, schedule, source)
+        }
     }
 
     /// Create a node with a custom proof-verification backend.
@@ -142,6 +160,7 @@ impl<S: BlockSource> Node<S> {
             schedule,
             state: State::new(),
             source,
+            network: Arc::new(InMemoryP2pNetwork::new()),
             verifier,
             require_proof: false,
             last_header: None,
@@ -193,6 +212,33 @@ impl<S: BlockSource> Node<S> {
         let mut results = Vec::new();
         while let Some(result) = self.apply_next()? {
             results.push(result);
+        }
+        Ok(results)
+    }
+
+    /// Apply blocks served by the P2P gossip network, starting at the next
+    /// expected height, until the network has no block at that height.
+    ///
+    /// Blocks served here are subject to the same full verification pipeline
+    /// (parent, fork, tx root, execution, state root, zkVM proof) as source
+    /// blocks; a failing block stops the sync without committing state.
+    pub async fn sync_via_network(&mut self) -> Result<Vec<ApplyResult>> {
+        let mut results = Vec::new();
+        let mut height = self.tip() + 1;
+        loop {
+            let response = self
+                .network
+                .get_block(GetBlockRequest {
+                    version: 1,
+                    api_version: 1,
+                    height,
+                })
+                .await?;
+            let Some(block) = response.block else {
+                break;
+            };
+            results.push(self.apply_block(block)?);
+            height = self.tip() + 1;
         }
         Ok(results)
     }
@@ -602,6 +648,66 @@ mod tests {
         assert!(matches!(err, Error::Consensus(_)));
         assert!(err.to_string().contains("zk proof verification failed"));
         assert_eq!(node.tip(), 0); // unchanged after rejection
+    }
+
+    #[tokio::test]
+    async fn p2p_network_publishes_and_gets_block() {
+        let (blocks, _) = build_chain(vec![vec![], vec![]]);
+        let network = InMemoryP2pNetwork::new();
+        for block in &blocks {
+            network
+                .publish_block(workstream_core::traits::p2p::PublishBlockRequest {
+                    version: 1,
+                    api_version: 1,
+                    block: block.clone(),
+                })
+                .await
+                .unwrap();
+        }
+        let response = network
+            .get_block(workstream_core::traits::p2p::GetBlockRequest {
+                version: 1,
+                api_version: 1,
+                height: 1,
+            })
+            .await
+            .unwrap();
+        assert!(response.block.is_some());
+        let missing = network
+            .get_block(workstream_core::traits::p2p::GetBlockRequest {
+                version: 1,
+                api_version: 1,
+                height: 99,
+            })
+            .await
+            .unwrap();
+        assert!(missing.block.is_none());
+    }
+
+    #[tokio::test]
+    async fn node_syncs_blocks_via_network() {
+        let (blocks, _) = build_chain(vec![vec![], vec![]]);
+        let network = InMemoryP2pNetwork::new();
+        for block in &blocks {
+            network
+                .publish_block(workstream_core::traits::p2p::PublishBlockRequest {
+                    version: 1,
+                    api_version: 1,
+                    block: block.clone(),
+                })
+                .await
+                .unwrap();
+        }
+
+        let mut node = Node::with_network(
+            mvp_stf(),
+            mvp_schedule(),
+            MemoryBlockSource::new(),
+            Arc::new(network),
+        );
+        let results = node.sync_via_network().await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(node.tip(), 2);
     }
 
     #[test]

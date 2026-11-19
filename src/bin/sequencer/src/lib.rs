@@ -17,6 +17,7 @@ use std::sync::Arc;
 use workstream_core::hash::{Hash, H256};
 use workstream_core::proof::ProofCommitment;
 use workstream_core::traits::da::{DaClient, PostBlockRequest};
+use workstream_core::traits::p2p::{P2pNetwork, PublishBlockRequest};
 use workstream_core::traits::prover::{
     ProofBundleResponse, ProveBlockRequest, ProveBlockTransition, ProverApi, ZkProof, ZkvmBackend,
 };
@@ -28,7 +29,9 @@ use workstream_stf::StateTransitionFunction;
 use workstream_tx::TxValidator;
 
 pub mod da;
+pub mod p2p;
 pub use da::InMemoryDaClient;
+pub use p2p::InMemoryP2pNetwork;
 
 /// Fixed block slot spacing in seconds (consensus-derived timestamp).
 pub const SLOT_SECONDS: u64 = 12;
@@ -173,6 +176,8 @@ pub struct Sequencer {
     /// Data availability client used to publish produced blocks (issue #82).
     da: Arc<dyn DaClient>,
     /// zkVM prover used to generate block transition proofs (issue #83).
+    /// P2P gossip network used to propagate produced blocks (issue #84).
+    p2p: Arc<dyn P2pNetwork>,
     prover: Arc<dyn ProverApi>,
     /// Optional backend used by the sequencer to verify the produced proof
     /// before DA publication. Constructors that only receive a `ProverApi`
@@ -205,6 +210,7 @@ impl Sequencer {
             last_header: None,
             da,
             prover: Arc::new(prover),
+            p2p: Arc::new(crate::p2p::InMemoryP2pNetwork::new()),
             backend: Some(backend),
         })
     }
@@ -228,6 +234,7 @@ impl Sequencer {
             last_header: None,
             da,
             prover,
+            p2p: Arc::new(crate::p2p::InMemoryP2pNetwork::new()),
             backend: Some(backend),
         }
     }
@@ -240,12 +247,29 @@ impl Sequencer {
         da: Arc<dyn DaClient>,
         prover: Arc<dyn ProverApi>,
     ) -> Self {
+        Self::with_da_and_prover_and_p2p(
+            stf,
+            da,
+            prover,
+            Arc::new(crate::p2p::InMemoryP2pNetwork::new()),
+        )
+    }
+
+    /// Create a sequencer wired to a data availability client, a zkVM prover,
+    /// and a P2P gossip network.
+    pub fn with_da_and_prover_and_p2p(
+        stf: StateTransitionFunction,
+        da: Arc<dyn DaClient>,
+        prover: Arc<dyn ProverApi>,
+        p2p: Arc<dyn P2pNetwork>,
+    ) -> Self {
         Sequencer {
             stf,
             state: State::new(),
             mempool: Mempool::default(),
             last_header: None,
             da,
+            p2p,
             prover,
             backend: None,
         }
@@ -254,6 +278,11 @@ impl Sequencer {
     /// Submit a transaction to the mempool (see [`Mempool::submit`]).
     pub fn submit_tx(&mut self, tx: Transaction) -> Result<H256> {
         self.mempool.submit(tx)
+    }
+
+    /// P2P gossip network the sequencer publishes proved blocks to.
+    pub fn p2p(&self) -> &Arc<dyn P2pNetwork> {
+        &self.p2p
     }
 
     /// Number of pending transactions.
@@ -393,6 +422,7 @@ impl Sequencer {
             last_header,
             da,
             prover,
+            p2p: Arc::new(crate::p2p::InMemoryP2pNetwork::new()),
             backend: Some(backend),
         })
     }
@@ -507,6 +537,13 @@ impl Sequencer {
                 "data availability submission unavailable".to_string(),
             ));
         }
+        self.p2p
+            .publish_block(PublishBlockRequest {
+                version: 1,
+                api_version: 1,
+                block: block.clone(),
+            })
+            .await?;
 
         // Single commit point: all of state, header, mempool and seen hashes
         // come from `staged` together.

@@ -155,7 +155,8 @@ pub async fn serve(
         .await
         .map_err(ipc::io_err)?;
     let schedule = stf.fork_schedule().clone();
-    let projection = Projection::open(schedule.chain_id).await?.map(Arc::new);
+    let chain_id = schedule.chain_id;
+    let projection = Projection::open(chain_id).await?.map(Arc::new);
     let mut node = Node::with_backend(stf, schedule, MemoryBlockSource::new(), prover.backend())
         .require_proof();
     let (tx, tip) = tokio::sync::watch::channel((0, node.state_root(), None));
@@ -176,10 +177,60 @@ pub async fn serve(
             included: included.clone(),
             client: client.clone(),
             writer: writer.clone(),
-            tip,
+            tip: tip.clone(),
             projection: projection.clone(),
         },
     );
+    // Browser-safe HTTPS API (issue #130). Optional; when enabled it reuses
+    // the node identity's server certificate and the verifier's read state.
+    // No signing, DA, P2P or proving capability crosses this boundary.
+    let api = async {
+        let Some(port) = std::env::var("WORKSTREAM_API_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+        else {
+            // No browser API configured: this task never completes so the
+            // node's main select loop keeps running on sync + RPC only.
+            return std::future::pending::<Result<()>>().await;
+        };
+        let identity_dir =
+            PathBuf::from(std::env::var("WORKSTREAM_IDENTITY_DIR").map_err(|_| {
+                Error::Config("browser API requires WORKSTREAM_IDENTITY_DIR".into())
+            })?);
+        let tls = workstream_api::load_tls_config(&identity_dir).map_err(Error::Config)?;
+        // Loopback by default. An operator may opt into a wider bind (e.g. a
+        // container bridge) with WORKSTREAM_API_BIND; CORS still fails closed.
+        let bind: std::net::Ipv4Addr = std::env::var("WORKSTREAM_API_BIND")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(std::net::Ipv4Addr::LOCALHOST);
+        let listener = tokio::net::TcpListener::bind((bind, port))
+            .await
+            .map_err(ipc::io_err)?;
+        let allowed_origins = std::env::var("WORKSTREAM_API_ORIGINS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect();
+        let config = workstream_api::ApiConfig {
+            allowed_origins,
+            ..workstream_api::ApiConfig::default()
+        };
+        let backend = crate::browser_api::NodeApiBackend::new(
+            included.clone(),
+            client.clone(),
+            writer.clone(),
+            chain_id,
+            tip,
+            projection.clone(),
+        );
+        let state = workstream_api::ApiState::new(backend, config);
+        workstream_api::serve_tls(listener, tls, state)
+            .await
+            .map_err(|error| Error::Io(format!("browser API: {error}")))
+    };
     let sync = async {
         loop {
             let height = node
@@ -322,5 +373,9 @@ pub async fn serve(
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
     };
-    tokio::select! {result=sync=>result,_=rpc=>Err(Error::Io("connected node listener stopped".into()))}
+    tokio::select! {
+        result = sync => result,
+        result = api => result,
+        _ = rpc => Err(Error::Io("connected node listener stopped".into())),
+    }
 }

@@ -33,6 +33,8 @@ use workstream_stf::StateTransitionFunction;
 use workstream_core::account::{Account, ValidatorContext, ValidatorSet};
 
 #[cfg(unix)]
+pub mod browser_api;
+#[cfg(unix)]
 pub mod connected;
 pub mod indexer;
 pub mod projection;

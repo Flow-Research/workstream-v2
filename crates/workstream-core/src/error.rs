@@ -44,6 +44,14 @@ pub enum Error {
     #[error("Invalid state transition: {0}")]
     InvalidTransition(String),
 
+    /// Consensus-critical SMT depth limit was exceeded during state hashing.
+    ///
+    /// Fail-closed typed error (SEC-005): the SMT is a fixed-depth (256-bit)
+    /// tree, so an overflow means the state cannot be hashed safely. The
+    /// transition must be rejected, never panicked on.
+    #[error("State error: depth limit exceeded")]
+    DepthLimitExceeded,
+
     #[error("Determinism violation: {0}")]
     Determinism(String),
 
@@ -75,7 +83,9 @@ pub enum Error {
 impl Error {
     pub fn category(&self) -> ErrorCategory {
         match self {
-            Error::State(_) | Error::InvalidTransition(_) => ErrorCategory::State,
+            Error::State(_) | Error::InvalidTransition(_) | Error::DepthLimitExceeded => {
+                ErrorCategory::State
+            }
             Error::Transaction(_) => ErrorCategory::Transaction,
             Error::Crypto(_) | Error::InvalidProof(_) | Error::InvalidSignature => {
                 ErrorCategory::Crypto
@@ -100,7 +110,10 @@ impl Error {
     pub fn is_fatal(&self) -> bool {
         matches!(
             self,
-            Error::Determinism(_) | Error::Consensus(_) | Error::InvalidSignature
+            Error::Determinism(_)
+                | Error::Consensus(_)
+                | Error::DepthLimitExceeded
+                | Error::InvalidSignature
         )
     }
 }
@@ -158,6 +171,11 @@ mod tests {
             Error::Consensus("x".to_string()).category(),
             ErrorCategory::Consensus
         );
+        assert_eq!(
+            Error::DepthLimitExceeded.category(),
+            ErrorCategory::State,
+            "an SMT depth overflow is a state-integrity failure, not a network fault"
+        );
     }
 
     #[test]
@@ -166,12 +184,17 @@ mod tests {
         assert!(Error::Io("x".to_string()).is_retryable());
         assert!(!Error::Validation("x".to_string()).is_retryable());
         assert!(!Error::InvalidSignature.is_retryable());
+        assert!(
+            !Error::DepthLimitExceeded.is_retryable(),
+            "a depth overflow is deterministic, not transient"
+        );
     }
 
     #[test]
     fn test_error_fatal() {
         assert!(Error::Determinism("x".to_string()).is_fatal());
         assert!(Error::Consensus("x".to_string()).is_fatal());
+        assert!(Error::DepthLimitExceeded.is_fatal());
         assert!(Error::InvalidSignature.is_fatal());
         assert!(!Error::Timeout("x".to_string()).is_fatal());
         assert!(!Error::Validation("x".to_string()).is_fatal());
@@ -187,6 +210,9 @@ mod tests {
 
         let err = Error::InvalidSignature;
         assert_eq!(err.to_string(), "Invalid signature");
+
+        let err = Error::DepthLimitExceeded;
+        assert_eq!(err.to_string(), "State error: depth limit exceeded");
     }
 
     #[test]
@@ -204,6 +230,8 @@ mod tests {
             Error::InvalidTransition("x".to_string()).code(),
             ErrorCode::E1001
         );
+        assert_eq!(Error::DepthLimitExceeded.code(), ErrorCode::E1002);
+        assert_eq!(Error::DepthLimitExceeded.code().as_u32(), 1002);
         assert_eq!(Error::Transaction("x".to_string()).code(), ErrorCode::E2000);
         assert_eq!(Error::Crypto("x".to_string()).code(), ErrorCode::E3000);
         assert_eq!(
@@ -290,6 +318,8 @@ pub enum ErrorCode {
     E1000 = 1000,
     /// State transition error
     E1001 = 1001,
+    /// State depth limit exceeded (fail-closed SMT overflow)
+    E1002 = 1002,
     /// Transaction error
     E2000 = 2000,
     /// Crypto error
@@ -334,6 +364,7 @@ impl From<&Error> for ErrorCode {
         match err {
             Error::State(_) => ErrorCode::E1000,
             Error::InvalidTransition(_) => ErrorCode::E1001,
+            Error::DepthLimitExceeded => ErrorCode::E1002,
             Error::Transaction(_) => ErrorCode::E2000,
             Error::Crypto(_) => ErrorCode::E3000,
             Error::InvalidProof(_) => ErrorCode::E3001,

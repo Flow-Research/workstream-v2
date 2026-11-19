@@ -55,15 +55,19 @@ impl SparseMerkleTree {
     ///
     /// The key is hashed to the 256-bit key space. The value is stored
     /// separately and its hash is committed to the tree.
+    ///
+    /// Returns a typed fail-closed error if the tree cannot be updated within
+    /// its fixed depth (SEC-005).
     pub fn update(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let key_hash = hash_key(key);
         let value_hash = hash_value(value);
 
+        // Update the tree first; on error the tree is left un-mutated, so a
+        // failed update cannot leave a half-applied state behind.
+        self.tree.update(&key_hash, value_hash)?;
+
         // Store the value
         self.values.insert(value_hash, value.to_vec());
-
-        // Update the tree
-        self.tree.update(&key_hash, value_hash);
 
         Ok(())
     }

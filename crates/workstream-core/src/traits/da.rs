@@ -1,5 +1,6 @@
 //! Data Availability Client API trait
 
+use crate::hash::H256;
 use crate::{Error, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,11 @@ pub struct PostBlockRequest {
     pub version: u32,
     pub api_version: u32,
     pub block_bytes: Vec<u8>,
+    /// Optional logical key the producer commits in `header.da_ref`. DA
+    /// implementations must store the payload under this key so a node can
+    /// retrieve the exact bytes using the header reference.
+    #[serde(default)]
+    pub commitment: Option<H256>,
 }
 
 impl PostBlockRequest {

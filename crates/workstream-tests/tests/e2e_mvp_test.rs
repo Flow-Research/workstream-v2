@@ -650,13 +650,14 @@ fn e2e_varying_block_sizes() {
 #[tokio::test]
 async fn e2e_execute_prove_publish_verify() {
     use std::sync::Arc;
+    use workstream_core::traits::da::{DaClient, GetBlockRequest};
     use workstream_prover::Prover;
     use workstream_sequencer::InMemoryDaClient;
 
     let da = Arc::new(InMemoryDaClient::new());
     let stf = mvp_stf();
     let prover = Arc::new(Prover::with_stf(stf.clone()));
-    let mut sequencer = Sequencer::with_da_and_prover(stf, da, prover);
+    let mut sequencer = Sequencer::with_da_and_prover(stf, da.clone(), prover);
 
     // Execute: submit transactions and produce (and publish) a block.
     sequencer.submit_tx(register_sponsor()).unwrap();
@@ -672,11 +673,25 @@ async fn e2e_execute_prove_publish_verify() {
     assert_ne!(block.header.guest_hash, H256::ZERO);
     assert_ne!(block.header.da_ref, H256::ZERO);
 
-    // Verify: the full node verifies the proved block and applies it.
+    // Verify what a peer can actually retrieve, including the proof envelope.
+    let fetched = da
+        .get_block(GetBlockRequest {
+            version: 1,
+            api_version: 1,
+            da_id: format!("da:{}", block.header.da_ref.to_hex()),
+        })
+        .await
+        .unwrap();
+    let published = serde_json::from_slice(&fetched.block_bytes.unwrap()).unwrap();
     let mut source = MemoryBlockSource::new();
-    source.push(block);
-    let mut node = Node::new(mvp_stf(), mvp_genesis_schedule().unwrap(), source);
+    source.push(published);
+    let mut node = Node::new(mvp_stf(), mvp_genesis_schedule().unwrap(), source).require_proof();
     let results = node.sync().unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(node.tip(), 1);
+    assert_eq!(
+        get_actor(node.state(), &sponsor()).unwrap().unwrap().role,
+        ActorRole::Sponsor
+    );
+    assert_eq!(node.state_root(), sequencer.state().root());
 }

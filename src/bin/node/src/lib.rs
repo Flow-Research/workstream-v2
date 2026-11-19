@@ -30,8 +30,10 @@ use workstream_sequencer::{
 use workstream_state::State;
 use workstream_stf::StateTransitionFunction;
 
+pub mod indexer;
 pub mod rpc;
 
+pub use indexer::EventIndexer;
 pub use rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, RpcServer};
 
 /// Trait for sourcing blocks. Implementations may be in-memory queues,
@@ -99,6 +101,8 @@ pub struct Node<S: BlockSource> {
     source: S,
     /// P2P gossip network for block propagation (issue #84).
     network: Arc<dyn P2pNetwork>,
+    /// Indexed event/state views over applied blocks (issue #86).
+    indexer: EventIndexer,
     /// zkVM proof verifier (SEC-002/#83); attached proofs are checked before
     /// any state is committed.
     verifier: Arc<dyn BlockProofVerifier>,
@@ -164,6 +168,7 @@ impl<S: BlockSource> Node<S> {
             schedule,
             state: State::new(),
             source,
+            indexer: EventIndexer::new(),
             network: Arc::new(InMemoryP2pNetwork::new()),
             verifier,
             require_proof: false,
@@ -190,6 +195,21 @@ impl<S: BlockSource> Node<S> {
     /// Current state root.
     pub fn state_root(&self) -> StateRoot {
         self.state.root()
+    }
+
+    /// Indexed event/state views over applied blocks (issue #86).
+    pub fn indexer(&self) -> &EventIndexer {
+        &self.indexer
+    }
+
+    /// Events emitted by an applied block, in emission order.
+    pub fn events_for_block(&self, block_number: BlockNumber) -> Vec<&Event> {
+        self.indexer.events(block_number)
+    }
+
+    /// State root observed after applying a block, if indexed.
+    pub fn state_root_at(&self, block_number: BlockNumber) -> Option<StateRoot> {
+        self.indexer.state_root_at(block_number)
     }
 
     /// Last applied block header.
@@ -377,6 +397,11 @@ impl<S: BlockSource> Node<S> {
         self.state = draft;
         self.state.last_header = Some(block.header.clone());
         self.last_header = Some(block.header);
+
+        // Index the applied block's events and state root for API-facing
+        // views (issue #86).
+        self.indexer
+            .record(height, computed_state_root.clone(), events.clone());
 
         Ok(ApplyResult {
             height,
@@ -623,6 +648,20 @@ mod tests {
         let err = node.apply_next().unwrap_err();
         assert!(matches!(err, Error::Consensus(_)));
         assert!(err.to_string().contains("state root mismatch"));
+    }
+
+    #[test]
+    fn node_indexes_events_and_state_roots_for_applied_blocks() {
+        let (blocks, _) = build_chain(vec![vec![register_tx(0x11, ActorRole::Sponsor)]]);
+        let mut source = MemoryBlockSource::new();
+        source.push(blocks.into_iter().next().unwrap());
+
+        let mut node = Node::new(mvp_stf(), mvp_schedule(), source);
+        let results = node.sync().unwrap();
+        assert_eq!(results.len(), 1);
+
+        assert!(!node.events_for_block(1).is_empty());
+        assert!(node.state_root_at(1).is_some());
     }
 
     #[tokio::test]

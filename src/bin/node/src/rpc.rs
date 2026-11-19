@@ -25,6 +25,8 @@ use workstream_core::traits::sequencer::{BuildBlockRequest, SequencerApi, Submit
 use workstream_core::traits::verifier::{VerifierApi, VerifyBlockRequest, VerifyProofRequest};
 use workstream_core::Error;
 
+use crate::EventIndexer;
+
 /// JSON-RPC protocol version implemented by this server.
 pub const JSON_RPC_VERSION: &str = "2.0";
 
@@ -34,6 +36,90 @@ pub const RPC_ERROR_INVALID_REQUEST: i64 = -32600;
 pub const RPC_ERROR_METHOD_NOT_FOUND: i64 = -32601;
 pub const RPC_ERROR_INVALID_PARAMS: i64 = -32602;
 pub const RPC_ERROR_INTERNAL: i64 = -32603;
+
+/// Request: events emitted by a block.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IndexGetEventsRequest {
+    pub version: u32,
+    pub api_version: u32,
+    pub block_number: u64,
+}
+
+impl IndexGetEventsRequest {
+    pub fn validate(&self) -> std::result::Result<(), RpcError> {
+        if self.version != 1 {
+            return Err(RpcError::new(
+                RPC_ERROR_INVALID_PARAMS,
+                "unsupported dto version",
+            ));
+        }
+        if self.api_version != 1 {
+            return Err(RpcError::new(
+                RPC_ERROR_INVALID_PARAMS,
+                "unsupported api version",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Request: events of a given type across the indexed chain.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IndexGetEventsByTypeRequest {
+    pub version: u32,
+    pub api_version: u32,
+    pub event_type: String,
+}
+
+impl IndexGetEventsByTypeRequest {
+    pub fn validate(&self) -> std::result::Result<(), RpcError> {
+        if self.version != 1 {
+            return Err(RpcError::new(
+                RPC_ERROR_INVALID_PARAMS,
+                "unsupported dto version",
+            ));
+        }
+        if self.api_version != 1 {
+            return Err(RpcError::new(
+                RPC_ERROR_INVALID_PARAMS,
+                "unsupported api version",
+            ));
+        }
+        if self.event_type.is_empty() {
+            return Err(RpcError::new(
+                RPC_ERROR_INVALID_PARAMS,
+                "event_type cannot be empty",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Request: state root observed after a block.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IndexGetStateRootAtRequest {
+    pub version: u32,
+    pub api_version: u32,
+    pub block_number: u64,
+}
+
+impl IndexGetStateRootAtRequest {
+    pub fn validate(&self) -> std::result::Result<(), RpcError> {
+        if self.version != 1 {
+            return Err(RpcError::new(
+                RPC_ERROR_INVALID_PARAMS,
+                "unsupported dto version",
+            ));
+        }
+        if self.api_version != 1 {
+            return Err(RpcError::new(
+                RPC_ERROR_INVALID_PARAMS,
+                "unsupported api version",
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// JSON-RPC 2.0 request envelope.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,9 +153,9 @@ pub struct JsonRpcError {
 
 /// Internal dispatch failure carrying a JSON-RPC error code.
 #[derive(Debug)]
-struct RpcError {
-    code: i64,
-    message: String,
+pub struct RpcError {
+    pub code: i64,
+    pub message: String,
 }
 
 impl RpcError {
@@ -89,16 +175,19 @@ pub struct RpcServer {
     verifier: Arc<dyn VerifierApi>,
     da: Arc<dyn DaClient>,
     p2p: Arc<dyn P2pNetwork>,
+    indexer: Arc<EventIndexer>,
 }
 
 impl RpcServer {
-    /// Create a server over the given versioned component trait objects.
+    /// Create a server over the given versioned component trait objects and
+    /// event indexer.
     pub fn new(
         sequencer: Arc<dyn SequencerApi>,
         prover: Arc<dyn ProverApi>,
         verifier: Arc<dyn VerifierApi>,
         da: Arc<dyn DaClient>,
         p2p: Arc<dyn P2pNetwork>,
+        indexer: Arc<EventIndexer>,
     ) -> Arc<Self> {
         Arc::new(Self {
             sequencer,
@@ -106,6 +195,7 @@ impl RpcServer {
             verifier,
             da,
             p2p,
+            indexer,
         })
     }
 
@@ -307,6 +397,24 @@ impl RpcServer {
                     .map_err(|e| rpc_internal(&e))?;
                 Ok(serde_json::to_value(resp).map_err(rpc_encode)?)
             }
+            "workstream.indexer.getEvents" => {
+                let req = parse_params::<IndexGetEventsRequest>(params)?;
+                req.validate()?;
+                let events = self.indexer.events(req.block_number);
+                Ok(serde_json::to_value(events).map_err(rpc_encode)?)
+            }
+            "workstream.indexer.getEventsByType" => {
+                let req = parse_params::<IndexGetEventsByTypeRequest>(params)?;
+                req.validate()?;
+                let events = self.indexer.events_by_type(&req.event_type);
+                Ok(serde_json::to_value(events).map_err(rpc_encode)?)
+            }
+            "workstream.indexer.getStateRootAt" => {
+                let req = parse_params::<IndexGetStateRootAtRequest>(params)?;
+                req.validate()?;
+                let state_root = self.indexer.state_root_at(req.block_number);
+                Ok(serde_json::to_value(state_root).map_err(rpc_encode)?)
+            }
             _ => Err(RpcError::new(
                 RPC_ERROR_METHOD_NOT_FOUND,
                 format!("method not found: {method}"),
@@ -358,13 +466,17 @@ mod tests {
     use std::sync::Arc;
     use tokio::io::AsyncReadExt;
     use workstream_core::hash::H256;
-    use workstream_core::types::{ActionType, FeePayer, FeeSpec};
+    use workstream_core::types::{ActionType, Event, FeePayer, FeeSpec, StateRoot};
     use workstream_prover::{Prover, ReceiptVerifier};
     use workstream_sequencer::{InMemoryDaClient, InMemoryP2pNetwork, SequencerApiImpl};
     use workstream_stf::{mvp_genesis_schedule, StateTransitionFunction};
     use workstream_tx::TxBuilder;
 
     fn in_memory_server() -> Arc<RpcServer> {
+        in_memory_server_with_indexer(Arc::new(EventIndexer::new()))
+    }
+
+    fn in_memory_server_with_indexer(indexer: Arc<EventIndexer>) -> Arc<RpcServer> {
         let stf = StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap()).unwrap();
         let verifier = ReceiptVerifier::new(stf.fork_schedule().forks[0].guest_hash);
         let sequencer = SequencerApiImpl::new(stf);
@@ -374,6 +486,7 @@ mod tests {
             Arc::new(verifier) as Arc<dyn VerifierApi>,
             Arc::new(InMemoryDaClient::new()) as Arc<dyn DaClient>,
             Arc::new(InMemoryP2pNetwork::new()) as Arc<dyn P2pNetwork>,
+            indexer,
         )
     }
 
@@ -509,5 +622,106 @@ mod tests {
         assert!(response.error.is_none());
         assert_eq!(response.id, Some(1));
         assert!(response.result.is_some());
+    }
+
+    #[tokio::test]
+    async fn rpc_indexer_get_events_returns_indexed_events() {
+        let mut indexer = EventIndexer::new();
+        indexer.record(
+            1,
+            StateRoot::new(H256::ZERO, H256::ZERO),
+            vec![Event {
+                event_type: "actor.registered".to_string(),
+                data: vec![1, 2],
+                block_number: 1,
+                tx_index: 0,
+            }],
+        );
+        let server = in_memory_server_with_indexer(Arc::new(indexer));
+
+        let response = server
+            .handle_request(&JsonRpcRequest {
+                jsonrpc: JSON_RPC_VERSION.to_string(),
+                id: Some(31),
+                method: "workstream.indexer.getEvents".to_string(),
+                params: Some(json!({
+                    "version": 1,
+                    "api_version": 1,
+                    "block_number": 1,
+                })),
+            })
+            .await;
+        assert!(response.error.is_none());
+        let result = response.result.expect("result payload");
+        assert_eq!(result.as_array().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn rpc_indexer_get_events_by_type_filters_by_type() {
+        let mut indexer = EventIndexer::new();
+        indexer.record(
+            1,
+            StateRoot::new(H256::ZERO, H256::ZERO),
+            vec![
+                Event {
+                    event_type: "actor.registered".to_string(),
+                    data: vec![1],
+                    block_number: 1,
+                    tx_index: 0,
+                },
+                Event {
+                    event_type: "task.created".to_string(),
+                    data: vec![2],
+                    block_number: 1,
+                    tx_index: 1,
+                },
+            ],
+        );
+        let server = in_memory_server_with_indexer(Arc::new(indexer));
+
+        let response = server
+            .handle_request(&JsonRpcRequest {
+                jsonrpc: JSON_RPC_VERSION.to_string(),
+                id: Some(32),
+                method: "workstream.indexer.getEventsByType".to_string(),
+                params: Some(json!({
+                    "version": 1,
+                    "api_version": 1,
+                    "event_type": "task.created",
+                })),
+            })
+            .await;
+        assert!(response.error.is_none());
+        let result = response.result.expect("result payload");
+        let events = result.as_array().expect("array");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event_type"], json!("task.created"));
+    }
+
+    #[tokio::test]
+    async fn rpc_indexer_get_state_root_at_returns_indexed_root() {
+        let mut indexer = EventIndexer::new();
+        let root = StateRoot::new(H256::from_bytes([7u8; 32]), H256::ZERO);
+        indexer.record(3, root.clone(), Vec::new());
+        let server = in_memory_server_with_indexer(Arc::new(indexer));
+
+        let response = server
+            .handle_request(&JsonRpcRequest {
+                jsonrpc: JSON_RPC_VERSION.to_string(),
+                id: Some(33),
+                method: "workstream.indexer.getStateRootAt".to_string(),
+                params: Some(json!({
+                    "version": 1,
+                    "api_version": 1,
+                    "block_number": 3,
+                })),
+            })
+            .await;
+        assert!(response.error.is_none());
+        let result = response.result.expect("result payload");
+        assert_eq!(
+            result["smt_root"],
+            json!(serde_json::to_value(root.smt_root).unwrap())
+        );
     }
 }

@@ -6,7 +6,7 @@ pub use age::x25519::{Identity as RecoveryKey, Recipient as RecoveryRecipient};
 use ed25519_dalek::SigningKey;
 use workstream_core::traits::sequencer::{SequencerApi, SubmitTxRequest, TxStatus};
 use workstream_core::{AccountId, Action, Error, FeeSpec, Hash, Result, Transaction, H256};
-use workstream_crypto::signature::sign_tx_ed25519;
+use workstream_crypto::signature::{sign_tx_ed25519, tx_message_hash};
 use workstream_tx::{tx_hash, TxBuilder, TxValidator};
 use zeroize::Zeroizing;
 
@@ -50,6 +50,27 @@ impl Wallet {
 
     pub fn account(&self) -> AccountId {
         Hash::sha256(self.key.verifying_key().as_bytes())
+    }
+
+    /// Sign exactly the unsigned draft reviewed by the operator. Never rewrite
+    /// its network, account, fee, nonce lane, auth bytes or action list.
+    pub fn sign_reviewed(&self, mut draft: Transaction, approved: H256) -> Result<Transaction> {
+        if draft.signature.is_some() || draft.public_key.is_some() {
+            return Err(Error::Validation("expected unsigned draft".into()));
+        }
+        if draft.chain_id != self.chain_id || draft.account != self.account() {
+            return Err(Error::Unauthorized(
+                "draft network or account mismatch".into(),
+            ));
+        }
+        if tx_message_hash(&draft)? != approved {
+            return Err(Error::Validation(
+                "draft differs from approved preview".into(),
+            ));
+        }
+        sign_tx_ed25519(&mut draft, &self.key)?;
+        TxValidator::new().validate(&draft)?;
+        Ok(draft)
     }
 
     /// Build and sign one or more actions for this wallet's default nonce lane.

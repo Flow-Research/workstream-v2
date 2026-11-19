@@ -15,7 +15,8 @@ pub fn configured_image() -> Result<(Vec<u8>, H256)> {
 pub fn configured_id() -> Result<H256> {
     let id = std::env::var("WORKSTREAM_GUEST_ID")
         .map_err(|_| Error::Config("missing WORKSTREAM_GUEST_ID".into()))?;
-    H256::from_hex(id.trim_start_matches("0x"))
+    let approved = H256::from_hex(id.trim_start_matches("0x"))?;
+    Ok(approved)
 }
 
 pub fn package(user_elf: &[u8]) -> Vec<u8> {
@@ -24,7 +25,8 @@ pub fn package(user_elf: &[u8]) -> Vec<u8> {
 
 pub fn image_id(image: &[u8]) -> Result<H256> {
     let digest = risc0_binfmt::compute_image_id(image).map_err(|e| Error::Crypto(e.to_string()))?;
-    H256::from_hex(&digest.to_string())
+    let id = H256::from_hex(&digest.to_string())?;
+    Ok(id)
 }
 
 /// Run the external local prover. No dev-mode receipt can pass the final check.

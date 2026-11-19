@@ -1,5 +1,6 @@
-"""Exercise signed admission, remote proving, independent application and outages."""
+"""Exercise signed admission, durable proving, independent application and outages."""
 import contextlib
+import glob
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,52 @@ import tempfile
 import time
 
 
+def postgres_bin():
+    patterns = ('/usr/lib/postgresql/*/bin', '/usr/local/opt/postgresql@*/bin',
+                '/opt/homebrew/opt/postgresql@*/bin')
+    for pattern in patterns:
+        for candidate in sorted(glob.glob(pattern)):
+            if all((Path(candidate) / tool).exists() for tool in ('initdb', 'pg_ctl', 'psql')):
+                return Path(candidate)
+    raise RuntimeError('PostgreSQL 16 server binaries are required for the proof-job drill')
+
+
+def start_postgres(directory, cleanup):
+    """Ephemeral socket-only cluster; no TCP listener, no reuse of developer state."""
+    bindir = postgres_bin()
+    data = directory / 'pgdata'
+    sock = directory / 'pgsocket'
+    data.mkdir(mode=0o700)
+    sock.mkdir(mode=0o700)
+    with socket.socket() as reserve:
+        reserve.bind(('127.0.0.1', 0))
+        port = reserve.getsockname()[1]
+    subprocess.run([bindir / 'initdb', '-D', str(data), '-A', 'trust',
+                    '-U', 'postgres', '--no-instructions'],
+                   check=True, capture_output=True)
+    options = f"-k {sock} -c listen_addresses='' -p {port}"
+    # pg_ctl's detached server inherits its stdout; capturing it would keep the
+    # pipe open and hang. Keep a real log instead.
+    log = (directory / 'postgres.log').open('wb')
+    cleanup.callback(log.close)
+    subprocess.run([bindir / 'pg_ctl', '-D', str(data), '-o', options,
+                    '-w', '-t', '20', 'start'], check=True, stdout=log,
+                   stderr=subprocess.STDOUT)
+    cleanup.callback(lambda: subprocess.run(
+        [bindir / 'pg_ctl', '-D', str(data), '-m', 'immediate', '-w', '-t', '20', 'stop'],
+        stdout=log, stderr=subprocess.STDOUT))
+    psql = [bindir / 'psql', '-h', str(sock), '-p', str(port), '-U', 'postgres',
+            '-d', 'postgres', '-v', 'ON_ERROR_STOP=1']
+    subprocess.run(psql + ['-c', 'CREATE ROLE worker LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE'],
+                   check=True, capture_output=True)
+    subprocess.run(psql + ['-c', 'CREATE DATABASE proofjobs'],
+                   check=True, capture_output=True)
+    proofjobs = psql + ['-d', 'proofjobs']
+    subprocess.run(proofjobs + ['-c', 'GRANT CREATE, USAGE ON SCHEMA public TO worker'],
+                   check=True, capture_output=True)
+    return sock, port, proofjobs
+
+
 def wait(check):
     end = time.monotonic() + 15
     while time.monotonic() < end:
@@ -18,7 +65,7 @@ def wait(check):
             value = check()
             if value:
                 return value
-        except (ConnectionRefusedError, FileNotFoundError):
+        except (ConnectionRefusedError, FileNotFoundError, subprocess.CalledProcessError):
             pass
         time.sleep(.05)
     raise TimeoutError('runtime did not reach expected state')
@@ -29,6 +76,7 @@ def run(directory, binaries, fixture, future_nonce):
     subprocess.run(['bash', 'scripts/dev-service-identities.sh', pki], check=True)
     env = {k: v for k, v in os.environ.items() if not k.startswith('WORKSTREAM_')}
     env['WORKSTREAM_RUNTIME_DIR'] = str(directory)
+
     data = directory / 'writer-data'
     data.mkdir(mode=0o700)
     env['WORKSTREAM_WRITER_DATA'] = str(data)
@@ -65,8 +113,16 @@ def run(directory, binaries, fixture, future_nonce):
         return rpc('workstream.sequencer.submitTransaction', dict(version=1, api_version=1, tx_bytes=list(json.dumps(transaction).encode())))
 
     with contextlib.ExitStack() as cleanup:
-        def start(role):
-            child = subprocess.Popen([binaries / role], env={**env, 'WORKSTREAM_IDENTITY_DIR': str(pki / role)})
+        socket_dir, pg_port, psql = start_postgres(directory, cleanup)
+        env['WORKSTREAM_JOBS_SOCKET'] = str(socket_dir)
+        env['WORKSTREAM_JOBS_PORT'] = str(pg_port)
+
+        def sql(query):
+            return subprocess.check_output(psql + ['-At', '-c', query], text=True).strip()
+
+        def start(role, extra=None):
+            child_env = {'WORKSTREAM_IDENTITY_DIR': str(pki / role), **(extra or {})}
+            child = subprocess.Popen([binaries / role], env={**env, **child_env})
             cleanup.callback(child.wait)
             cleanup.callback(child.kill)
             return child
@@ -105,8 +161,20 @@ def run(directory, binaries, fixture, future_nonce):
         time.sleep(1.25)
         assert writer('Tip')[0] == 0 and verified() == genesis
         print('Worker absent: signed admission pending, writer and verifier at height 0', flush=True)
+        prover = start('prover', {'WORKSTREAM_DEV_PROOF_DELAY_MS': '5000'})
+        wait(lambda: sql("SELECT count(*) FROM proof_job_witness") == '1')
+        wait(lambda: sql("SELECT attempts FROM proof_job_status WHERE chain='1'") == '1')
+        prover.kill()
+        prover.wait()
+        assert sql("SELECT count(*) FROM proof_job_witness") == '1'
+        print('Worker SIGKILLed mid-proof: job and private witness retained', flush=True)
         start('prover')
         tip = wait(lambda: (t if (t := verified())['height'] == 1 else None))
+        assert sql("SELECT count(*) FROM proof_job_witness") == '0'
+        status = sql("SELECT attempts||','||(queue_ms IS NOT NULL)||','||(runtime_ms IS NOT NULL)||','||complete FROM proof_job_status WHERE chain='1'")
+        assert status == '2,true,true,true', status
+        assert sql("SELECT count(*) FROM information_schema.columns WHERE table_name='proof_job_status' AND column_name IN ('payload','result')") == '0'
+        print(f'Worker restart reclaimed the job: {status}; status view has no witness bytes', flush=True)
         block = writer({'Block': 1})
         assert block['transactions'] == [fixture] and block['header']['proof'] is not None
         assert tip['state_root'] != genesis['state_root']
@@ -116,6 +184,7 @@ def run(directory, binaries, fixture, future_nonce):
         seq.kill()
         seq.wait()
         assert 'error' in submit() and verified() == tip
+        print('Writer stopped: admission failed, verified height unchanged', flush=True)
         start('sequencer')
         wait(lambda: writer('Tip') == [1, tip['state_root']])
         assert submit()['result']['status'] == 'Published'
@@ -125,7 +194,6 @@ def run(directory, binaries, fixture, future_nonce):
         invalid = submit(future_nonce)['result']
         wait(lambda: rpc(receipt_method, {'tx_hash': invalid['tx_hash']})['result']['status'] == 'Rejected')
         print('Unknown ID distinguished from durable semantic rejection', flush=True)
-        print('Writer stopped: admission failed, verified height unchanged', flush=True)
 
 
 if __name__ == '__main__':

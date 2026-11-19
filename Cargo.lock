@@ -5146,9 +5146,11 @@ name = "workstream-wallet"
 version = "0.1.0"
 dependencies = [
  "age",
+ "clap",
  "ed25519-dalek",
  "getrandom 0.4.3",
  "serde_json",
+ "tempfile",
  "tokio",
  "workstream-core",
  "workstream-crypto",

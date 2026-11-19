@@ -13,11 +13,12 @@ use workstream_core::{
 };
 use workstream_ops::{ipc, Monitor};
 use workstream_prover::Prover;
-use workstream_sequencer::writer::Request;
+use workstream_sequencer::writer::{Receipt, Request};
 use workstream_stf::StateTransitionFunction;
 
 #[derive(Clone)]
 struct Gateway {
+    included: Arc<tokio::sync::RwLock<std::collections::HashMap<H256, u64>>>,
     client: ipc::tls::Client,
     writer: PathBuf,
     tip: tokio::sync::watch::Receiver<(u64, StateRoot, Option<H256>)>,
@@ -30,9 +31,11 @@ impl Gateway {
         req.validate()?;
         let tx = serde_json::from_slice(&req.tx_bytes)
             .map_err(|_| Error::Validation("invalid transaction".into()))?;
-        let hash: H256 =
+        let receipt: Receipt =
             ipc::call(&self.client, &self.writer, &Request::Submit(Box::new(tx))).await?;
-        Ok(json!({"version":1,"api_version":1,"status":"Pending","tx_hash":hash.as_bytes()}))
+        Ok(
+            json!({"version":1,"api_version":1,"status":receipt.status,"height":receipt.height,"tx_hash":receipt.tx_hash}),
+        )
     }
 }
 #[async_trait::async_trait]
@@ -56,6 +59,11 @@ impl LineEndpoint for Gateway {
                         let (height, root, da_ref) = self.tip.borrow().clone();
                         Ok(json!({"height":height,"state_root":root,"da_ref":da_ref}))
                     }
+                    ("2.0","workstream.sequencer.getMempoolStatus")=>ipc::call::<_,(u64,u64)>(&self.client,&self.writer,&Request::Queue).await.map(|(pending_count,size_bytes)|json!({"pending_count":pending_count,"size_bytes":size_bytes})).map_err(|_|(RPC_ERROR_INTERNAL,"writer unavailable")),
+                    ("2.0","workstream.node.getReceipt")=>match req.params.and_then(|p|p.get("tx_hash").cloned()).and_then(|v|serde_json::from_value::<H256>(v).ok()) {
+                        None=>Err((RPC_ERROR_INVALID_PARAMS,"expected tx_hash")),
+                        Some(id)=>{let height=self.included.read().await.get(&id).copied();if let Some(height)=height {Ok(json!({"tx_hash":id,"status":"Verified","height":height}))} else {ipc::call::<_,Receipt>(&self.client,&self.writer,&Request::Receipt(id)).await.map(|r|json!(r)).map_err(|_|(RPC_ERROR_INTERNAL,"writer unavailable"))}}
+                    },
                     ("2.0", _) => Err((RPC_ERROR_METHOD_NOT_FOUND, "unknown method")),
                     _ => Err((RPC_ERROR_INVALID_REQUEST, "unsupported JSON-RPC version")),
                 }
@@ -97,10 +105,12 @@ pub async fn serve(
         .require_proof();
     let (tx, tip) = tokio::sync::watch::channel((0, node.state_root(), None));
     let writer = dir.join("writer.sock");
+    let included = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     let client = ipc::tls::Client::load("sequencer.workstream.internal")?;
     let rpc = serve_endpoint(
         listener,
         Gateway {
+            included: included.clone(),
             client: client.clone(),
             writer: writer.clone(),
             tip,
@@ -115,7 +125,16 @@ pub async fn serve(
             match ipc::call::<_, Option<Block>>(&client, &writer, &Request::Block(height)).await {
                 Ok(Some(block)) => {
                     let da_ref = block.header.da_ref;
+                    let ids = block
+                        .transactions
+                        .iter()
+                        .map(workstream_sequencer::tx_hash)
+                        .collect::<Result<Vec<_>>>()?;
                     node.apply_block(block)?;
+                    included
+                        .write()
+                        .await
+                        .extend(ids.into_iter().map(|id| (id, height)));
                     tx.send_replace((node.tip(), node.state_root(), Some(da_ref)));
                     monitor.heartbeat(true);
                     continue;

@@ -116,8 +116,14 @@ impl Mempool {
 
     /// Admit a transaction; returns its canonical hash.
     pub fn submit(&mut self, tx: Transaction) -> Result<H256> {
-        self.validator.validate(&tx)?;
-        let hash = tx_hash(&tx)?;
+        let hash = self.check_admission(&tx)?;
+        self.enqueue_checked(hash, tx);
+        Ok(hash)
+    }
+
+    fn check_admission(&self, tx: &Transaction) -> Result<H256> {
+        self.validator.validate(tx)?;
+        let hash = tx_hash(tx)?;
         if self.seen.contains(&hash) {
             return Err(Error::Transaction(format!(
                 "transaction {hash} already submitted"
@@ -126,9 +132,12 @@ impl Mempool {
         if self.pending.len() >= self.max_size {
             return Err(Error::Transaction("mempool full".to_string()));
         }
+        Ok(hash)
+    }
+
+    fn enqueue_checked(&mut self, hash: H256, tx: Transaction) {
         self.seen.insert(hash);
         self.pending.push_back(tx);
-        Ok(hash)
     }
 
     pub fn len(&self) -> usize {

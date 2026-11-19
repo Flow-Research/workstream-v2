@@ -9,4 +9,15 @@ ignore = [
     # This is informational only, not a security vulnerability.
     # Tracked: RUSTSEC-2023-0089
     "RUSTSEC-2023-0089",
+    # rsa is pulled in transitively by the RISC Zero build tooling
+    # (risc0-build -> rzup) and is affected by the Marvin key-recovery timing
+    # sidechannel (RUSTSEC-2023-0071, medium). The fix requires rsa >=0.10, which
+    # the semver-compatible risc0 3.0.x build toolchain cannot adopt without a
+    # breaking zkVM upgrade; this workspace performs no RSA key operations itself.
+    "RUSTSEC-2023-0071",
+    # tracing-subscriber 0.2 is pulled in transitively by the RISC Zero proving
+    # stack (ark-groth16 -> ark-relations) and is affected by ANSI-escape sequence
+    # log poisoning (RUSTSEC-2025-0055). The fix requires tracing-subscriber
+    # >=0.3.20, which the pinned ark 0.5 proving dependencies cannot adopt.
+    "RUSTSEC-2025-0055",
 ]

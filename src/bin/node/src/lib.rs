@@ -18,10 +18,9 @@ use std::sync::Arc;
 use workstream_core::fork::{validate_header_fork, ForkSchedule};
 use workstream_core::hash::{Hash, H256};
 use workstream_core::traits::p2p::{GetBlockRequest, P2pNetwork};
-use workstream_core::traits::prover::{ProveBlockTransition, ZkProof, ZkvmBackend};
 use workstream_core::types::*;
 use workstream_core::{Error, Result};
-use workstream_prover::{InMemoryZkBackend, DEFAULT_GUEST_ID};
+use workstream_prover::risc0;
 use workstream_sequencer::{
     header_hash, tx_hash, tx_root, InMemoryP2pNetwork, GENESIS_PARENT_HASH,
 };
@@ -97,9 +96,6 @@ pub struct Node<S: BlockSource> {
     schedule: ForkSchedule,
     state: State,
     source: S,
-    /// zkVM proof verification backend (SEC-002); blocks whose attached
-    /// proof fails verification are rejected before commit.
-    backend: Arc<dyn ZkvmBackend>,
     /// P2P gossip network for block propagation (issue #84).
     network: Arc<dyn P2pNetwork>,
     last_header: Option<BlockHeader>,
@@ -108,23 +104,7 @@ pub struct Node<S: BlockSource> {
 impl<S: BlockSource> Node<S> {
     /// Create a node starting from genesis (empty state, no blocks applied).
     pub fn new(stf: StateTransitionFunction, schedule: ForkSchedule, source: S) -> Self {
-        Self::with_backend(stf, schedule, source, Arc::new(InMemoryZkBackend::new()))
-    }
-
-    /// Create a node with a custom proof-verification backend.
-    pub fn with_backend(
-        stf: StateTransitionFunction,
-        schedule: ForkSchedule,
-        source: S,
-        backend: Arc<dyn ZkvmBackend>,
-    ) -> Self {
-        Self::with_network(
-            stf,
-            schedule,
-            source,
-            backend,
-            Arc::new(InMemoryP2pNetwork::new()),
-        )
+        Self::with_network(stf, schedule, source, Arc::new(InMemoryP2pNetwork::new()))
     }
 
     /// Create a node with a custom proof-verification backend and P2P network.
@@ -132,7 +112,7 @@ impl<S: BlockSource> Node<S> {
         stf: StateTransitionFunction,
         schedule: ForkSchedule,
         source: S,
-        backend: Arc<dyn ZkvmBackend>,
+
         network: Arc<dyn P2pNetwork>,
     ) -> Self {
         Node {
@@ -140,7 +120,7 @@ impl<S: BlockSource> Node<S> {
             schedule,
             state: State::new(),
             source,
-            backend,
+
             network,
             last_header: None,
         }
@@ -277,30 +257,28 @@ impl<S: BlockSource> Node<S> {
         //    proof fails verification before any state is committed. Blocks
         //    without a proof are not yet attributable to a prover and are
         //    deferred to the prover/header integration (issue #83).
-        if let Some(proof) = block.header.proof.clone() {
-            let stateroot_pre = self.state.root().smt_root;
-            let transition = ProveBlockTransition {
-                version: 1,
-                block_hash: *header_hash(&block.header)?.as_bytes(),
-                stateroot_pre,
-                transactions: block.transactions.clone(),
-            };
-            let zk_proof = ZkProof {
-                version: 1,
-                proof_bytes: proof.proof_data.clone(),
-                public_inputs: computed_state_root.smt_root.as_bytes().to_vec(),
-                guest_id: DEFAULT_GUEST_ID.to_string(),
-                guest_hash: Hash::sha256(DEFAULT_GUEST_ID.as_bytes()),
-                stateroot_pre,
-            };
-            let valid = self
-                .backend
-                .verify_block_transition(&transition, &zk_proof)?;
-            if !valid {
-                return Err(Error::Consensus(format!(
-                    "zk proof verification failed at height {height}"
-                )));
-            }
+        let fork = self
+            .schedule
+            .active_fork_at(height)
+            .ok_or_else(|| Error::Fork("missing fork".into()))?;
+        if let Some(proof) = &block.header.proof {
+            // DA addresses the proved envelope, so it is assigned after proving.
+            let mut proved_header = block.header.clone();
+            proved_header.da_ref = H256::ZERO;
+            let claim = workstream_stf::receipt::Claim::new(
+                height,
+                header_hash(&proved_header)?,
+                self.state.root().hash(),
+                computed_state_root.hash(),
+                &block.transactions,
+            )?;
+            risc0::verify(&proof.proof_data, fork.guest_hash, &claim).map_err(|e| {
+                Error::Consensus(format!(
+                    "zk proof verification failed at height {height}: {e}"
+                ))
+            })?;
+        } else if fork.has_feature("risc0-receipts") {
+            return Err(Error::Consensus("missing required zkVM receipt".into()));
         }
 
         // Commit
@@ -522,35 +500,49 @@ mod tests {
     }
 
     #[test]
-    fn node_accepts_valid_proof() {
+    #[ignore = "requires r0vm and WORKSTREAM_GUEST_IMAGE"]
+    fn node_commits_only_the_receipted_state_transition() {
         let (mut blocks, _) = build_chain(vec![vec![register_tx(0x11, ActorRole::Sponsor)]]);
-        let block = blocks.pop().unwrap();
-        let backend = InMemoryZkBackend::new();
-        let transition = ProveBlockTransition {
-            version: 1,
-            block_hash: [7u8; 32],
-            stateroot_pre: State::new().root().smt_root,
+        let mut block = blocks.pop().unwrap();
+        let image = std::fs::read(std::env::var("WORKSTREAM_GUEST_IMAGE").unwrap()).unwrap();
+        let approved = risc0::image_id(&image).unwrap();
+        let mut schedule = mvp_schedule();
+        schedule.forks[0].guest_hash = approved;
+        schedule.forks[0].features.push("risc0-receipts".into());
+        block.header.guest_hash = approved;
+        let mut node = Node::new(
+            StateTransitionFunction::with_schedule(schedule.clone()).unwrap(),
+            schedule,
+            MemoryBlockSource::new(),
+        );
+        let pre = node.state_root();
+        assert!(node.apply_block(block.clone()).is_err());
+        let witness = workstream_stf::receipt::Witness {
+            before: node.state().snapshot(),
+            height: 1,
+            block_hash: header_hash(&block.header).unwrap(),
+            pre: pre.hash(),
+            post: block.header.state_root.hash(),
             transactions: block.transactions.clone(),
         };
-        let proof = backend.compute_proof(&transition).unwrap();
-        let mut block = block;
+        let proof_data = risc0::prove(&image, approved, &witness).unwrap();
         block.header.proof = Some(Proof {
-            proof_data: proof.proof_bytes.clone(),
+            proof_data,
             proof_type: ProofType::ZkVm,
         });
-
-        let mut source = MemoryBlockSource::new();
-        source.push(block);
-        let mut node = Node::with_backend(
-            mvp_stf(),
-            mvp_schedule(),
-            source,
-            Arc::new(InMemoryZkBackend::new()),
+        let mut mismatch = block.clone();
+        mismatch.header.timestamp += 1;
+        assert!(
+            matches!(node.apply_block(mismatch),Err(Error::Consensus(msg)) if msg.contains("zk proof verification failed"))
         );
-        let result = node.apply_next().unwrap();
-        let result = result.unwrap();
-        assert_eq!(result.height, 1);
+        let mut mismatch = block.clone();
+        mismatch.header.state_root = pre.clone();
+        assert!(node.apply_block(mismatch).is_err());
+        assert_eq!(node.tip(), 0);
+        assert_eq!(node.state_root(), pre);
+        node.apply_block(block).unwrap();
         assert_eq!(node.tip(), 1);
+        assert_ne!(node.state_root(), pre);
     }
 
     #[test]
@@ -624,7 +616,6 @@ mod tests {
             mvp_stf(),
             mvp_schedule(),
             MemoryBlockSource::new(),
-            Arc::new(InMemoryZkBackend::new()),
             Arc::new(network),
         );
         let results = node.sync_via_network().await.unwrap();

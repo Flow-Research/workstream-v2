@@ -24,11 +24,12 @@ services:
     network_mode: none
     read_only: true
     tmpfs: [/tmp]
-    volumes: [ipc:/ipc, node-id:/keys/node, writer-id:/keys/sequencer, worker-id:/keys/prover]
+    volumes: [ipc:/ipc, node-id:/keys/node, writer-id:/keys/sequencer, worker-id:/keys/prover, writer-data:/data]
     entrypoint: [/bin/bash, -euc]
     command:
       - |
         install -d -m 0700 -o 10001 -g 10001 /ipc/runtime
+        install -d -m 0700 -o 10001 -g 10001 /data/journal
         bash /app/dev-service-identities.sh /tmp/identities
         for role in node sequencer prover; do
           cp /tmp/identities/$$role/*.{der,pem} /keys/$$role/
@@ -44,7 +45,10 @@ services:
     <<: *service
     depends_on: {prover: {condition: service_healthy}}
     command: [workstream-sequencer, --metrics-port, '9090']
-    volumes: [ipc:/ipc, writer-id:/identity:ro]
+    environment:
+      <<: *env
+      WORKSTREAM_WRITER_DATA: /data/journal
+    volumes: [ipc:/ipc, writer-id:/identity:ro, writer-data:/data]
   node:
     <<: *service
     depends_on: {sequencer: {condition: service_healthy}}
@@ -55,6 +59,7 @@ services:
     volumes: [ipc:/ipc, node-id:/identity:ro]
 
 volumes:
+  writer-data:
   ipc:
   node-id:
   writer-id:

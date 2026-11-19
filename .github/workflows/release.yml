@@ -9,7 +9,12 @@ permissions:
   contents: write
 
 jobs:
+  verify-localnet:
+    uses: ./.github/workflows/compose-gate.yml
+    permissions:
+      contents: read
   create-release:
+    needs: verify-localnet
     name: Create Release
     runs-on: ubuntu-latest
     outputs:

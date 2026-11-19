@@ -24,6 +24,7 @@ path = "src/lib.rs"
 [dependencies]
 async-trait.workspace = true
 workstream-ops = { path = "../../../crates/workstream-ops" }
+workstream-api = { path = "../../../crates/workstream-api" }
 workstream-core = { path = "../../../crates/workstream-core" }
 workstream-state = { path = "../../../crates/workstream-state" }
 workstream-stf = { path = "../../../crates/workstream-stf" }

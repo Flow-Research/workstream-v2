@@ -30,3 +30,10 @@ build/
 # Env
 .env
 .env.local
+
+# Node (generated browser API client)
+node_modules/
+
+# Python bytecode
+__pycache__/
+*.pyc

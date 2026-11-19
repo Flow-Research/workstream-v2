@@ -1,0 +1,1993 @@
+{
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Versioned, browser-safe HTTPS facade. Clients keep signing keys locally and submit signed bytes. Read models are projections; the verifier journal remains the authority.",
+    "title": "WorkStream Browser API",
+    "version": "1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/chain": {
+      "get": {
+        "operationId": "getChain",
+        "parameters": [
+          {
+            "description": "Idempotency key. Reuse with a different body returns DUPLICATE_REQUEST.",
+            "in": "header",
+            "name": "X-Request-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "properties": {
+                        "api_version": {
+                          "const": 1,
+                          "type": "integer"
+                        },
+                        "data": {
+                          "properties": {
+                            "da_ref": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "height": {
+                              "format": "uint64",
+                              "type": "integer"
+                            },
+                            "indexed_height": {
+                              "format": "uint64",
+                              "type": "integer"
+                            },
+                            "lag": {
+                              "format": "uint64",
+                              "type": "integer"
+                            },
+                            "stale": {
+                              "type": "boolean"
+                            },
+                            "state_root": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "height",
+                            "state_root",
+                            "da_ref",
+                            "indexed_height",
+                            "lag",
+                            "stale"
+                          ],
+                          "type": "object"
+                        },
+                        "indexed_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "network": {
+                          "type": "string"
+                        },
+                        "read_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "request_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "api_version",
+                        "request_id",
+                        "network",
+                        "read_height",
+                        "indexed_height",
+                        "data"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Chain status"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          }
+        },
+        "security": [
+          {
+            "scheme": "bearer",
+            "type": "http"
+          }
+        ],
+        "summary": "Verified tip and projection cursor"
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "operationId": "getEvents",
+        "parameters": [
+          {
+            "description": "Idempotency key. Reuse with a different body returns DUPLICATE_REQUEST.",
+            "in": "header",
+            "name": "X-Request-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "properties": {
+                        "api_version": {
+                          "const": 1,
+                          "type": "integer"
+                        },
+                        "data": {
+                          "properties": {
+                            "items": {
+                              "items": {
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "kind": {
+                              "type": "string"
+                            },
+                            "next_cursor": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "stale": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "items",
+                            "next_cursor",
+                            "stale"
+                          ],
+                          "type": "object"
+                        },
+                        "indexed_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "network": {
+                          "type": "string"
+                        },
+                        "read_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "request_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "api_version",
+                        "request_id",
+                        "network",
+                        "read_height",
+                        "indexed_height",
+                        "data"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Event page"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          }
+        },
+        "security": [
+          {
+            "scheme": "bearer",
+            "type": "http"
+          }
+        ],
+        "summary": "Page projection events"
+      }
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "operationId": "getOpenApi",
+        "responses": {
+          "200": {
+            "description": "OpenAPI JSON"
+          }
+        },
+        "summary": "This document"
+      }
+    },
+    "/v1/receipt": {
+      "get": {
+        "operationId": "getReceipt",
+        "parameters": [
+          {
+            "description": "Idempotency key. Reuse with a different body returns DUPLICATE_REQUEST.",
+            "in": "header",
+            "name": "X-Request-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tx_hash",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "properties": {
+                        "api_version": {
+                          "const": 1,
+                          "type": "integer"
+                        },
+                        "data": {
+                          "properties": {
+                            "height": {
+                              "format": "uint64",
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "status": {
+                              "type": "string"
+                            },
+                            "tx_hash": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "tx_hash",
+                            "status",
+                            "height"
+                          ],
+                          "type": "object"
+                        },
+                        "indexed_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "network": {
+                          "type": "string"
+                        },
+                        "read_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "request_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "api_version",
+                        "request_id",
+                        "network",
+                        "read_height",
+                        "indexed_height",
+                        "data"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Receipt"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          }
+        },
+        "security": [
+          {
+            "scheme": "bearer",
+            "type": "http"
+          }
+        ],
+        "summary": "Look up a verified receipt by 0x-prefixed hash"
+      }
+    },
+    "/v1/receipts": {
+      "get": {
+        "operationId": "getReceipts",
+        "parameters": [
+          {
+            "description": "Idempotency key. Reuse with a different body returns DUPLICATE_REQUEST.",
+            "in": "header",
+            "name": "X-Request-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "properties": {
+                        "api_version": {
+                          "const": 1,
+                          "type": "integer"
+                        },
+                        "data": {
+                          "properties": {
+                            "items": {
+                              "items": {
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "kind": {
+                              "type": "string"
+                            },
+                            "next_cursor": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "stale": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "items",
+                            "next_cursor",
+                            "stale"
+                          ],
+                          "type": "object"
+                        },
+                        "indexed_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "network": {
+                          "type": "string"
+                        },
+                        "read_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "request_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "api_version",
+                        "request_id",
+                        "network",
+                        "read_height",
+                        "indexed_height",
+                        "data"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Receipt page"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          }
+        },
+        "security": [
+          {
+            "scheme": "bearer",
+            "type": "http"
+          }
+        ],
+        "summary": "Page verified receipts"
+      }
+    },
+    "/v1/reviews": {
+      "get": {
+        "operationId": "getReviews",
+        "parameters": [
+          {
+            "description": "Idempotency key. Reuse with a different body returns DUPLICATE_REQUEST.",
+            "in": "header",
+            "name": "X-Request-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "properties": {
+                        "api_version": {
+                          "const": 1,
+                          "type": "integer"
+                        },
+                        "data": {
+                          "properties": {
+                            "items": {
+                              "items": {
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "kind": {
+                              "type": "string"
+                            },
+                            "next_cursor": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "stale": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "items",
+                            "next_cursor",
+                            "stale"
+                          ],
+                          "type": "object"
+                        },
+                        "indexed_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "network": {
+                          "type": "string"
+                        },
+                        "read_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "request_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "api_version",
+                        "request_id",
+                        "network",
+                        "read_height",
+                        "indexed_height",
+                        "data"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Review page"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          }
+        },
+        "security": [
+          {
+            "scheme": "bearer",
+            "type": "http"
+          }
+        ],
+        "summary": "Page reviews / review queues"
+      }
+    },
+    "/v1/session": {
+      "post": {
+        "operationId": "issueSession",
+        "parameters": [
+          {
+            "description": "Idempotency key. Reuse with a different body returns DUPLICATE_REQUEST.",
+            "in": "header",
+            "name": "X-Request-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "properties": {
+                        "api_version": {
+                          "const": 1,
+                          "type": "integer"
+                        },
+                        "data": {
+                          "properties": {
+                            "api_version": {
+                              "type": "integer"
+                            },
+                            "expires_in_secs": {
+                              "format": "uint64",
+                              "type": "integer"
+                            },
+                            "token": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "token",
+                            "api_version",
+                            "expires_in_secs"
+                          ],
+                          "type": "object"
+                        },
+                        "indexed_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "network": {
+                          "type": "string"
+                        },
+                        "read_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "request_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "api_version",
+                        "request_id",
+                        "network",
+                        "read_height",
+                        "indexed_height",
+                        "data"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Session issued"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          }
+        },
+        "summary": "Issue a short-lived session token"
+      }
+    },
+    "/v1/submit": {
+      "post": {
+        "operationId": "submitTransaction",
+        "parameters": [
+          {
+            "description": "Idempotency key. Reuse with a different body returns DUPLICATE_REQUEST.",
+            "in": "header",
+            "name": "X-Request-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "api_version": {
+                    "const": 1,
+                    "type": "integer"
+                  },
+                  "tx_bytes": {
+                    "description": "Canonical JSON bytes of an already-signed transaction. No key material is accepted.",
+                    "items": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "type": "array"
+                  },
+                  "version": {
+                    "const": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "version",
+                  "api_version",
+                  "tx_bytes"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "properties": {
+                        "api_version": {
+                          "const": 1,
+                          "type": "integer"
+                        },
+                        "data": {
+                          "properties": {
+                            "height": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "status": {
+                              "type": "string"
+                            },
+                            "tx_hash": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "tx_hash",
+                            "status",
+                            "height"
+                          ],
+                          "type": "object"
+                        },
+                        "indexed_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "network": {
+                          "type": "string"
+                        },
+                        "read_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "request_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "api_version",
+                        "request_id",
+                        "network",
+                        "read_height",
+                        "indexed_height",
+                        "data"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          }
+        },
+        "security": [
+          {
+            "scheme": "bearer",
+            "type": "http"
+          }
+        ],
+        "summary": "Submit already-signed transaction bytes"
+      }
+    },
+    "/v1/tasks": {
+      "get": {
+        "operationId": "getTasks",
+        "parameters": [
+          {
+            "description": "Idempotency key. Reuse with a different body returns DUPLICATE_REQUEST.",
+            "in": "header",
+            "name": "X-Request-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "properties": {
+                        "api_version": {
+                          "const": 1,
+                          "type": "integer"
+                        },
+                        "data": {
+                          "properties": {
+                            "items": {
+                              "items": {
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "kind": {
+                              "type": "string"
+                            },
+                            "next_cursor": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "stale": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "items",
+                            "next_cursor",
+                            "stale"
+                          ],
+                          "type": "object"
+                        },
+                        "indexed_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "network": {
+                          "type": "string"
+                        },
+                        "read_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "request_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "api_version",
+                        "request_id",
+                        "network",
+                        "read_height",
+                        "indexed_height",
+                        "data"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Work item page"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          }
+        },
+        "security": [
+          {
+            "scheme": "bearer",
+            "type": "http"
+          }
+        ],
+        "summary": "Page work items"
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "Local dev (operator-supplied certificate)",
+      "url": "https://localhost:{port}/"
+    }
+  ]
+}

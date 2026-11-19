@@ -42,9 +42,13 @@ wait up to 300 seconds for the first reply byte and 10 seconds for its frame.
 Set `WORKSTREAM_NODE_RPC_PORT` on the node. Its loopback newline-delimited
 JSON-RPC supports `workstream.sequencer.submitTransaction` (the versioned
 submission DTO) and `workstream.node.verifiedTip` (local height and root).
-The node fetches complete blocks from the writer, executes their transactions
-and verifies their proofs independently. When the writer is unavailable, tip
-queries still report the last locally verified height; submission fails.
+By default the node fetches complete blocks from the writer, executes their
+transactions and verifies their proofs independently. With
+`WORKSTREAM_DA_ENDPOINT` configured, it instead receives only a published
+reference over the authenticated writer socket and fetches the exact bytes
+from the S3-compatible provider; see [object data availability](object-da.md).
+When the writer is unavailable, tip queries still report the last locally
+verified height; submission fails.
 
 ### Durable proof jobs
 

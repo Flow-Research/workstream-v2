@@ -1,5 +1,5 @@
 //! One socket owner serializes admission and production for this local chain.
-use crate::Sequencer;
+use crate::{da_from_env, Sequencer};
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::{path::Path, sync::Arc, time::Duration};
@@ -24,6 +24,9 @@ pub struct Receipt {
 pub enum Request {
     Submit(Box<Transaction>),
     Block(u64),
+    /// Published DA reference only. A node with object DA configured must
+    /// fetch the exact bytes from the provider, not from this journal.
+    DaRef(u64),
     Tip,
     Receipt(H256),
     Queue,
@@ -68,14 +71,12 @@ pub async fn serve(
     fs2::FileExt::try_lock_exclusive(&data_lock)
         .map_err(|_| Error::State("writer data already in use".into()))?;
     let mut journal = journal::Journal::open(&data, stf.fork_schedule().chain_id)?;
-    let mut seq = Sequencer::with_backend(
-        stf,
-        Arc::new(WorkerBackend {
-            client,
-            socket: dir.join("worker.sock"),
-            verifier: prover.backend(),
-        }),
-    );
+    let backend: Arc<dyn workstream_core::traits::prover::ZkvmBackend> = Arc::new(WorkerBackend {
+        client,
+        socket: dir.join("worker.sock"),
+        verifier: prover.backend(),
+    });
+    let mut seq = Sequencer::with_da_and_backend(stf, da_from_env()?, backend);
     journal.restore(&mut seq)?;
     let listener = ipc::listen(&socket)?;
     let mut tick = tokio::time::interval(Duration::from_millis(500));
@@ -99,6 +100,7 @@ pub async fn serve(
                 match req {
                     Request::Submit(tx)=>{let r=journal.admit(&mut seq,*tx).map_err(|e|e.to_string());let _=ipc::write(&mut s,&r).await;},
                     Request::Block(n)=>{let b=journal.block(n)?;let _=ipc::write(&mut s,&Ok::<_,String>(b)).await;},
+                    Request::DaRef(n)=>{let r=journal.da_ref(n)?.map(|d|(n,d));let _=ipc::write(&mut s,&Ok::<_,String>(r)).await;},
                     Request::Receipt(id)=>{let r=journal.receipt(id)?;let _=ipc::write(&mut s,&Ok::<_,String>(r)).await;},
                     Request::Queue=>{let r=journal.queue()?;let _=ipc::write(&mut s,&Ok::<_,String>(r)).await;},
                     Request::Tip=>{let _=ipc::write(&mut s,&Ok::<_,String>((seq.tip(),seq.state().root()))).await;}

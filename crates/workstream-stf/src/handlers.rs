@@ -860,6 +860,11 @@ pub(crate) fn handle_award_fulfill(
 
     let task =
         get_task(state, &p.task)?.ok_or_else(|| Error::NotFound(format!("task {}", p.task)))?;
+    if account != task.sponsor {
+        return Err(Error::Unauthorized(
+            "only the task sponsor may fulfill its award".into(),
+        ));
+    }
     if task.status != TaskStatus::Completed {
         return Err(Error::InvalidTransition(format!(
             "task {} is not awardable (status {:?})",
@@ -870,6 +875,7 @@ pub(crate) fn handle_award_fulfill(
         Error::InvalidTransition(format!("task {} has no assignee to award", p.task))
     })?;
 
+    bind_nullifier(state, b"WS:v1:nf:award:", &p.task, account)?;
     event(
         "award.fulfilled",
         &postcard::to_allocvec(&(p.task, worker, task.award))

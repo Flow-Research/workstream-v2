@@ -12,13 +12,18 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::path::Path;
+use std::sync::Arc;
 
 use workstream_core::hash::{Hash, H256};
+use workstream_core::traits::da::{DaClient, PostBlockRequest};
 use workstream_core::types::*;
 use workstream_core::{Error, Result};
 use workstream_state::State;
 use workstream_stf::StateTransitionFunction;
 use workstream_tx::TxValidator;
+
+pub mod da;
+pub use da::InMemoryDaClient;
 
 /// Fixed block slot spacing in seconds (consensus-derived timestamp).
 pub const SLOT_SECONDS: u64 = 12;
@@ -159,16 +164,24 @@ pub struct Sequencer {
     state: State,
     mempool: Mempool,
     last_header: Option<BlockHeader>,
+    /// Data availability client used to publish produced blocks (issue #82).
+    da: Arc<dyn DaClient>,
 }
 
 impl Sequencer {
     /// Chain begins at height 1, linked to [`GENESIS_PARENT_HASH`].
     pub fn new(stf: StateTransitionFunction) -> Self {
+        Self::with_da(stf, Arc::new(crate::da::InMemoryDaClient::new()))
+    }
+
+    /// Create a sequencer wired to a data availability client.
+    pub fn with_da(stf: StateTransitionFunction, da: Arc<dyn DaClient>) -> Self {
         Sequencer {
             stf,
             state: State::new(),
             mempool: Mempool::default(),
             last_header: None,
+            da,
         }
     }
 
@@ -243,7 +256,7 @@ impl Sequencer {
             timestamp,
             tx_root: computed_tx_root,
             state_root,
-            da_ref: H256::ZERO, // DA integration is a later milestone item
+            da_ref: H256::ZERO, // populated by build_and_submit_block once DA is configured
             fork_id: fork.fork_id,
             guest_hash: fork.guest_hash,
             proof_system_version: fork.min_proof_system,
@@ -265,7 +278,11 @@ impl Sequencer {
     }
 
     /// Rebuild a sequencer from a previously persisted state directory.
-    pub fn load_state(stf: StateTransitionFunction, dir: &Path) -> Result<Self> {
+    pub fn load_state(
+        stf: StateTransitionFunction,
+        da: Arc<dyn DaClient>,
+        dir: &Path,
+    ) -> Result<Self> {
         let state = State::load_from_dir(dir)?;
         let last_header = state.last_header.clone();
         Ok(Sequencer {
@@ -273,7 +290,60 @@ impl Sequencer {
             state,
             mempool: Mempool::default(),
             last_header,
+            da,
         })
+    }
+
+    /// Build the next block and publish it to the data availability layer,
+    /// recording the resulting DA reference in the block header.
+    ///
+    /// Fails closed (typed error) when the DA submission is unavailable; a
+    /// block that could not be made available must never be considered final.
+    pub async fn build_and_submit_block(&mut self, max_txs: Option<u32>) -> Result<Block> {
+        let mut block = self.build_block(max_txs)?;
+        let block_bytes = serde_json::to_vec(&block)
+            .map_err(|e| Error::Serialization(format!("block encode: {e}")))?;
+        let post = self
+            .da
+            .post_block(PostBlockRequest {
+                version: 1,
+                api_version: 1,
+                block_bytes: block_bytes.clone(),
+            })
+            .await?;
+        if !post.available {
+            return Err(Error::Consensus(
+                "data availability submission unavailable".to_string(),
+            ));
+        }
+        block.header.da_ref = Hash::sha256(&block_bytes);
+        Ok(block)
+    }
+
+    /// Escape hatch: submit a transaction directly to the data availability
+    /// layer, bypassing sequencer mempool admission, and return the DA
+    /// reference assigned to the submission.
+    ///
+    /// The transaction still passes fail-closed structural and signature
+    /// validation before it is published.
+    pub async fn submit_tx_direct(&mut self, tx: Transaction) -> Result<H256> {
+        self.mempool.validator.validate(&tx)?;
+        let tx_bytes = serde_json::to_vec(&tx)
+            .map_err(|e| Error::Serialization(format!("transaction encode: {e}")))?;
+        let post = self
+            .da
+            .post_tx(workstream_core::traits::da::PostTxRequest {
+                version: 1,
+                api_version: 1,
+                tx_bytes: tx_bytes.clone(),
+            })
+            .await?;
+        if !post.available {
+            return Err(Error::Consensus(
+                "data availability submission unavailable".to_string(),
+            ));
+        }
+        Ok(Hash::sha256(&tx_bytes))
     }
 }
 
@@ -324,10 +394,48 @@ mod tests {
             std::env::temp_dir().join(format!("workstream-sequencer-state-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         sequencer.save_state(&dir).unwrap();
-        let restored = Sequencer::load_state(stf, &dir).unwrap();
+        let restored =
+            Sequencer::load_state(stf, Arc::new(crate::da::InMemoryDaClient::new()), &dir).unwrap();
         assert_eq!(restored.tip(), sequencer.tip());
         assert_eq!(restored.state().root(), sequencer.state().root());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sequencer_build_and_submit_block_publishes_to_da() {
+        let stf = StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap()).unwrap();
+        let da = Arc::new(crate::da::InMemoryDaClient::new());
+        let mut sequencer = Sequencer::with_da(stf, da);
+
+        let block = sequencer.build_and_submit_block(None).await.unwrap();
+        assert_eq!(block.header.number, 1);
+        assert_ne!(block.header.da_ref, H256::ZERO);
+    }
+
+    #[tokio::test]
+    async fn sequencer_escape_hatch_submits_tx_directly_to_da() {
+        let stf = StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap()).unwrap();
+        let da = Arc::new(crate::da::InMemoryDaClient::new());
+        let mut sequencer = Sequencer::with_da(stf, da);
+
+        let pending_before = sequencer.pending();
+        let da_ref = sequencer
+            .submit_tx_direct(seq_tx(
+                account(0x11),
+                0,
+                ActionType::ActorRegister,
+                b"x".to_vec(),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(da_ref, H256::ZERO);
+        // Direct submission bypasses mempool admission/queueing.
+        assert_eq!(sequencer.pending(), pending_before);
+
+        let mut bad = seq_tx(account(0x11), 1, ActionType::ActorRegister, b"y".to_vec());
+        bad.signature = None;
+        let err = sequencer.submit_tx_direct(bad).await.unwrap_err();
+        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
     }
 
     #[test]

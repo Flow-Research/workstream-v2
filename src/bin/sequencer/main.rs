@@ -6,7 +6,6 @@ use tracing::info;
 use workstream_core::config::{load_config, SequencerConfig};
 use workstream_core::{logging, Result};
 use workstream_sequencer::{InMemoryDaClient, Sequencer};
-use workstream_stf::{mvp_genesis_schedule, StateTransitionFunction};
 
 #[derive(Parser, Debug)]
 #[command(name = "workstream-sequencer")]
@@ -36,6 +35,7 @@ async fn main() -> Result<()> {
     // Configure logging from config
     std::env::set_var("RUST_LOG", &config.log_level);
     logging::init_tracing();
+    let (stf, prover) = workstream_prover::runtime::load()?;
     let monitor = workstream_ops::Monitor::start(args.metrics_port).await?;
 
     info!("Starting WorkStream Sequencer on port {}", config.port);
@@ -43,8 +43,8 @@ async fn main() -> Result<()> {
 
     // Event loop: mempool -> block production -> DA submission, with the
     // censorship-resistance escape hatch (DA-direct transaction submissions).
-    let stf = StateTransitionFunction::with_schedule(mvp_genesis_schedule().unwrap()).unwrap();
-    let mut sequencer = Sequencer::with_da_from_env(stf, Arc::new(InMemoryDaClient::new()))?;
+    let mut sequencer =
+        Sequencer::with_da_and_backend(stf, Arc::new(InMemoryDaClient::new()), prover.backend());
 
     let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(10));
     loop {

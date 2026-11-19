@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 pub mod fold;
 pub mod risc0;
+pub mod runtime;
 mod verifier;
 pub use verifier::ReceiptVerifier;
 

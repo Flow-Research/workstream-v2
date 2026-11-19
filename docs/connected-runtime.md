@@ -1,5 +1,14 @@
 # Single-host connected runtime
 
+Run `bash scripts/compose-gate.sh` from a clean checkout with Docker Compose v2
+or later to verify the localnet. It creates isolated volumes and short-lived
+role certificates, waits for role readiness, submits a signed registration,
+compares the writer's proof-bearing block and state root with the verifier's
+published commitment and root, then tears down only its own project. The script
+prints its artifact directory (build output, container status, service logs,
+and receipt). CI retains these files for seven days, including on failure.
+The container RPC is loopback-only; the probe runs inside the node container.
+
 Run `python3 scripts/test-connected-runtime.py` from the repository root on
 Linux or macOS to build all three binaries and exercise a signed work order
 registration through the development proof backend.

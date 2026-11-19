@@ -16,12 +16,9 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "==> Building and starting localnet (sequencer :8545, prover :8080, node :30303)..."
-docker compose -f docker-compose.yml up -d --build
-
-echo
-echo "==> Waiting for containers to start..."
-sleep 2
+echo "==> Building connected services and waiting for prover, sequencer, then verifier..."
+docker compose build bootstrap
+docker compose up -d --no-build --wait --wait-timeout 90 node
 docker compose -f docker-compose.yml ps
 
 echo

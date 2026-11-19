@@ -648,14 +648,17 @@ fn e2e_varying_block_sizes() {
 /// it (with the guest hash) to the block header, publishes the block to the
 /// data availability layer, and the verifying node accepts the proved block.
 #[tokio::test]
+#[ignore = "requires configured RISC Zero guest"]
 async fn e2e_execute_prove_publish_verify() {
     use std::sync::Arc;
-    use workstream_prover::{InMemoryZkBackend, Prover};
     use workstream_sequencer::InMemoryDaClient;
 
     let da = Arc::new(InMemoryDaClient::new());
-    let prover = Arc::new(Prover::new());
-    let mut sequencer = Sequencer::with_da_and_prover(mvp_stf(), da, prover);
+    let mut schedule = mvp_genesis_schedule().unwrap();
+    schedule.forks[0].guest_hash = workstream_prover::risc0::configured_id().unwrap();
+    schedule.forks[0].features.push("risc0-receipts".into());
+    let stf = StateTransitionFunction::with_schedule(schedule.clone()).unwrap();
+    let mut sequencer = Sequencer::with_da(stf.clone(), da);
 
     // Execute: submit transactions and produce (and publish) a block.
     sequencer.submit_tx(register_sponsor()).unwrap();
@@ -674,12 +677,7 @@ async fn e2e_execute_prove_publish_verify() {
     // Verify: the full node verifies the proved block and applies it.
     let mut source = MemoryBlockSource::new();
     source.push(block);
-    let mut node = Node::with_backend(
-        mvp_stf(),
-        mvp_genesis_schedule().unwrap(),
-        source,
-        Arc::new(InMemoryZkBackend::new()),
-    );
+    let mut node = Node::new(stf, schedule, source);
     let results = node.sync().unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(node.tip(), 1);

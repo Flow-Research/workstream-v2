@@ -20,6 +20,7 @@ pub(crate) mod authz;
 pub mod handlers;
 pub mod notes;
 pub mod policy;
+pub mod receipt;
 
 pub use handlers::{
     derive_bundle, derive_guide, derive_lease, derive_project, derive_submission, derive_task,

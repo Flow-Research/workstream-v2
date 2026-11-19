@@ -22,6 +22,8 @@ pub trait VerifierApi: Send + Sync {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerifyBlockRequest {
+    pub height: u64,
+    pub stateroot_post: H256,
     pub version: u32,
     pub api_version: u32,
     pub block_hash: [u8; 32],

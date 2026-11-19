@@ -1,10 +1,25 @@
 //! Verifier API trait
 
+use super::prover::{ProveBlockTransition, ZkProof};
 use crate::hash::H256;
-use crate::types::Transaction;
+use crate::proof::ProofCommitment;
+use crate::types::{BlockNumber, Transaction};
 use crate::{Error, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+
+/// Synchronous proof verifier used by the node's block-apply path (issue #83).
+///
+/// `VerifierApi` is the public async DTO interface; nodes need a synchronous
+/// check so verification can reject a block before any state is committed.
+pub trait BlockProofVerifier: Send + Sync {
+    /// Verify a zkVM proof against the state transition it attests.
+    fn verify_block_transition(
+        &self,
+        transition: &ProveBlockTransition,
+        proof: &ZkProof,
+    ) -> Result<bool>;
+}
 
 #[async_trait]
 pub trait VerifierApi: Send + Sync {
@@ -22,16 +37,21 @@ pub trait VerifierApi: Send + Sync {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerifyBlockRequest {
-    pub height: u64,
-    pub stateroot_post: H256,
     pub version: u32,
     pub api_version: u32,
+    pub height: BlockNumber,
     pub block_hash: [u8; 32],
     pub proof_bundle: Vec<u8>,
     /// Pre-state root the proved transition started from.
     pub stateroot_pre: H256,
+    /// Post-state root the proved transition produced.
+    pub stateroot_post: H256,
+    pub guest_hash: H256,
+    pub commitment: ProofCommitment,
     /// Transactions of the proved transition.
     pub transactions: Vec<Transaction>,
+    #[serde(default)]
+    pub backend_witness: Vec<u8>,
 }
 
 impl VerifyBlockRequest {
@@ -53,12 +73,26 @@ impl VerifyBlockRequest {
                 "proof_bundle cannot be empty".to_string(),
             ));
         }
-        if !self.transactions.is_empty() && self.stateroot_pre == H256::ZERO {
+        if self.commitment.hash()?.as_bytes() != &self.block_hash {
             return Err(Error::Validation(
-                "pre-state root required for transitions with transactions".to_string(),
+                "request block hash does not match proof commitment".to_string(),
             ));
         }
         Ok(())
+    }
+
+    pub fn into_transition(self) -> ProveBlockTransition {
+        ProveBlockTransition {
+            version: 1,
+            height: self.height,
+            block_hash: self.block_hash,
+            stateroot_pre: self.stateroot_pre,
+            stateroot_post: self.stateroot_post,
+            guest_hash: self.guest_hash,
+            commitment: self.commitment,
+            transactions: self.transactions,
+            backend_witness: self.backend_witness,
+        }
     }
 }
 
@@ -74,11 +108,19 @@ pub struct VerifyBlockResponse {
 pub struct VerifyProofRequest {
     pub version: u32,
     pub api_version: u32,
+    pub height: BlockNumber,
+    pub block_hash: [u8; 32],
     pub proof_bytes: Vec<u8>,
     pub public_inputs: Vec<u8>,
     /// Pre-state root the proved transition started from (the post-state
     /// root is carried in `public_inputs`).
     pub stateroot_pre: H256,
+    pub stateroot_post: H256,
+    pub guest_hash: H256,
+    pub commitment: ProofCommitment,
+    pub transactions: Vec<Transaction>,
+    #[serde(default)]
+    pub backend_witness: Vec<u8>,
 }
 
 impl VerifyProofRequest {
@@ -98,7 +140,26 @@ impl VerifyProofRequest {
         if self.proof_bytes.is_empty() {
             return Err(Error::Validation("proof_bytes cannot be empty".to_string()));
         }
+        if self.commitment.hash()?.as_bytes() != &self.block_hash {
+            return Err(Error::Validation(
+                "request block hash does not match proof commitment".to_string(),
+            ));
+        }
         Ok(())
+    }
+
+    pub fn into_transition(self) -> ProveBlockTransition {
+        ProveBlockTransition {
+            version: 1,
+            height: self.height,
+            block_hash: self.block_hash,
+            stateroot_pre: self.stateroot_pre,
+            stateroot_post: self.stateroot_post,
+            guest_hash: self.guest_hash,
+            commitment: self.commitment,
+            transactions: self.transactions,
+            backend_witness: self.backend_witness,
+        }
     }
 }
 

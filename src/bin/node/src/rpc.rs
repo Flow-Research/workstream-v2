@@ -437,9 +437,12 @@ mod tests {
     #[tokio::test]
     async fn rpc_sequencer_submit_tx_roundtrip() {
         let server = in_memory_server();
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
         let mut tx = TxBuilder::new()
             .chain_id(1)
-            .account(crate::accounts::account(7))
+            .account(workstream_core::Hash::sha256(
+                signing_key.verifying_key().as_bytes(),
+            ))
             .nonce(0, 0)
             .add_action(ActionType::ActorRegister, b"x".to_vec())
             .fee(FeeSpec {
@@ -449,11 +452,7 @@ mod tests {
             })
             .build()
             .unwrap();
-        workstream_crypto::signature::sign_tx_ed25519(
-            &mut tx,
-            &ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]),
-        )
-        .unwrap();
+        workstream_crypto::signature::sign_tx_ed25519(&mut tx, &signing_key).unwrap();
         let submit = SubmitTxRequest {
             version: 1,
             api_version: 1,

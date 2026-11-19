@@ -28,6 +28,65 @@ use workstream_core::Error;
 
 use crate::EventIndexer;
 
+#[async_trait::async_trait]
+pub(crate) trait LineEndpoint: Send + Sync + Clone + 'static {
+    async fn line(&self, input: &str) -> JsonRpcResponse;
+}
+#[async_trait::async_trait]
+impl LineEndpoint for RpcServer {
+    async fn line(&self, input: &str) -> JsonRpcResponse {
+        self.handle_line(input).await
+    }
+}
+pub(crate) async fn serve_endpoint<E: LineEndpoint>(listener: TcpListener, endpoint: E) {
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+    loop {
+        let (socket, _) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(_) => break,
+        };
+        let Ok(slot) = slots.clone().try_acquire_owned() else {
+            continue;
+        };
+        let server = endpoint.clone();
+        tokio::spawn(async move {
+            let _slot = slot;
+            serve_connection(socket, server).await;
+        });
+    }
+}
+
+async fn serve_connection<E: LineEndpoint>(socket: TcpStream, endpoint: E) {
+    let mut reader = BufReader::new(socket);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let mut bounded = (&mut reader).take(MAX_FRAME_BYTES + 1);
+        let Ok(Ok(bytes)) = tokio::time::timeout(IO_DEADLINE, bounded.read_line(&mut line)).await
+        else {
+            break;
+        };
+        if bytes == 0 || bytes as u64 > MAX_FRAME_BYTES || !line.ends_with('\n') {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let response = endpoint.line(trimmed).await;
+        let Ok(mut out) = serde_json::to_string(&response) else {
+            break;
+        };
+        out.push('\n');
+        if !matches!(
+            tokio::time::timeout(IO_DEADLINE, reader.write_all(out.as_bytes())).await,
+            Ok(Ok(()))
+        ) {
+            break;
+        }
+    }
+}
+
 /// JSON-RPC protocol version implemented by this server.
 pub const JSON_RPC_VERSION: &str = "2.0";
 const MAX_FRAME_BYTES: u64 = 256 * 1024;
@@ -229,53 +288,7 @@ impl RpcServer {
 
     /// Serve JSON-RPC requests over a TCP listener (newline-delimited JSON).
     pub async fn serve(&self, listener: TcpListener) {
-        let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
-        loop {
-            let (socket, _) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(_) => break,
-            };
-            let Ok(slot) = slots.clone().try_acquire_owned() else {
-                continue;
-            };
-            let server = self.clone();
-            tokio::spawn(async move {
-                let _slot = slot;
-                server.handle_connection(socket).await;
-            });
-        }
-    }
-
-    async fn handle_connection(&self, socket: TcpStream) {
-        let mut reader = BufReader::new(socket);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let mut bounded = (&mut reader).take(MAX_FRAME_BYTES + 1);
-            let Ok(Ok(bytes)) =
-                tokio::time::timeout(IO_DEADLINE, bounded.read_line(&mut line)).await
-            else {
-                break;
-            };
-            if bytes == 0 || bytes as u64 > MAX_FRAME_BYTES || !line.ends_with('\n') {
-                break;
-            }
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let response = self.handle_line(trimmed).await;
-            let Ok(mut out) = serde_json::to_string(&response) else {
-                break;
-            };
-            out.push('\n');
-            if !matches!(
-                tokio::time::timeout(IO_DEADLINE, reader.write_all(out.as_bytes())).await,
-                Ok(Ok(()))
-            ) {
-                break;
-            }
-        }
+        serve_endpoint(listener, self.clone()).await;
     }
 
     async fn handle_line(&self, line: &str) -> JsonRpcResponse {

@@ -1,4 +1,6 @@
 //! Opt-in process-local operational endpoints. Metrics never enter chain state.
+#[cfg(unix)]
+pub mod ipc;
 use axum::{
     extract::State,
     http::{header, StatusCode},

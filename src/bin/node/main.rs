@@ -51,6 +51,11 @@ async fn main() -> Result<()> {
     logging::init_tracing();
     let (stf, prover) = workstream_prover::runtime::load()?;
     let monitor = workstream_ops::Monitor::start(args.metrics_port).await?;
+    #[cfg(unix)]
+    if let Some(dir) = workstream_ops::ipc::directory()? {
+        return workstream_node::connected::serve(&dir, config.rpc_port, stf, prover, monitor)
+            .await;
+    }
 
     info!(
         "Starting WorkStream Full Node on P2P port {}",

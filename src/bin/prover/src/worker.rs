@@ -1,0 +1,39 @@
+//! Route proof generation to a local worker; verification remains independent.
+use super::*;
+use std::path::{Path, PathBuf};
+use workstream_ops::{ipc, Monitor};
+
+pub struct WorkerBackend {
+    pub socket: PathBuf,
+    pub verifier: Arc<dyn ZkvmBackend>,
+}
+#[async_trait]
+impl ZkvmBackend for WorkerBackend {
+    async fn prove_block_transition(&self, t: &ProveBlockTransition) -> Result<ZkProof> {
+        ipc::call(&self.socket, t).await
+    }
+    fn verify_block_transition(&self, t: &ProveBlockTransition, p: &ZkProof) -> Result<bool> {
+        self.verifier.verify_block_transition(t, p)
+    }
+}
+pub async fn serve(dir: &Path, prover: Prover, monitor: Arc<Monitor>) -> Result<()> {
+    let listener = ipc::listen(&dir.join("worker.sock"))?;
+    let backend = prover.backend();
+    loop {
+        monitor.heartbeat(true);
+        let Ok(connection) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept()).await
+        else {
+            continue;
+        };
+        let (mut s, _) = connection.map_err(ipc::io_err)?;
+        let Ok(t) = ipc::read::<ProveBlockTransition>(&mut s, ipc::BLOCK_LIMIT).await else {
+            continue;
+        };
+        let result = backend
+            .prove_block_transition(&t)
+            .await
+            .map_err(|e| e.to_string());
+        let _ = ipc::write(&mut s, &result).await;
+    }
+}

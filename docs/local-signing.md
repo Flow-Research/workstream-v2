@@ -15,3 +15,9 @@ workstream-sign --network 42 --approve "$approved_digest" \
 ```
 
 The signer uses redirected stdin for the identity and emits signed transaction JSON on success. It does not submit the transaction. Check the exit status before using `signed.json`; `workstream-inspect < signed.json` verifies the signature and displays the signed transaction hash. A changed draft requires a new review.
+
+## Connected-node diagnostics
+
+Run `workstream-chain --port 8545 status` against the local connected node with projections enabled. It reports `verified_height`, `indexed_height`, `lag`, and `freshness`. These are successive local reads: a growing tip can briefly report lag. A current index does not prove the chain is advancing.
+
+Use `doctor` to also check the writer queue, or `smoke` to read one receipt page. Neither submits a transaction or needs a wallet. `status` exits 0 for a readable stale view; `doctor` and `smoke` exit 2 for that condition. Failed reads, malformed replies, and timeouts exit 1. Only loopback connections are supported.

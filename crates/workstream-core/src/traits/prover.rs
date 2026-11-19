@@ -1,7 +1,8 @@
 //! Prover API trait
 
 use crate::hash::H256;
-use crate::types::Transaction;
+use crate::proof::ProofCommitment;
+use crate::types::{BlockNumber, Transaction};
 use crate::{Error, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -21,14 +22,26 @@ pub trait ProverApi: Send + Sync {
     async fn get_prover_status(&self) -> Result<ProverStatus>;
 }
 
-/// A guest-program transition to prove: given the pre-state root and the
-/// block's transactions, the guest computes the post-state root.
+/// A guest-program transition to prove: execute `transactions` from
+/// `stateroot_pre` and attest `stateroot_post`.
+///
+/// `block_hash` is the canonical [`ProofCommitment`] hash, not the DA
+/// reference or a block hash that includes the attached proof. The
+/// `backend_witness` is private input for the backend (a snapshot for the
+/// in-memory/guest backends); it is never serialized into a block header.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProveBlockTransition {
     pub version: u32,
+    pub height: BlockNumber,
+    /// Canonical proof commitment hash.
     pub block_hash: [u8; 32],
     pub stateroot_pre: H256,
+    pub stateroot_post: H256,
+    pub guest_hash: H256,
+    pub commitment: ProofCommitment,
     pub transactions: Vec<Transaction>,
+    #[serde(default)]
+    pub backend_witness: Vec<u8>,
 }
 
 impl ProveBlockTransition {
@@ -39,24 +52,48 @@ impl ProveBlockTransition {
                 self.version
             )));
         }
-        Ok(())
+        if self.height == 0 {
+            return Err(Error::Validation(
+                "proof transition height must be greater than zero".to_string(),
+            ));
+        }
+        let expected = self.commitment.hash()?;
+        if expected.as_bytes() != &self.block_hash {
+            return Err(Error::Validation(
+                "transition block hash does not match proof commitment".to_string(),
+            ));
+        }
+        self.commitment.matches_transition(
+            self.height,
+            self.stateroot_pre,
+            self.stateroot_post,
+            self.guest_hash,
+            &self.transactions,
+        )
+    }
+
+    /// Canonical commitment hash as an `H256`.
+    pub fn commitment_hash(&self) -> Result<H256> {
+        self.commitment.hash()
     }
 }
 
 /// A zero-knowledge proof over a guest program execution, together with the
 /// public inputs the proof attests (here: the post-state root the guest
 /// computed from the pre-state root and the block transactions).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZkProof {
     pub version: u32,
     pub proof_bytes: Vec<u8>,
     pub public_inputs: Vec<u8>,
     pub guest_id: String,
-    /// Hash of the guest program that produced the proof.
+    /// Measured hash of the guest program that produced the proof.
     pub guest_hash: H256,
     /// Pre-state root the guest proved from (the post-state root is the
     /// public input).
     pub stateroot_pre: H256,
+    /// Hash of the canonical [`ProofCommitment`] bound by the proof.
+    pub commitment: H256,
 }
 
 impl ZkProof {
@@ -66,6 +103,19 @@ impl ZkProof {
                 "unsupported proof version: {}",
                 self.version
             )));
+        }
+        if self.proof_bytes.is_empty() {
+            return Err(Error::Validation("proof_bytes cannot be empty".to_string()));
+        }
+        if self.public_inputs.len() != 32 {
+            return Err(Error::Validation(
+                "public_inputs must be a 32-byte state root".to_string(),
+            ));
+        }
+        if self.commitment == H256::ZERO {
+            return Err(Error::Validation(
+                "proof commitment cannot be zero".to_string(),
+            ));
         }
         Ok(())
     }
@@ -93,9 +143,15 @@ pub trait ZkvmBackend: Send + Sync {
 pub struct ProveBlockRequest {
     pub version: u32,
     pub api_version: u32,
+    pub height: BlockNumber,
     pub block_hash: [u8; 32],
     pub stateroot_pre: H256,
+    pub stateroot_post: H256,
+    pub guest_hash: H256,
+    pub commitment: ProofCommitment,
     pub transactions: Vec<Transaction>,
+    #[serde(default)]
+    pub backend_witness: Vec<u8>,
 }
 
 impl ProveBlockRequest {
@@ -112,12 +168,39 @@ impl ProveBlockRequest {
                 self.api_version
             )));
         }
-        if !self.transactions.is_empty() && self.stateroot_pre == H256::ZERO {
+        if self.height == 0 {
             return Err(Error::Validation(
-                "pre-state root required for transitions with transactions".to_string(),
+                "proof request height must be greater than zero".to_string(),
             ));
         }
-        Ok(())
+        let expected = self.commitment.hash()?;
+        if expected.as_bytes() != &self.block_hash {
+            return Err(Error::Validation(
+                "request block hash does not match proof commitment".to_string(),
+            ));
+        }
+        self.commitment.matches_transition(
+            self.height,
+            self.stateroot_pre,
+            self.stateroot_post,
+            self.guest_hash,
+            &self.transactions,
+        )
+    }
+
+    /// Convert the DTO into the backend transition.
+    pub fn into_transition(self) -> ProveBlockTransition {
+        ProveBlockTransition {
+            version: self.version,
+            height: self.height,
+            block_hash: self.block_hash,
+            stateroot_pre: self.stateroot_pre,
+            stateroot_post: self.stateroot_post,
+            guest_hash: self.guest_hash,
+            commitment: self.commitment,
+            transactions: self.transactions,
+            backend_witness: self.backend_witness,
+        }
     }
 }
 
@@ -129,6 +212,11 @@ pub struct ProofBundleResponse {
     pub public_inputs: Vec<u8>,
     pub guest_id: String,
     pub guest_hash: H256,
+    /// Pre-state root the guest proved from.
+    pub stateroot_pre: H256,
+    /// Full state root attested by the proof (also encoded in `public_inputs`).
+    pub stateroot_post: H256,
+    pub commitment: H256,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

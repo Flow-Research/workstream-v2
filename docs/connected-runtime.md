@@ -80,7 +80,9 @@ For the connected writer set `WORKSTREAM_WRITER_DATA` to a private directory
 on persistent local storage. Compose provisions a writer-only volume. The
 chain-specific SQLite journal commits signed bytes before `Pending`; a retry
 of those bytes returns the same transaction ID. Recovery reloads the last
-committed snapshot and the pending queue in order. Look up `tx_hash` via
+committed snapshot and the pending queue in order. Stable publication keys,
+the crash-window model and the checkpoint trust policy are documented in
+[checkpoint restore](checkpoint-restore.md). Look up `tx_hash` via
 `workstream.node.getReceipt`: the writer reports Unknown, Pending, Published
 or Rejected, and the node reports Verified only after applying a block that
 contains that ID. `workstream.sequencer.getMempoolStatus` reports pending

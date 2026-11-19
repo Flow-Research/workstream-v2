@@ -201,6 +201,85 @@ pub struct Sequencer {
     backend: Option<Arc<dyn ZkvmBackend>>,
 }
 
+/// A proved but not yet published block.
+///
+/// The DA key is fixed at preparation time from the canonical proof
+/// commitment. A crash after external acceptance can therefore replay the
+/// same transition and write the same logical object; the DA adapter's
+/// conditional write rejects divergent bytes instead of rebinding the key.
+pub struct PreparedBlock {
+    block: Block,
+    commitment: H256,
+    staged: Sequencer,
+    published: bool,
+}
+
+impl PreparedBlock {
+    /// Candidate block, including proof and stable DA reference.
+    pub fn block(&self) -> &Block {
+        &self.block
+    }
+
+    /// Stable publication key derived from the proof commitment.
+    pub fn commitment(&self) -> H256 {
+        self.commitment
+    }
+
+    /// Publish the prepared block to DA and the local gossip network.
+    ///
+    /// This is separate from [`Self::commit`] so a journal can durably record
+    /// the publication key between external acceptance and local tip commit.
+    pub async fn publish(&mut self) -> Result<()> {
+        if self.published {
+            return Err(Error::State("prepared block already published".into()));
+        }
+        let block_bytes = serde_json::to_vec(&self.block)
+            .map_err(|e| Error::Serialization(format!("block encode: {e}")))?;
+        let response = self
+            .staged
+            .da
+            .post_block(PostBlockRequest {
+                version: 1,
+                api_version: 1,
+                block_bytes,
+                commitment: Some(self.commitment),
+            })
+            .await?;
+        if !response.available {
+            return Err(Error::Consensus(
+                "data availability submission unavailable".into(),
+            ));
+        }
+        self.staged
+            .p2p
+            .publish_block(PublishBlockRequest {
+                version: 1,
+                api_version: 1,
+                block: self.block.clone(),
+            })
+            .await?;
+        workstream_ops::BLOCKS_SUBMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.published = true;
+        Ok(())
+    }
+
+    /// Install the staged transition as the sequencer's single commit point.
+    pub fn commit(self, target: &mut Sequencer) -> Result<Block> {
+        if !self.published {
+            return Err(Error::State(
+                "cannot commit a block that was not published".into(),
+            ));
+        }
+        let Self {
+            mut staged, block, ..
+        } = self;
+        staged.last_header = Some(block.header.clone());
+        staged.state.last_header = staged.last_header.clone();
+        *target = staged;
+        Ok(block)
+    }
+}
+
 impl Sequencer {
     /// Chain begins at height 1, linked to [`GENESIS_PARENT_HASH`].
     pub fn new(stf: StateTransitionFunction) -> Self {
@@ -448,14 +527,13 @@ impl Sequencer {
         })
     }
 
-    /// Build the next block, generate its zkVM proof, publish the finalized
-    /// block to DA, and commit the staged sequencer only on success.
+    /// Prepare the next block and its proof without publishing or committing.
     ///
-    /// Every fallible step (execution, proving, proof verification and DA)
-    /// operates on a clone. State, tip, mempool and seen hashes are installed
-    /// as one atomic commit, so an unavailable DA layer or failed proof leaves
-    /// the sequencer exactly as it was.
-    pub async fn build_and_submit_block(&mut self, max_txs: Option<u32>) -> Result<Block> {
+    /// The stable DA key is assigned here, from the canonical transition
+    /// commitment. Callers that need to record that key durably before the
+    /// external side effect can do so between [`Self::prepare_block`] and
+    /// [`PreparedBlock::publish`].
+    pub async fn prepare_block(&self, max_txs: Option<u32>) -> Result<PreparedBlock> {
         let pre_state = self.state.clone();
         let stateroot_pre = pre_state.root().hash();
         let backend_witness = postcard::to_allocvec(&pre_state.snapshot())
@@ -464,8 +542,6 @@ impl Sequencer {
         let mut staged = self.clone();
         let mut block = staged.build_block(max_txs)?;
 
-        // The fork is resolved from the candidate height, not the committed
-        // tip. Reject before proving if the header advertises another guest.
         let fork = staged
             .stf
             .active_fork_at(block.header.number)
@@ -483,11 +559,10 @@ impl Sequencer {
         let proof_commitment =
             ProofCommitment::new(&block.header, stateroot_pre, &block.transactions)?;
         let commitment = proof_commitment.hash()?;
-        let block_hash = *commitment.as_bytes();
         let transition = ProveBlockTransition {
             version: 1,
             height: block.header.number,
-            block_hash,
+            block_hash: *commitment.as_bytes(),
             stateroot_pre,
             stateroot_post,
             guest_hash: block.header.guest_hash,
@@ -537,42 +612,21 @@ impl Sequencer {
             }
         }
 
-        // Attach the self-describing envelope and stable DA key before
-        // publication. `header_hash` excludes `proof` and `da_ref` does not
-        // participate in the proof commitment, so the binding stays stable.
         block.header.proof = Some(encode_header_proof(&proof)?);
         block.header.da_ref = commitment;
-        let block_bytes = serde_json::to_vec(&block)
-            .map_err(|e| Error::Serialization(format!("block encode: {e}")))?;
-        let post = staged
-            .da
-            .post_block(PostBlockRequest {
-                version: 1,
-                api_version: 1,
-                block_bytes: block_bytes.clone(),
-                commitment: Some(commitment),
-            })
-            .await?;
-        if !post.available {
-            return Err(Error::Consensus(
-                "data availability submission unavailable".to_string(),
-            ));
-        }
-        self.p2p
-            .publish_block(PublishBlockRequest {
-                version: 1,
-                api_version: 1,
-                block: block.clone(),
-            })
-            .await?;
-        workstream_ops::BLOCKS_SUBMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(PreparedBlock {
+            block,
+            commitment,
+            staged,
+            published: false,
+        })
+    }
 
-        // Single commit point: all of state, header, mempool and seen hashes
-        // come from `staged` together.
-        staged.last_header = Some(block.header.clone());
-        staged.state.last_header = staged.last_header.clone();
-        *self = staged;
-        Ok(block)
+    /// Build, prove, publish and atomically commit one block.
+    pub async fn build_and_submit_block(&mut self, max_txs: Option<u32>) -> Result<Block> {
+        let mut prepared = self.prepare_block(max_txs).await?;
+        prepared.publish().await?;
+        prepared.commit(self)
     }
 
     /// Escape hatch: submit a transaction directly to the data availability
@@ -951,6 +1005,31 @@ mod tests {
             postcard::to_allocvec(&(a1, a2)).unwrap(),
             postcard::to_allocvec(&(b1, b2)).unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn prepared_publication_key_is_replay_stable() {
+        let (sponsor, worker) = actor_set();
+        let mut first = mvp_sequencer();
+        first.submit_tx(sponsor.clone()).unwrap();
+        let prepared = first.prepare_block(Some(1)).await.unwrap();
+        let key = prepared.commitment();
+        let root = prepared.block().header.state_root.clone();
+        assert_eq!(prepared.block().header.da_ref, key);
+
+        let mut replay = mvp_sequencer();
+        replay.submit_tx(sponsor).unwrap();
+        let repeated = replay.prepare_block(Some(1)).await.unwrap();
+        assert_eq!(repeated.commitment(), key);
+        assert_eq!(repeated.block().header.state_root, root);
+
+        let mut different = mvp_sequencer();
+        different.submit_tx(worker).unwrap();
+        let other = different.prepare_block(Some(1)).await.unwrap();
+        assert_ne!(other.commitment(), key);
+        // A prepared block cannot become a local tip before external
+        // publication succeeds.
+        assert!(other.commit(&mut different).is_err());
     }
 
     /// Build a deterministic two-block chain: register two actors + grant in

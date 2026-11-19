@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+pub mod fold;
 pub mod risc0;
 
 use async_trait::async_trait;

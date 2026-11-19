@@ -25,6 +25,31 @@ pub struct Claim {
     pub transactions_hash: H256,
 }
 
+/// Ordered, public batch statement. Both the composing guest and its consumer
+/// bind the approved leaf image, heights, block identifiers and all roots.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pair {
+    pub leaf_image: H256,
+    pub blocks: [Claim; 2],
+}
+
+impl Pair {
+    pub fn validate(&self) -> Result<()> {
+        let [a, b] = &self.blocks;
+        if a.version != 1
+            || b.version != 1
+            || a.height == 0
+            || a.height.checked_add(1) != Some(b.height)
+            || a.post != b.pre
+        {
+            return Err(Error::InvalidProof(
+                "nonconsecutive batch transitions".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Claim {
     pub fn new(
         height: u64,

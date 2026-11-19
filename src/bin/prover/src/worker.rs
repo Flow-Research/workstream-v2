@@ -4,19 +4,21 @@ use std::path::{Path, PathBuf};
 use workstream_ops::{ipc, Monitor};
 
 pub struct WorkerBackend {
+    pub client: ipc::tls::Client,
     pub socket: PathBuf,
     pub verifier: Arc<dyn ZkvmBackend>,
 }
 #[async_trait]
 impl ZkvmBackend for WorkerBackend {
     async fn prove_block_transition(&self, t: &ProveBlockTransition) -> Result<ZkProof> {
-        ipc::call(&self.socket, t).await
+        ipc::call(&self.client, &self.socket, t).await
     }
     fn verify_block_transition(&self, t: &ProveBlockTransition, p: &ZkProof) -> Result<bool> {
         self.verifier.verify_block_transition(t, p)
     }
 }
 pub async fn serve(dir: &Path, prover: Prover, monitor: Arc<Monitor>) -> Result<()> {
+    let tls = ipc::tls::Server::load()?;
     let listener = ipc::listen(&dir.join("worker.sock"))?;
     let backend = prover.backend();
     loop {
@@ -26,7 +28,10 @@ pub async fn serve(dir: &Path, prover: Prover, monitor: Arc<Monitor>) -> Result<
         else {
             continue;
         };
-        let (mut s, _) = connection.map_err(ipc::io_err)?;
+        let (socket, _) = connection.map_err(ipc::io_err)?;
+        let Ok(mut s) = tls.accept(socket).await else {
+            continue;
+        };
         let Ok(t) = ipc::read::<ProveBlockTransition>(&mut s, ipc::BLOCK_LIMIT).await else {
             continue;
         };

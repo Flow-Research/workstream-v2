@@ -37,8 +37,10 @@ impl SequencerApiImpl {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Sequencer> {
-        self.inner.lock().expect("sequencer api mutex poisoned")
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Sequencer>> {
+        self.inner
+            .lock()
+            .map_err(|_| Error::State("sequencer unavailable".into()))
     }
 }
 
@@ -56,7 +58,7 @@ impl SequencerApi for SequencerApiImpl {
         req.validate()?;
         let tx: Transaction = serde_json::from_slice(&req.tx_bytes)
             .map_err(|e| Error::Validation(format!("transaction decode: {e}")))?;
-        let mut sequencer = self.lock();
+        let mut sequencer = self.lock()?;
         let tx_hash = sequencer.submit_tx(tx)?;
         Ok(SubmitTxResponse {
             version: 1,
@@ -67,7 +69,7 @@ impl SequencerApi for SequencerApiImpl {
     }
 
     async fn get_mempool_status(&self) -> Result<MempoolStatus> {
-        let sequencer = self.lock();
+        let sequencer = self.lock()?;
         Ok(MempoolStatus {
             version: 1,
             api_version: 1,
@@ -76,9 +78,9 @@ impl SequencerApi for SequencerApiImpl {
         })
     }
 
-    async fn build_block(&self, req: BuildBlockRequest) -> Result<BlockHeaderDraft> {
+    async fn preview_block(&self, req: BuildBlockRequest) -> Result<BlockHeaderDraft> {
         req.validate()?;
-        let mut sequencer = self.lock();
+        let mut sequencer = self.lock()?.clone();
         let block = sequencer.build_block(req.max_txs)?;
         let block_hash = crate::header_hash(&block.header)?;
         Ok(BlockHeaderDraft {

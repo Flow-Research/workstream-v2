@@ -55,6 +55,13 @@ def start_postgres(directory, cleanup):
     proofjobs = psql + ['-d', 'proofjobs']
     subprocess.run(proofjobs + ['-c', 'GRANT CREATE, USAGE ON SCHEMA public TO worker'],
                    check=True, capture_output=True)
+    subprocess.run(psql + ['-c', 'CREATE ROLE projection LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE'],
+                   check=True, capture_output=True)
+    subprocess.run(psql + ['-c', 'CREATE DATABASE projections'],
+                   check=True, capture_output=True)
+    projections = psql + ['-d', 'projections']
+    subprocess.run(projections + ['-c', 'GRANT CREATE, USAGE ON SCHEMA public TO projection'],
+                   check=True, capture_output=True)
     return sock, port, proofjobs
 
 

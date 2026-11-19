@@ -46,6 +46,32 @@ The node fetches complete blocks from the writer, executes their transactions
 and verifies their proofs independently. When the writer is unavailable, tip
 queries still report the last locally verified height; submission fails.
 
+### Durable proof jobs
+
+The proof worker stores jobs in PostgreSQL, keyed by `(chain, guest,
+commitment)`. The commitment binds height, roots and the exact transaction
+set, so a completion from another tip or another guest can never satisfy a
+different key. Witness bytes live in `proof_job_witness` and are removed in the
+same transaction that stores the result or rejection. `proof_job_status`
+exposes only height, attempts, queue age, prove duration and rejection reason.
+
+The worker owns its chain with a PostgreSQL session advisory lock. On restart
+it reclaims jobs that still have a witness and checks every completion against
+its key before storing it. Duplicate requests for a completed key return the
+stored proof. A second worker for the same chain exits rather than racing.
+
+In Compose, `jobdb` listens only on a private Unix socket and authenticates the
+worker with a short-lived password. Set `WORKSTREAM_JOBS_SOCKET`, optionally
+`WORKSTREAM_JOBS_PORT`, and `WORKSTREAM_JOBS_PASSWORD_FILE`. The worker socket
+is replaced only by the process holding the chain lock. `WORKSTREAM_PROFILE=dev`
+also accepts `WORKSTREAM_DEV_PROOF_DELAY_MS` for deterministic fault injection
+in local restart drills; production profiles ignore it.
+
+The local drill in `scripts/test-connected-runtime.py` starts an ephemeral
+cluster, SIGKILLs the worker mid-proof, and asserts that one job with a private
+witness was retained, that the restarted worker reclaimed it (`attempts=2`),
+that the witness was removed, and that the public view has no witness columns.
+
 For the connected writer set `WORKSTREAM_WRITER_DATA` to a private directory
 on persistent local storage. Compose provisions a writer-only volume. The
 chain-specific SQLite journal commits signed bytes before `Pending`; a retry

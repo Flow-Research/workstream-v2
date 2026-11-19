@@ -40,12 +40,18 @@ async fn main() -> Result<()> {
     // Configure logging from config
     std::env::set_var("RUST_LOG", &config.log_level);
     logging::init_tracing();
-    let (_, prover) =
+    let (stf, prover) =
         workstream_prover::runtime::load_checked(Some(&config.zkvm), config.guest_id.as_deref())?;
     let monitor = workstream_ops::Monitor::start(args.metrics_port).await?;
     #[cfg(unix)]
     if let Some(dir) = workstream_ops::ipc::directory()? {
-        return workstream_prover::worker::serve(&dir, prover, monitor).await;
+        return workstream_prover::worker::serve(
+            &dir,
+            stf.fork_schedule().chain_id,
+            prover,
+            monitor,
+        )
+        .await;
     }
 
     info!("Starting WorkStream Prover");

@@ -439,7 +439,11 @@ mod tests {
         let server = in_memory_server();
         let mut tx = TxBuilder::new()
             .chain_id(1)
-            .account(crate::accounts::account(7))
+            .account(workstream_core::Hash::sha256(
+                &ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+                    .verifying_key()
+                    .to_bytes(),
+            ))
             .nonce(0, 0)
             .add_action(ActionType::ActorRegister, b"x".to_vec())
             .fee(FeeSpec {

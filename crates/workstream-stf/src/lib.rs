@@ -1735,10 +1735,7 @@ mod mvp_handler_tests {
                 review_lease_payload(submission),
             )
             .unwrap_err();
-            assert!(
-                matches!(err, Error::Unauthorized(_)),
-                "got {err:?} for {denied:?}"
-            );
+            assert!(matches!(err, Error::Unauthorized(_)));
         }
 
         // An independent registered actor can lease the same submission.

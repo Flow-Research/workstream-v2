@@ -1,0 +1,7 @@
+# Independent review register
+
+Open `/review` on the explorer-enabled HTTPS origin. The queue shows up to 25 unfinalized submissions; `/review?submission=<64-hex-id>` also opens finalized cases. The case resolves the evidence commitment from the archived submission transaction, checks the derived submission ID, and displays the guide version pinned when the task was screened. The latest 25 lease/decision events link to verifier receipts. Projection hints do not authorize actions.
+
+The author and task sponsor see their conflict and cannot prepare a review through the desk. The STF independently refuses those leases. An independent registered reviewer first signs a lease, then reads the evidence using a workspace subject with a scoped read grant. The browser hashes the downloaded bytes before offering them as a file for local inspection. Checking the digest establishes byte identity, not quality or safety of a file. Never supply a wallet key to the register.
+
+After inspection select Accept, NeedsRevision or Reject and sign locally. Opening a preview has no effect on the lease. Reloading requires inspecting evidence again before preparing a decision. Retries use the same signed file, request ID and receipt; the STF consumes the lease once. Evidence inspection is a UI safeguard, not a new consensus attestation. Run the independent Chromium drill with `python3 scripts/test-projections.py --worker-browser`; this local drill is not part of hosted CI.

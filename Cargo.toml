@@ -9,6 +9,7 @@ members = [
     "crates/workstream-stf",
     "crates/workstream-rlp",
     "crates/workstream-tests",
+    "crates/workstream-api",
     "src/bin/sequencer",
     "src/bin/prover",
     "src/bin/node",

@@ -1,5 +1,10 @@
 //! Connected-mode node: admission is forwarded; the verified tip is local.
-use crate::{rpc::*, MemoryBlockSource, Node};
+use crate::{
+    projection::{Projection, ProjectionInput},
+    rpc::*,
+    MemoryBlockSource, Node,
+};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
@@ -28,6 +33,22 @@ struct Gateway {
     client: ipc::tls::Client,
     writer: PathBuf,
     tip: tokio::sync::watch::Receiver<(u64, StateRoot, Option<H256>)>,
+    projection: Option<Arc<Projection>>,
+}
+
+fn default_page_limit() -> u64 {
+    50
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectionPageParams {
+    kind: String,
+    #[serde(default)]
+    cursor: String,
+    #[serde(default)]
+    event_type: String,
+    #[serde(default = "default_page_limit")]
+    limit: u64,
 }
 
 impl Gateway {
@@ -42,6 +63,31 @@ impl Gateway {
         Ok(
             json!({"version":1,"api_version":1,"status":receipt.status,"height":receipt.height,"tx_hash":receipt.tx_hash}),
         )
+    }
+
+    async fn projection_status(&self) -> Result<Value> {
+        let projection = self
+            .projection
+            .as_ref()
+            .ok_or_else(|| Error::NotFound("projection is not configured".into()))?;
+        Ok(serde_json::to_value(projection.status().await?)?)
+    }
+
+    async fn projection_page(&self, params: Option<Value>) -> Result<Value> {
+        let projection = self
+            .projection
+            .as_ref()
+            .ok_or_else(|| Error::NotFound("projection is not configured".into()))?;
+        let params: ProjectionPageParams = serde_json::from_value(params.unwrap_or(Value::Null))
+            .map_err(|_| Error::Validation("invalid projection page request".into()))?;
+        projection
+            .page(
+                &params.kind,
+                &params.cursor,
+                &params.event_type,
+                params.limit,
+            )
+            .await
     }
 }
 #[async_trait::async_trait]
@@ -66,6 +112,8 @@ impl LineEndpoint for Gateway {
                         Ok(json!({"height":height,"state_root":root,"da_ref":da_ref}))
                     }
                     ("2.0","workstream.sequencer.getMempoolStatus")=>ipc::call::<_,(u64,u64)>(&self.client,&self.writer,&Request::Queue).await.map(|(pending_count,size_bytes)|json!({"pending_count":pending_count,"size_bytes":size_bytes})).map_err(|_|(RPC_ERROR_INTERNAL,"writer unavailable")),
+                    ("2.0","workstream.indexer.getStatus")=>self.projection_status().await.map_err(|e|match e {Error::NotFound(_)=>(RPC_ERROR_METHOD_NOT_FOUND,"projection unavailable"),Error::Validation(_)=>(RPC_ERROR_INVALID_PARAMS,"invalid projection request"),_=>(RPC_ERROR_INTERNAL,"projection unavailable")}),
+                    ("2.0","workstream.indexer.getPage")=>self.projection_page(req.params).await.map_err(|e|match e {Error::NotFound(_)=>(RPC_ERROR_METHOD_NOT_FOUND,"projection unavailable"),Error::Validation(_)=>(RPC_ERROR_INVALID_PARAMS,"invalid projection request"),_=>(RPC_ERROR_INTERNAL,"projection unavailable")}),
                     ("2.0","workstream.node.getReceipt")=>match req.params.and_then(|p|p.get("tx_hash").cloned()).and_then(|v|serde_json::from_value::<H256>(v).ok()) {
                         None=>Err((RPC_ERROR_INVALID_PARAMS,"expected tx_hash")),
                         Some(id)=>{let height=self.included.read().await.get(&id).copied();if let Some(height)=height {Ok(json!({"tx_hash":id,"status":"Verified","height":height}))} else {ipc::call::<_,Receipt>(&self.client,&self.writer,&Request::Receipt(id)).await.map(|r|json!(r)).map_err(|_|(RPC_ERROR_INTERNAL,"writer unavailable"))}}
@@ -107,6 +155,7 @@ pub async fn serve(
         .await
         .map_err(ipc::io_err)?;
     let schedule = stf.fork_schedule().clone();
+    let projection = Projection::open(schedule.chain_id).await?.map(Arc::new);
     let mut node = Node::with_backend(stf, schedule, MemoryBlockSource::new(), prover.backend())
         .require_proof();
     let (tx, tip) = tokio::sync::watch::channel((0, node.state_root(), None));
@@ -128,6 +177,7 @@ pub async fn serve(
             client: client.clone(),
             writer: writer.clone(),
             tip,
+            projection: projection.clone(),
         },
     );
     let sync = async {
@@ -205,12 +255,25 @@ pub async fn serve(
             };
             match fetched {
                 Some((block, da_ref)) => {
-                    let ids = block
+                    let verified_block = block.clone();
+                    let ids = verified_block
                         .transactions
                         .iter()
                         .map(workstream_sequencer::tx_hash)
                         .collect::<Result<Vec<_>>>()?;
-                    node.apply_block(block)?;
+                    let applied = node.apply_block(block)?;
+                    if let Some(projection) = projection.as_ref() {
+                        projection
+                            .apply(ProjectionInput {
+                                height: applied.height,
+                                state_root: &applied.state_root,
+                                da_ref,
+                                block: &verified_block,
+                                events: &applied.events,
+                                tx_hashes: &ids,
+                            })
+                            .await?;
+                    }
                     included
                         .write()
                         .await

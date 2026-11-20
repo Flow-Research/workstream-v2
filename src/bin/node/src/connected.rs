@@ -215,6 +215,13 @@ pub async fn serve(
             .map(str::to_string)
             .collect();
         let config = workstream_api::ApiConfig {
+            evidence: std::env::var_os("WORKSTREAM_EVIDENCE_DIR")
+                .map(|path| {
+                    workstream_api::server::EvidenceStore::open(Path::new(&path))
+                        .map(Arc::new)
+                        .map_err(|e| Error::Config(e.into()))
+                })
+                .transpose()?,
             explorer: std::env::var("WORKSTREAM_EXPLORER").as_deref() == Ok("1"),
             workspace_login: std::env::var_os("WORKSTREAM_WORKSPACE_OIDC_CONFIG")
                 .map(|path| {

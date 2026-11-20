@@ -12,6 +12,7 @@
 //!   never include transaction payloads, witnesses or signing material.
 mod evidence;
 mod explorer;
+mod review;
 mod sponsor;
 mod worker;
 pub use evidence::EvidenceStore;
@@ -313,7 +314,7 @@ async fn security_and_cors<B: Backend>(
     let sponsor = state.config.explorer
         && matches!(
             request.uri().path(),
-            "/sponsor" | "/sponsor/preview" | "/worker"
+            "/sponsor" | "/sponsor/preview" | "/worker" | "/review"
         );
     let mut response = next.run(request).await;
     if allowed {
@@ -644,6 +645,7 @@ pub fn router<B: Backend>(state: Arc<ApiState<B>>) -> Router {
             .route("/explorer.css", get(explorer::css))
             .merge(sponsor::routes::<B>())
             .merge(worker::routes::<B>())
+            .merge(review::routes::<B>())
     } else {
         Router::new()
     };

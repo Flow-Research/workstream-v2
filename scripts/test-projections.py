@@ -65,6 +65,15 @@ def run(directory, binaries, fixtures, unauthorized):
         reserve.bind(('127.0.0.1', 0))
         api_port = reserve.getsockname()[1]
     env.update(WORKSTREAM_EXPLORER='1', WORKSTREAM_API_PORT=str(api_port))
+    browser = '--worker-browser' in sys.argv
+    if browser:
+        login = json.loads(subprocess.check_output(['node','scripts/workspace-login-fixture.mjs']))
+        config = directory / 'oidc.json'
+        config.write_text(json.dumps(login['config']))
+        private = directory / 'evidence'
+        private.mkdir(mode=0o700)
+        env.update(WORKSTREAM_EVIDENCE_DIR=str(private), WORKSTREAM_WORKSPACE_OIDC_CONFIG=str(config),
+                   WORKSTREAM_API_ORIGINS=f'https://127.0.0.1:{api_port}')
 
     def https(path, *args):
         # Each invocation opens a new authenticated TLS connection. No cookie,
@@ -213,8 +222,14 @@ def run(directory, binaries, fixtures, unauthorized):
                     assert summary['receipt_page_read'] is True
         print('Wallet diagnostics: status, doctor and smoke distinguished 1/1, 1/0 and recovered 1/1', flush=True)
 
-        for fixture in fixtures[1:]:
+        for fixture in fixtures[1:11] if browser else fixtures[1:]:
             submit(fixture)
+        if browser:
+            wait(lambda: verified()['height'] == 11)
+            from worker_browser import exercise
+            exercise(api_port, private, login['valid'], fixtures[11:15], verified)
+            for fixture in fixtures[15:]:
+                submit(fixture)
         tip = wait(lambda: (t if (t := verified())['height'] == len(fixtures) else None))
         state = wait(lambda: (s if (s := status())['indexed_height'] == len(fixtures) else None))
         assert state['verified_height'] == tip['height'] and state['lag'] == 0

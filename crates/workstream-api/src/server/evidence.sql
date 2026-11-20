@@ -9,6 +9,10 @@ CREATE TABLE IF NOT EXISTS objects (
   task TEXT NOT NULL, digest TEXT NOT NULL, body BLOB NOT NULL,
   PRIMARY KEY(task,digest)
 );
+CREATE TABLE IF NOT EXISTS upload_deadlines (
+  subject TEXT NOT NULL, task TEXT NOT NULL, digest TEXT NOT NULL,
+  expires INTEGER NOT NULL, PRIMARY KEY(subject,task,digest)
+);
 CREATE TABLE IF NOT EXISTS tickets (
   subject TEXT NOT NULL, task TEXT NOT NULL, digest TEXT NOT NULL,
   token_hash TEXT NOT NULL UNIQUE, expires INTEGER NOT NULL,

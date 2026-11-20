@@ -4455,6 +4455,7 @@ dependencies = [
 name = "workstream-node"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "clap",
  "ed25519-dalek",
  "postcard",
@@ -4477,6 +4478,8 @@ name = "workstream-ops"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "workstream-core",

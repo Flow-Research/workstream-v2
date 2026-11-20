@@ -31,6 +31,8 @@ use workstream_tx::TxValidator;
 pub mod da;
 pub mod p2p;
 pub mod sequencer_api;
+#[cfg(unix)]
+pub mod writer;
 
 pub use da::InMemoryDaClient;
 pub use p2p::InMemoryP2pNetwork;

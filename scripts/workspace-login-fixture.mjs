@@ -12,6 +12,7 @@ function token(overrides, typ = 'at+jwt') {
   return `${message}.${sign('sha256', Buffer.from(message), privateKey).toString('base64url')}`;
 }
 console.log(JSON.stringify({ config: { issuer, audience, n, e }, valid: token({}),
+  ...(process.argv.includes('--reviewer') ? {reviewer: token({sub:'independent-reviewer'})} : {}),
   expired: token({ exp: now - 1 }), wrongIssuer: token({ iss: 'https://other.example' }),
   wrongAudience: token({ aud: 'other' }), wrongScope: token({ scope: 'other' }),
   future: token({ nbf: now + 3600 }), idToken: token({}, 'JWT') }));

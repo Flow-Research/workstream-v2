@@ -530,6 +530,18 @@ impl Projection {
     /// Expose archive metadata, never the archived transaction or proof bytes.
     pub async fn lookup(&self, kind: &str, key: &str) -> Result<Vec<(String, String)>> {
         let invalid = || Error::Validation("invalid explorer lookup".into());
+        if kind == "review-queue" {
+            let rows=self.client.lock().await.query("SELECT encode(s.subject,'hex'),s.height FROM projection_work_items s WHERE s.chain=$1 AND s.kind='submission.created' AND NOT EXISTS(SELECT 1 FROM projection_work_items a WHERE a.chain=s.chain AND a.kind='accept.finalized' AND a.subject=s.subject) ORDER BY s.height DESC,s.tx_index DESC,s.ordinal DESC LIMIT 25", &[&self.chain]).await.map_err(db)?;
+            return Ok(rows
+                .iter()
+                .map(|r| (r.get(0), r.get::<_, i64>(1).to_string()))
+                .collect());
+        }
+        if kind == "review-case" {
+            return self
+                .review_case(H256::from_hex(key).map_err(|_| invalid())?)
+                .await;
+        }
         if kind == "block" {
             let height: i64 = key.parse().ok().filter(|n| *n > 0).ok_or_else(invalid)?;
             let row = self
@@ -586,6 +598,45 @@ impl Projection {
                 )
             })
             .collect())
+    }
+
+    /// Resolve evidence from the signed submission in the verifier archive and
+    /// guide version from the task's screening event (never today's active guide).
+    async fn review_case(&self, id: H256) -> Result<Vec<(String, String)>> {
+        use workstream_stf::{derive_submission, SubmissionCreatePayload};
+        let client = self.client.lock().await;
+        let Some(row)=client.query_opt("SELECT s.tx_index,b.block FROM projection_work_items s JOIN verified_blocks b USING(chain,height) WHERE s.chain=$1 AND s.kind='submission.created' AND s.subject=$2", &[&self.chain,&raw(&id)]).await.map_err(db)? else{return Ok(vec![])};
+        let block: Block = decode(row.get(1))?;
+        let tx = usize::try_from(row.get::<_, i64>(0))
+            .ok()
+            .and_then(|i| block.transactions.get(i))
+            .ok_or_else(|| Error::State("missing archived submission".into()))?;
+        let payload = tx
+            .actions
+            .iter()
+            .filter(|a| a.action_type == workstream_core::ActionType::SubmissionCreate)
+            .map(|a| decode_event::<SubmissionCreatePayload>(&a.payload))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .find(|p| derive_submission(&p.task, &p.content_hash) == id)
+            .ok_or_else(|| Error::State("submission commitment mismatch".into()))?;
+        let screen=client.query_one("SELECT actor,data FROM projection_work_items WHERE chain=$1 AND kind='task.screened' AND subject=$2", &[&self.chain,&raw(&payload.task)]).await.map_err(db)?;
+        let (_, guide): (H256, H256) = decode_event(screen.get(1))?;
+        let version=client.query_one("SELECT data FROM projection_events WHERE chain=$1 AND event_type='guide.ingested' AND substring(data from 1 for 32)=$2", &[&self.chain,&raw(&guide)]).await.map_err(db)?;
+        let (_, _, version): (H256, H256, u32) = decode_event(version.get(0))?;
+        let mut out = vec![
+            ("submission".into(), id.to_hex()),
+            ("author".into(), tx.account.to_hex()),
+            ("sponsor".into(), h256(screen.get(0))?.to_hex()),
+            ("task".into(), payload.task.to_hex()),
+            ("digest".into(), payload.content_hash.to_hex()),
+            ("guide".into(), guide.to_hex()),
+            ("version".into(), version.to_string()),
+        ];
+        for r in client.query("SELECT reviewer,decision,tx_hash FROM projection_reviews WHERE chain=$1 AND submission=$2 ORDER BY height DESC,tx_index DESC,ordinal DESC LIMIT 25", &[&self.chain,&raw(&id)]).await.map_err(db)? {
+            let d:String=r.get(1);out.push((format!("{} · {}",if d.is_empty(){"Leased"}else{&d},h256(r.get(0))?.to_hex()),h256(r.get(2))?.to_hex()));
+        }
+        Ok(out)
     }
 
     /// Read a whitelisted projection with stable cursor pagination.

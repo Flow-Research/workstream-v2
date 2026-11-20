@@ -52,8 +52,9 @@ use crate::{
 
 /// Runtime policy for the browser API. Defaults fail closed: no browser
 /// origin is trusted until it is explicitly configured.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ApiConfig {
+    pub workspace_login: Option<crate::workspace::WorkspaceLogin>,
     pub allowed_origins: Vec<String>,
     pub session_ttl: Duration,
     pub max_body_bytes: usize,
@@ -62,6 +63,7 @@ pub struct ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
+            workspace_login: None,
             allowed_origins: Vec::new(),
             session_ttl: Duration::from_secs(300),
             max_body_bytes: 256 * 1024,
@@ -362,6 +364,35 @@ async fn context<B: Backend>(
     next.run(request).await
 }
 
+async fn workspace<B: Backend>(
+    State(state): State<Arc<ApiState<B>>>,
+    Extension(meta): Extension<RequestMeta>,
+    headers: HeaderMap,
+) -> Response {
+    let subject = state
+        .config
+        .workspace_login
+        .as_ref()
+        .and_then(|login| login.subject(&bearer(&headers)?));
+    match subject {
+        Some(subject) => json_body(
+            StatusCode::OK,
+            serialize(&Envelope::ok(
+                &meta.request_id,
+                &meta.network,
+                meta.read_height,
+                meta.indexed_height,
+                serde_json::json!({"subject":subject}),
+            )),
+        ),
+        None => simple_error(
+            &meta,
+            ErrorCode::Unauthorized,
+            "workspace login unavailable or invalid",
+        ),
+    }
+}
+
 async fn issue_session<B: Backend>(
     State(state): State<Arc<ApiState<B>>>,
     Extension(meta): Extension<RequestMeta>,
@@ -547,6 +578,7 @@ async fn openapi() -> Response {
 /// schema; all data and submission routes require an unexpired session.
 pub fn router<B: Backend>(state: Arc<ApiState<B>>) -> Router {
     let public = Router::new()
+        .route("/v1/workspace", get(workspace::<B>))
         .route("/v1/session", post(issue_session::<B>))
         .route("/v1/openapi.json", get(openapi))
         .layer(middleware::from_fn_with_state(
@@ -723,6 +755,7 @@ mod tests {
 
     fn test_config() -> ApiConfig {
         ApiConfig {
+            workspace_login: None,
             allowed_origins: vec!["https://app.example".into()],
             session_ttl: Duration::from_secs(300),
             max_body_bytes: 256 * 1024,

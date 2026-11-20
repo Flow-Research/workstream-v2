@@ -130,6 +130,13 @@ pub fn document() -> Value {
         },
         "servers": [{ "url": "https://localhost:{port}/", "description": "Local dev (operator-supplied certificate)" }],
         "paths": {
+            "/v1/workspace": { "get": {
+                "summary": "Read the subject of an optional workspace login", "operationId": "workspaceLogin",
+                "security": [{"workspaceToken":[]}], "responses": {
+                    "200": {"description":"Workspace subject", "content":{"application/json":{"schema":envelope(json!({"type":"object", "required":["subject"], "properties":{"subject":{"type":"string"}}}))}}},
+                    "401": err_ref.clone()
+                }
+            }},
             "/v1/session": {
                 "post": {
                     "summary": "Issue a short-lived session token",
@@ -243,7 +250,7 @@ pub fn document() -> Value {
             }
         },
         "components": {
-            "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } }
+            "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" }, "workspaceToken": {"type":"http", "scheme":"bearer", "bearerFormat":"JWT"} }
         }
     })
 }

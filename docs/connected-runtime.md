@@ -46,6 +46,14 @@ The node fetches complete blocks from the writer, executes their transactions
 and verifies their proofs independently. When the writer is unavailable, tip
 queries still report the last locally verified height; submission fails.
 
-The development archive and pending queue are in memory. A `Pending` response
-is not a durable acknowledgement. Real receipts require the [proof profile](proof-profiles.md)
+For the connected writer set `WORKSTREAM_WRITER_DATA` to a private directory
+on persistent local storage. Compose provisions a writer-only volume. The
+chain-specific SQLite journal commits signed bytes before `Pending`; a retry
+of those bytes returns the same transaction ID. Recovery reloads the last
+committed snapshot and the pending queue in order. Look up `tx_hash` via
+`workstream.node.getReceipt`: the writer reports Unknown, Pending, Published
+or Rejected, and the node reports Verified only after applying a block that
+contains that ID. `workstream.sequencer.getMempoolStatus` reports pending
+count and canonical signed bytes. Removing the writer volume deletes its journal.
+Real receipts require the [proof profile](proof-profiles.md)
 setup; the local smoke test does not exercise that prover.

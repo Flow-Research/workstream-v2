@@ -31,3 +31,7 @@ async-trait = { workspace = true }
 [dev-dependencies]
 workstream-crypto = { path = "../../../crates/workstream-crypto" }
 ed25519-dalek = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rusqlite = { version = "0.43", features = ["bundled", "fallible_uint"] }
+fs2 = "0.4"

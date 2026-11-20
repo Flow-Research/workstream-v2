@@ -8,7 +8,14 @@ fn main() -> workstream_core::Result<()> {
     let mut tx = TxBuilder::new()
         .chain_id(1)
         .account(Hash::sha256(key.verifying_key().as_bytes()))
-        .nonce(0, 0)
+        .nonce(
+            0,
+            if std::env::args().nth(1).as_deref() == Some("future-nonce") {
+                99
+            } else {
+                0
+            },
+        )
         .add_action(
             ActionType::ActorRegister,
             encode_payload(&ActorRegisterPayload {

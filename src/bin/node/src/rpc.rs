@@ -9,10 +9,11 @@
 //! [`RpcServer::handle_request`] dispatch later.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use workstream_core::traits::da::{
     DaClient, GetBlockRequest as DaGetBlockRequest, PostBlockRequest, PostTxRequest,
@@ -29,6 +30,9 @@ use crate::EventIndexer;
 
 /// JSON-RPC protocol version implemented by this server.
 pub const JSON_RPC_VERSION: &str = "2.0";
+const MAX_FRAME_BYTES: u64 = 256 * 1024;
+const MAX_CONNECTIONS: usize = 32;
+const IO_DEADLINE: Duration = Duration::from_secs(10);
 
 /// JSON-RPC error codes used by this server.
 pub const RPC_ERROR_PARSE: i64 = -32700;
@@ -225,13 +229,18 @@ impl RpcServer {
 
     /// Serve JSON-RPC requests over a TCP listener (newline-delimited JSON).
     pub async fn serve(&self, listener: TcpListener) {
+        let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
         loop {
             let (socket, _) = match listener.accept().await {
                 Ok(conn) => conn,
                 Err(_) => break,
             };
+            let Ok(slot) = slots.clone().try_acquire_owned() else {
+                continue;
+            };
             let server = self.clone();
             tokio::spawn(async move {
+                let _slot = slot;
                 server.handle_connection(socket).await;
             });
         }
@@ -242,8 +251,13 @@ impl RpcServer {
         let mut line = String::new();
         loop {
             line.clear();
-            let bytes = reader.read_line(&mut line).await.expect("rpc read");
-            if bytes == 0 {
+            let mut bounded = (&mut reader).take(MAX_FRAME_BYTES + 1);
+            let Ok(Ok(bytes)) =
+                tokio::time::timeout(IO_DEADLINE, bounded.read_line(&mut line)).await
+            else {
+                break;
+            };
+            if bytes == 0 || bytes as u64 > MAX_FRAME_BYTES || !line.ends_with('\n') {
                 break;
             }
             let trimmed = line.trim();
@@ -251,12 +265,14 @@ impl RpcServer {
                 continue;
             }
             let response = self.handle_line(trimmed).await;
-            let mut out = serde_json::to_string(&response).expect("rpc encode");
-            out.push('\n');
-            if reader.write_all(out.as_bytes()).await.is_err() {
+            let Ok(mut out) = serde_json::to_string(&response) else {
                 break;
-            }
-            if reader.flush().await.is_err() {
+            };
+            out.push('\n');
+            if !matches!(
+                tokio::time::timeout(IO_DEADLINE, reader.write_all(out.as_bytes())).await,
+                Ok(Ok(()))
+            ) {
                 break;
             }
         }
@@ -268,7 +284,25 @@ impl RpcServer {
             workstream_ops::RPC_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return self.error_response(None, RPC_ERROR_PARSE, "parse error");
         };
-        self.handle_request(&request).await
+        // The development socket is not a service identity. Deny new methods
+        // by default rather than accidentally exporting an operator capability.
+        match request.method.as_str() {
+            "workstream.sequencer.submitTransaction"
+            | "workstream.sequencer.getMempoolStatus"
+            | "workstream.prover.getStatus"
+            | "workstream.prover.getSupportedGuests"
+            | "workstream.indexer.getEvents"
+            | "workstream.indexer.getEventsByType"
+            | "workstream.indexer.getStateRootAt" => self.handle_request(&request).await,
+            _ => {
+                workstream_ops::RPC_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.error_response(
+                    request.id,
+                    RPC_ERROR_METHOD_NOT_FOUND,
+                    "method unavailable on this listener",
+                )
+            }
+        }
     }
 
     async fn dispatch(
@@ -586,6 +620,21 @@ mod tests {
             })
             .await;
         assert!(status_response.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn development_listener_denies_privileged_methods_before_dispatch() {
+        let server = in_memory_server();
+        for method in [
+            "workstream.prover.proveBlock",
+            "workstream.da.postBlock",
+            "workstream.p2p.publishBlock",
+            "workstream.sequencer.buildBlock",
+        ] {
+            let request = json!({"jsonrpc":"2.0", "id":7, "method":method});
+            let response = server.handle_line(&request.to_string()).await;
+            assert_eq!(response.error.unwrap().code, RPC_ERROR_METHOD_NOT_FOUND);
+        }
     }
 
     #[tokio::test]

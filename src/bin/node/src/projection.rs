@@ -527,6 +527,63 @@ impl Projection {
         })
     }
 
+    /// Expose archive metadata, never the archived transaction or proof bytes.
+    pub async fn lookup(&self, kind: &str, key: &str) -> Result<Vec<(String, String)>> {
+        let invalid = || Error::Validation("invalid explorer lookup".into());
+        if kind == "block" {
+            let height: i64 = key.parse().ok().filter(|n| *n > 0).ok_or_else(invalid)?;
+            let row = self
+                .client
+                .lock()
+                .await
+                .query_opt(
+                    "SELECT block FROM verified_blocks WHERE chain=$1 AND height=$2",
+                    &[&self.chain, &height],
+                )
+                .await
+                .map_err(db)?;
+            let Some(row) = row else {
+                return Ok(vec![]);
+            };
+            let block: Block = decode(row.get::<_, &[u8]>(0))?;
+            let h = block.header;
+            return Ok(vec![
+                ("Archive".into(), "Present in local verified archive".into()),
+                ("Height".into(), h.number.to_string()),
+                ("DA reference".into(), h.da_ref.to_string()),
+                ("Proof guest".into(), h.guest_hash.to_string()),
+                (
+                    "Proof system version".into(),
+                    h.proof_system_version.to_string(),
+                ),
+                ("Fork".into(), h.fork_id.to_string()),
+            ]);
+        }
+        let id = H256::from_hex(key.strip_prefix("0x").unwrap_or(key)).map_err(|_| invalid())?;
+        let column = match kind {
+            "account" => "actor",
+            "task" => "subject",
+            _ => return Err(invalid()),
+        };
+        let query = format!("SELECT kind,height FROM projection_work_items WHERE chain=$1 AND {column}=$2 ORDER BY height DESC,tx_index DESC,ordinal DESC LIMIT 25");
+        let rows = self
+            .client
+            .lock()
+            .await
+            .query(&query, &[&self.chain, &id.as_bytes().as_slice()])
+            .await
+            .map_err(db)?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    format!("Block {}", r.get::<_, i64>(1)),
+                    r.get::<_, String>(0),
+                )
+            })
+            .collect())
+    }
+
     /// Read a whitelisted projection with stable cursor pagination.
     pub async fn page(
         &self,

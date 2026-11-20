@@ -215,6 +215,7 @@ pub async fn serve(
             .map(str::to_string)
             .collect();
         let config = workstream_api::ApiConfig {
+            explorer: std::env::var("WORKSTREAM_EXPLORER").as_deref() == Ok("1"),
             workspace_login: std::env::var_os("WORKSTREAM_WORKSPACE_OIDC_CONFIG")
                 .map(|path| {
                     let bytes = std::fs::read(path)

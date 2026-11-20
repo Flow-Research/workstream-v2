@@ -21,3 +21,11 @@ The signer uses redirected stdin for the identity and emits signed transaction J
 Run `workstream-chain --port 8545 status` against the local connected node with projections enabled. It reports `verified_height`, `indexed_height`, `lag`, and `freshness`. These are successive local reads: a growing tip can briefly report lag. A current index does not prove the chain is advancing.
 
 Use `doctor` to also check the writer queue, or `smoke` to read one receipt page. Neither submits a transaction or needs a wallet. `status` exits 0 for a readable stale view; `doctor` and `smoke` exit 2 for that condition. Failed reads, malformed replies, and timeouts exit 1. Only loopback connections are supported.
+
+## Optional workspace login
+
+The connected HTTPS API accepts an OIDC provider's access token at `GET /v1/workspace` in the `Authorization: Bearer` header. Set `WORKSTREAM_WORKSPACE_OIDC_CONFIG` to an operator-controlled JSON file containing `issuer` (exact HTTPS issuer), `audience` (the workspace resource), and `n` and `e` (the pinned RSA public JWK components). Without configuration, the endpoint denies all logins. An invalid configuration prevents API startup.
+
+The endpoint checks the RS256 signature, `at+jwt` token type, issuer, single audience, expiry, issue time, optional not-before time, subject and `workspace:login` scope on every read. Success returns only the workspace subject. Token roles never enter the transaction validator, and workspace tokens cannot substitute for API session tokens. A valid API session still requires an independently signed protocol transaction.
+
+The client obtains the token from its provider. Interactive authorization, automatic discovery, revocation before expiry and automatic signing-key rotation are not implemented here. Use short-lived tokens and deploy a new trusted public key when rotating. The TLS drill uses an ephemeral issuer and scans captured service output for known credentials and the fixture signing seed; this is regression evidence, not a guarantee about operator-side proxies or third-party logs.

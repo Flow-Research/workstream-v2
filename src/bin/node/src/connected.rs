@@ -215,6 +215,14 @@ pub async fn serve(
             .map(str::to_string)
             .collect();
         let config = workstream_api::ApiConfig {
+            workspace_login: std::env::var_os("WORKSTREAM_WORKSPACE_OIDC_CONFIG")
+                .map(|path| {
+                    let bytes = std::fs::read(path)
+                        .map_err(|_| Error::Config("workspace configuration unavailable".into()))?;
+                    workstream_api::workspace::WorkspaceLogin::from_config(&bytes)
+                        .map_err(|e| Error::Config(e.into()))
+                })
+                .transpose()?,
             allowed_origins,
             ..workstream_api::ApiConfig::default()
         };

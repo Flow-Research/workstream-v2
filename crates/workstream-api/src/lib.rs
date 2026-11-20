@@ -13,6 +13,7 @@ pub mod contract;
 pub mod openapi;
 pub mod server;
 pub mod vectors;
+pub mod workspace;
 
 pub use backend::Backend;
 pub use contract::{

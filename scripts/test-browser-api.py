@@ -97,6 +97,10 @@ def run(directory, binaries, fixture):
     env['WORKSTREAM_API_PORT'] = str(api_port)
     env['WORKSTREAM_API_ORIGINS'] = 'https://app.example'
     env['WORKSTREAM_API_BIND'] = '127.0.0.1'
+    login = json.loads(subprocess.check_output(['node', 'scripts/workspace-login-fixture.mjs']))
+    config = directory / 'workspace.json'
+    config.write_text(json.dumps(login.pop('config')))
+    env['WORKSTREAM_WORKSPACE_OIDC_CONFIG'] = str(config)
 
     def rpc(method, params=None):
         with socket.create_connection(('127.0.0.1', rpc_port), timeout=3) as sock:
@@ -105,6 +109,8 @@ def run(directory, binaries, fixture):
             return json.loads(sock.makefile('rb').readline())
 
     with contextlib.ExitStack() as cleanup:
+        log_path = directory / 'server.log'
+        log = cleanup.enter_context(log_path.open('wb'))
         socket_dir, pg_port, _ = connected.start_postgres(directory, cleanup)
         env['WORKSTREAM_JOBS_SOCKET'] = str(socket_dir)
         env['WORKSTREAM_JOBS_PORT'] = str(pg_port)
@@ -113,7 +119,7 @@ def run(directory, binaries, fixture):
 
         def start(role, extra=None):
             child_env = {'WORKSTREAM_IDENTITY_DIR': str(pki / role), **(extra or {})}
-            child = subprocess.Popen([binaries / role], env={**env, **child_env})
+            child = subprocess.Popen([binaries / role], env={**env, **child_env}, stdout=log, stderr=log)
             cleanup.callback(child.wait)
             cleanup.callback(child.kill)
             return child
@@ -150,6 +156,17 @@ def run(directory, binaries, fixture):
         assert body['data']['api_version'] == 1
         auth = {'Authorization': f'Bearer {token}'}
 
+        for label, credential in login.items():
+            workspace_auth = {'Authorization': f'Bearer {credential}'}
+            status, _, body = request(api_port, ca, 'GET', '/v1/workspace', headers=workspace_auth)
+            assert status == (200 if label == 'valid' else 401), label
+            if label == 'valid':
+                assert body['data'] == {'subject': 'pilot'}
+            status, _, _ = request(api_port, ca, 'POST', '/v1/submit', body={}, headers=workspace_auth)
+            assert status == 401, label
+        assert request(api_port, ca, 'GET', '/v1/workspace', headers=auth)[0] == 401
+        print('Workspace isolation: scoped login accepted; expired, wrong issuer/audience/scope, future and ID tokens denied; no protocol bearer accepted', flush=True)
+
         status, _, body = request(api_port, ca, 'GET', '/v1/chain',
                                   headers={**auth, 'X-Request-Id': 'c1'})
         assert status == 200, (status, body)
@@ -170,6 +187,13 @@ def run(directory, binaries, fixture):
                                   headers={**auth, 'X-Request-Id': 'bad-1'})
         assert status == 400, (status, body)
         assert body['error']['code'] == 'INVALID_TRANSACTION'
+
+        # A valid login and an ordinary facade session still cannot authorize a
+        # transaction for a different account. Keep all other signed fields.
+        foreign = dict(fixture, account=[0] * 32)
+        status, _, body = request(api_port, ca, 'POST', '/v1/submit',
+                                  body=dict(submit_body, tx_bytes=list(json.dumps(foreign).encode())), headers=auth)
+        assert status == 400 and body['error']['code'] == 'INVALID_TRANSACTION'
 
         good_submit = {'version': 1, 'api_version': 1,
                        'tx_bytes': list(json.dumps(fixture).encode())}
@@ -194,6 +218,12 @@ def run(directory, binaries, fixture):
         assert status == 200 and body['openapi'] == '3.1.0'
         assert '/v1/submit' in body['paths'] and '/v1/tasks' in body['paths']
         print('Projection read model and OpenAPI document served over the browser API', flush=True)
+
+    logs = log_path.read_bytes()
+    assert b'transaction admitted' in logs, 'missing positive log control'
+    for secret in [*login.values(), token, '0b' * 32, str([11] * 32), 'AGE-SECRET-KEY-']:
+        assert secret.encode() not in logs, 'credential or signing material in service logs'
+    print('Server log check: writer admission observed; fixture signing seed and bearer credentials absent', flush=True)
 
 
 if __name__ == '__main__':

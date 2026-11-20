@@ -4,6 +4,11 @@
       "bearerAuth": {
         "scheme": "bearer",
         "type": "http"
+      },
+      "workspaceToken": {
+        "bearerFormat": "JWT",
+        "scheme": "bearer",
+        "type": "http"
       }
     }
   },
@@ -1981,6 +1986,136 @@
           }
         ],
         "summary": "Page work items"
+      }
+    },
+    "/v1/workspace": {
+      "get": {
+        "operationId": "workspaceLogin",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "properties": {
+                        "api_version": {
+                          "const": 1,
+                          "type": "integer"
+                        },
+                        "data": {
+                          "properties": {
+                            "subject": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "subject"
+                          ],
+                          "type": "object"
+                        },
+                        "indexed_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "network": {
+                          "type": "string"
+                        },
+                        "read_height": {
+                          "format": "uint64",
+                          "type": "integer"
+                        },
+                        "request_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "api_version",
+                        "request_id",
+                        "network",
+                        "read_height",
+                        "indexed_height",
+                        "data"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Workspace subject"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "INVALID_REQUEST",
+                            "UNSUPPORTED_VERSION",
+                            "INVALID_TRANSACTION",
+                            "DUPLICATE_REQUEST",
+                            "NOT_FOUND",
+                            "STALE_PROJECTION",
+                            "NETWORK_MISMATCH",
+                            "UNAUTHORIZED",
+                            "INTERNAL"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    },
+                    "indexed_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "read_height": {
+                      "format": "uint64",
+                      "type": "integer"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "api_version",
+                    "request_id",
+                    "network",
+                    "read_height",
+                    "indexed_height",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stable error envelope"
+          }
+        },
+        "security": [
+          {
+            "workspaceToken": []
+          }
+        ],
+        "summary": "Read the subject of an optional workspace login"
       }
     }
   },

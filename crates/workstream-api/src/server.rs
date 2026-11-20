@@ -13,6 +13,7 @@
 mod evidence;
 mod explorer;
 mod sponsor;
+mod worker;
 pub use evidence::EvidenceStore;
 
 use std::{
@@ -309,8 +310,11 @@ async fn security_and_cors<B: Backend>(
     }
 
     let explorer = state.config.explorer && request.uri().path() == "/explorer";
-    let sponsor =
-        state.config.explorer && matches!(request.uri().path(), "/sponsor" | "/sponsor/preview");
+    let sponsor = state.config.explorer
+        && matches!(
+            request.uri().path(),
+            "/sponsor" | "/sponsor/preview" | "/worker"
+        );
     let mut response = next.run(request).await;
     if allowed {
         apply_cors(response.headers_mut(), origin.as_deref());
@@ -622,6 +626,7 @@ pub fn router<B: Backend>(state: Arc<ApiState<B>>) -> Router {
             .route("/explorer", get(explorer::view::<B>))
             .route("/explorer.css", get(explorer::css))
             .merge(sponsor::routes::<B>())
+            .merge(worker::routes::<B>())
     } else {
         Router::new()
     };

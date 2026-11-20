@@ -23,10 +23,13 @@ pub async fn serve(
     prover: Prover,
     monitor: Arc<Monitor>,
 ) -> Result<()> {
+    let tls = ipc::tls::Server::load()?;
+    let client = ipc::tls::Client::load("prover.workstream.internal")?;
     let listener = ipc::listen(&dir.join("writer.sock"))?;
     let mut seq = Sequencer::with_backend(
         stf,
         Arc::new(WorkerBackend {
+            client,
             socket: dir.join("worker.sock"),
             verifier: prover.backend(),
         }),
@@ -46,7 +49,8 @@ pub async fn serve(
                 monitor.heartbeat(true);
             },
             accepted=listener.accept()=>{
-                let (mut s,_)=accepted.map_err(ipc::io_err)?;
+                let (socket,_)=accepted.map_err(ipc::io_err)?;
+                let Ok(mut s)=tls.accept(socket).await else {continue};
                 let Ok(req)=ipc::read::<Request>(&mut s,ipc::ADMISSION_LIMIT).await else {continue};
                 match req {
                     Request::Submit(tx)=>{let r=seq.submit_tx(*tx).map_err(|e|e.to_string());let _=ipc::write(&mut s,&r).await;},

@@ -18,6 +18,7 @@ use workstream_stf::StateTransitionFunction;
 
 #[derive(Clone)]
 struct Gateway {
+    client: ipc::tls::Client,
     writer: PathBuf,
     tip: tokio::sync::watch::Receiver<(u64, StateRoot)>,
 }
@@ -29,7 +30,8 @@ impl Gateway {
         req.validate()?;
         let tx = serde_json::from_slice(&req.tx_bytes)
             .map_err(|_| Error::Validation("invalid transaction".into()))?;
-        let hash: H256 = ipc::call(&self.writer, &Request::Submit(Box::new(tx))).await?;
+        let hash: H256 =
+            ipc::call(&self.client, &self.writer, &Request::Submit(Box::new(tx))).await?;
         Ok(json!({"version":1,"api_version":1,"status":"Pending","tx_hash":hash.as_bytes()}))
     }
 }
@@ -95,9 +97,11 @@ pub async fn serve(
         .require_proof();
     let (tx, tip) = tokio::sync::watch::channel((0, node.state_root()));
     let writer = dir.join("writer.sock");
+    let client = ipc::tls::Client::load("sequencer.workstream.internal")?;
     let rpc = serve_endpoint(
         listener,
         Gateway {
+            client: client.clone(),
             writer: writer.clone(),
             tip,
         },
@@ -108,7 +112,7 @@ pub async fn serve(
                 .tip()
                 .checked_add(1)
                 .ok_or_else(|| Error::Consensus("height exhausted".into()))?;
-            match ipc::call::<_, Option<Block>>(&writer, &Request::Block(height)).await {
+            match ipc::call::<_, Option<Block>>(&client, &writer, &Request::Block(height)).await {
                 Ok(Some(block)) => {
                     node.apply_block(block)?;
                     tx.send_replace((node.tip(), node.state_root()));

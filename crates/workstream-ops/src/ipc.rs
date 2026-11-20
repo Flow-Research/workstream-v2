@@ -13,6 +13,7 @@ use tokio::{
     time::timeout,
 };
 use workstream_core::{Error, Result};
+pub mod tls;
 
 pub fn directory() -> Result<Option<PathBuf>> {
     let Some(path) = std::env::var_os("WORKSTREAM_RUNTIME_DIR").map(PathBuf::from) else {
@@ -35,7 +36,10 @@ pub fn listen(path: &Path) -> Result<UnixListener> {
     UnixListener::bind(path).map_err(io_err)
 }
 
-pub async fn read<T: DeserializeOwned>(s: &mut UnixStream, limit: usize) -> Result<T> {
+pub async fn read<T: DeserializeOwned>(
+    s: &mut (impl tokio::io::AsyncRead + Unpin),
+    limit: usize,
+) -> Result<T> {
     timeout(Duration::from_secs(10), async {
         let len = s.read_u32().await.map_err(io_err)? as usize;
         if len > limit {
@@ -51,29 +55,43 @@ pub async fn read<T: DeserializeOwned>(s: &mut UnixStream, limit: usize) -> Resu
 
 pub const BLOCK_LIMIT: usize = 16 << 20;
 pub const ADMISSION_LIMIT: usize = 256 << 10;
-pub async fn write<T: Serialize>(s: &mut UnixStream, msg: &T) -> Result<()> {
+pub async fn write<T: Serialize>(
+    s: &mut (impl tokio::io::AsyncWrite + Unpin),
+    msg: &T,
+) -> Result<()> {
     let bytes = serde_json::to_vec(msg).map_err(|e| Error::Serialization(e.to_string()))?;
     if bytes.len() > BLOCK_LIMIT {
         return Err(Error::Validation("IPC reply too large".into()));
     }
     timeout(Duration::from_secs(10), async {
         s.write_u32(bytes.len() as u32).await?;
-        s.write_all(&bytes).await
+        s.write_all(&bytes).await?;
+        s.flush().await
     })
     .await
     .map_err(|_| Error::Timeout("IPC write".into()))?
     .map_err(io_err)
 }
 
-pub async fn call<Q: Serialize, R: DeserializeOwned>(path: &Path, req: &Q) -> Result<R> {
-    let mut s = UnixStream::connect(path).await.map_err(io_err)?;
+pub async fn call<Q: Serialize, R: DeserializeOwned>(
+    client: &tls::Client,
+    path: &Path,
+    req: &Q,
+) -> Result<R> {
+    let socket = timeout(Duration::from_secs(3), UnixStream::connect(path))
+        .await
+        .map_err(|_| Error::Timeout("service connect".into()))?
+        .map_err(io_err)?;
+    let mut s = client.connect(socket).await?;
     write(&mut s, req).await?;
     // Proving can take longer than receiving a bounded message. Wait for its
     // first byte under a separate overall work deadline.
-    timeout(Duration::from_secs(300), s.readable())
+    let mut first = [0u8; 1];
+    timeout(Duration::from_secs(300), s.read_exact(&mut first))
         .await
         .map_err(|_| Error::Timeout("service reply".into()))?
         .map_err(io_err)?;
-    let reply: std::result::Result<R, String> = read(&mut s, BLOCK_LIMIT).await?;
+    let reply: std::result::Result<R, String> =
+        read(&mut first.as_slice().chain(s), BLOCK_LIMIT).await?;
     reply.map_err(Error::Validation)
 }

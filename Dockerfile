@@ -1,29 +1,18 @@
-FROM rust:1.92-slim AS builder
-
+FROM rust:1.92-slim-bookworm AS builder
 WORKDIR /app
-
-# Cache dependencies separately for faster rebuilds
-COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
-COPY src ./src
-
-RUN cargo build --release --workspace
+COPY . .
+ENV CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
+RUN cargo build --locked --bin sequencer --bin node --bin prover && \
+    cargo run --locked -p workstream-tests --example connected_fixture > /app/signed-fixture.json
 
 FROM debian:bookworm-slim
-
-# Minimal runtime deps
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-
+RUN apt-get update && apt-get install -y --no-install-recommends openssl python3 ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-
-COPY --from=builder /app/target/release/sequencer /usr/local/bin/workstream-sequencer
-COPY --from=builder /app/target/release/prover /usr/local/bin/workstream-prover
-COPY --from=builder /app/target/release/node /usr/local/bin/workstream-node
-
+COPY --from=builder /app/target/debug/node /usr/local/bin/workstream-node
+COPY --from=builder /app/target/debug/sequencer /usr/local/bin/workstream-sequencer
+COPY --from=builder /app/target/debug/prover /usr/local/bin/workstream-prover
+COPY --from=builder /app/signed-fixture.json ./signed-fixture.json
+COPY scripts/dev-service-identities.sh ./
 COPY config ./config
-
-# Sequencer RPC, Prover API, Node P2P
-EXPOSE 8545 8080 30303
-
+USER 10001:10001
 CMD ["workstream-node"]

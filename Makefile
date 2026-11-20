@@ -73,7 +73,7 @@ run-node: ## Run the node with example config
 # ---------------------------------------------------------------------------
 
 localnet-up: ## Start the localnet (build + start all services)
-	docker compose -f docker-compose.yml up -d --build
+	bash scripts/localnet-up.sh
 
 localnet-down: ## Stop the localnet and remove containers
 	docker compose -f docker-compose.yml down --volumes
@@ -86,7 +86,7 @@ localnet-status: ## Show localnet service status
 
 localnet-restart: ## Restart the localnet from scratch (builder image reused)
 	docker compose -f docker-compose.yml down --volumes
-	docker compose -f docker-compose.yml up -d --build
+	bash scripts/localnet-up.sh
 
 docker-build: ## Build the workstream docker image only
 	docker build -t workstream:dev .

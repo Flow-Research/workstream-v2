@@ -1,0 +1,28 @@
+name: Connected localnet
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Signed transaction through Compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Build, start, verify, and tear down
+        env:
+          WORKSTREAM_ARTIFACT_PARENT: ${{ runner.temp }}
+        run: bash scripts/compose-gate.sh
+      - name: Retain service logs and receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: compose-verification
+          path: ${{ runner.temp }}/compose-gate.*
+          retention-days: 7

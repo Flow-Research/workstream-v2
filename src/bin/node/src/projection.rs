@@ -560,6 +560,10 @@ impl Projection {
             ]);
         }
         let id = H256::from_hex(key.strip_prefix("0x").unwrap_or(key)).map_err(|_| invalid())?;
+        if kind == "worker" {
+            let rows=self.client.lock().await.query("SELECT encode(last.subject,'hex'),last.kind FROM (SELECT DISTINCT ON (subject) subject,actor,kind,height FROM projection_work_items WHERE chain=$1 AND kind IN ('task.released','task.claimed','task.started') ORDER BY subject,height DESC,tx_index DESC,ordinal DESC) last WHERE (last.kind='task.released' AND EXISTS(SELECT 1 FROM projection_grants g WHERE g.chain=$1 AND g.grantor=last.actor AND g.grantee=$2 AND g.capability='ClaimWork' AND g.active)) OR (last.kind!='task.released' AND last.actor=$2) ORDER BY last.height DESC,last.subject LIMIT 25",&[&self.chain,&id.as_bytes().as_slice()]).await.map_err(db)?;
+            return Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect());
+        }
         let column = match kind {
             "account" => "actor",
             "task" => "subject",

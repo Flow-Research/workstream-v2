@@ -26,6 +26,7 @@ send.addEventListener('click', async () => {
     const token = (await session.json()).data.token;
     const response = await post('/v1/submit', {headers: {'Content-Type':'application/json', Authorization:`Bearer ${token}`, 'X-Request-Id':hash}, body:JSON.stringify({version:1, api_version:1, tx_bytes:Array.from(bytes)})});
     if (!response.ok || (await response.json()).data?.tx_hash !== hash) throw Error('Admission unconfirmed. Check the receipt before retrying with the same file.');
+    document.dispatchEvent(new CustomEvent('workstream:submitted', {detail: hash}));
     location.assign(link.href);
   } catch (error) {
     result.append(document.createTextNode(` ${error instanceof SyntaxError ? 'Invalid JSON file.' : error.message}`));

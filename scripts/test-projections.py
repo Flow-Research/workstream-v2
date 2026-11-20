@@ -67,7 +67,7 @@ def run(directory, binaries, fixtures, unauthorized):
     env.update(WORKSTREAM_EXPLORER='1', WORKSTREAM_API_PORT=str(api_port))
     browser = '--worker-browser' in sys.argv
     if browser:
-        login = json.loads(subprocess.check_output(['node','scripts/workspace-login-fixture.mjs']))
+        login = json.loads(subprocess.check_output(['node','scripts/workspace-login-fixture.mjs','--reviewer']))
         config = directory / 'oidc.json'
         config.write_text(json.dumps(login['config']))
         private = directory / 'evidence'
@@ -228,8 +228,9 @@ def run(directory, binaries, fixtures, unauthorized):
             wait(lambda: verified()['height'] == 11)
             from worker_browser import exercise
             exercise(api_port, private, login['valid'], fixtures[11:15], verified)
-            for fixture in fixtures[15:]:
-                submit(fixture)
+            from review_browser import exercise_review
+            exercise_review(api_port, private, login['reviewer'], fixtures)
+            submit(fixtures[17])
         tip = wait(lambda: (t if (t := verified())['height'] == len(fixtures) else None))
         state = wait(lambda: (s if (s := status())['indexed_height'] == len(fixtures) else None))
         assert state['verified_height'] == tip['height'] and state['lag'] == 0

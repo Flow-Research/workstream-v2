@@ -118,6 +118,8 @@ pub struct Node<S: BlockSource> {
     /// Whether an attached proof is mandatory for every block.
     require_proof: bool,
     last_header: Option<BlockHeader>,
+    /// Durable outbox for verified events awaiting notification delivery.
+    notifications: workstream_ops::notifications::Outbox,
 }
 
 impl<S: BlockSource> Node<S> {
@@ -183,12 +185,22 @@ impl<S: BlockSource> Node<S> {
             verifier,
             require_proof: false,
             last_header: None,
+            notifications: workstream_ops::notifications::Outbox::default(),
         }
     }
 
     /// Require every applied block to carry a valid zkVM proof.
     pub fn require_proof(mut self) -> Self {
         self.require_proof = true;
+        self
+    }
+
+    /// Use a durable notification outbox for verified events (issue #137).
+    pub fn with_notifications(
+        mut self,
+        notifications: workstream_ops::notifications::Outbox,
+    ) -> Self {
+        self.notifications = notifications;
         self
     }
 
@@ -408,6 +420,11 @@ impl<S: BlockSource> Node<S> {
             }
         }
 
+        // Verified events enter the durable notification outbox before any
+        // provider is contacted (issue #137). Runs while the applied block is
+        // still owned, before the header is moved into committed state.
+        self.enqueue_verified_notifications(&block, &events)?;
+
         // Commit
         self.state = draft;
         self.state.last_header = Some(block.header.clone());
@@ -423,6 +440,72 @@ impl<S: BlockSource> Node<S> {
             state_root: computed_state_root,
             events,
         })
+    }
+
+    /// Enqueue opt-in notifications for verified decision events. The
+    /// notification carries public decision metadata and a canonical status
+    /// link only; it never contains witnesses or private evidence bytes.
+    fn enqueue_verified_notifications(&mut self, block: &Block, events: &[Event]) -> Result<()> {
+        for event in events {
+            let notification = match event.event_type.as_str() {
+                workstream_ops::notifications::EVENT_REVIEW_DECIDED => {
+                    let payload: workstream_stf::ReviewDecidePayload =
+                        postcard::from_bytes(&event.data).map_err(|e| {
+                            Error::Serialization(format!("review decision decode: {e}"))
+                        })?;
+                    let decision = match payload.decision {
+                        workstream_stf::ReviewDecision::Accept => "accept",
+                        workstream_stf::ReviewDecision::NeedsRevision => "needs_revision",
+                        workstream_stf::ReviewDecision::Reject => "reject",
+                    };
+                    let subject = payload.submission.to_hex();
+                    let chain = self.stf.fork_schedule().chain_id.to_string();
+                    Some(workstream_ops::notifications::Notification::new(
+                        workstream_ops::notifications::EVENT_REVIEW_DECIDED,
+                        chain.as_str(),
+                        event.block_number,
+                        event.tx_index,
+                        subject.as_str(),
+                        Some(decision.to_string()),
+                        workstream_ops::notifications::canonical_review_link(&subject),
+                    ))
+                }
+                workstream_ops::notifications::EVENT_ACCEPT_FINALIZED => {
+                    let payload: workstream_stf::SubmissionIdPayload =
+                        postcard::from_bytes(&event.data).map_err(|e| {
+                            Error::Serialization(format!("accept finalize decode: {e}"))
+                        })?;
+                    let subject = payload.submission.to_hex();
+                    let tx = block
+                        .transactions
+                        .get(event.tx_index as usize)
+                        .ok_or_else(|| Error::Consensus("event transaction missing".into()))?;
+                    let tx_hash =
+                        workstream_tx::tx_hash(tx).map_err(|e| Error::Io(e.to_string()))?;
+                    let chain = self.stf.fork_schedule().chain_id.to_string();
+                    Some(workstream_ops::notifications::Notification::new(
+                        workstream_ops::notifications::EVENT_ACCEPT_FINALIZED,
+                        chain.as_str(),
+                        event.block_number,
+                        event.tx_index,
+                        subject.as_str(),
+                        Some("accept".to_string()),
+                        workstream_ops::notifications::canonical_receipt_link(&format!(
+                            "0x{}",
+                            tx_hash.to_hex()
+                        )),
+                    ))
+                }
+                _ => None,
+            };
+            let Some(notification) = notification else {
+                continue;
+            };
+            for recipient in workstream_ops::notifications::configured_subscribers() {
+                self.notifications.enqueue(&notification, &recipient)?;
+            }
+        }
+        Ok(())
     }
 
     /// Persist the node state (SMT/MMR snapshot + last applied header) to

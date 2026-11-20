@@ -6,12 +6,14 @@ request-id idempotency, exact-origin CORS, security headers, and that no
 signing key, witness or private field crosses the boundary.
 """
 import contextlib
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import socket
 import ssl
+import sqlite3
 import struct
 import subprocess
 import tempfile
@@ -63,9 +65,9 @@ def request(port, cafile, method, path, body=None, headers=None):
             lines.append(f'{key}: {value}')
         payload = b''
         if body is not None:
-            payload = json.dumps(body).encode()
+            payload = body if isinstance(body, bytes) else json.dumps(body).encode()
             lines.append(f'Content-Length: {len(payload)}')
-            lines.append('Content-Type: application/json')
+            lines.append('Content-Type: application/octet-stream' if isinstance(body, bytes) else 'Content-Type: application/json')
         sock.sendall(('\r\n'.join(lines) + '\r\n\r\n').encode() + payload)
         raw = b''
         while True:
@@ -80,7 +82,8 @@ def request(port, cafile, method, path, body=None, headers=None):
         if b':' in line:
             key, _, value = line.partition(b':')
             response_headers[key.decode().lower()] = value.strip().decode()
-    parsed = json.loads(response_body) if response_body.strip() else None
+    parsed = (response_body if response_headers.get('content-type') == 'application/octet-stream'
+              else json.loads(response_body) if response_body.strip() else None)
     return status, response_headers, parsed
 
 
@@ -101,6 +104,9 @@ def run(directory, binaries, fixture):
     config = directory / 'workspace.json'
     config.write_text(json.dumps(login.pop('config')))
     env['WORKSTREAM_WORKSPACE_OIDC_CONFIG'] = str(config)
+    private = directory / 'evidence'
+    private.mkdir(mode=0o700)
+    env['WORKSTREAM_EVIDENCE_DIR'] = str(private)
 
     def rpc(method, params=None):
         with socket.create_connection(('127.0.0.1', rpc_port), timeout=3) as sock:
@@ -155,6 +161,32 @@ def run(directory, binaries, fixture):
         token = body['data']['token']
         assert body['data']['api_version'] == 1
         auth = {'Authorization': f'Bearer {token}'}
+
+        contents = os.urandom(32).hex().encode()
+        task, digest = '11' * 32, hashlib.sha256(contents).hexdigest()
+        local = cleanup.enter_context(contextlib.closing(sqlite3.connect(private / 'objects.sqlite', isolation_level=None)))
+        root = f'/v1/evidence/{task}/{digest}'
+        identity = {'Authorization': 'Bearer ' + login['valid']}
+        def post_evidence(action, data=None):
+            return request(api_port, ca, 'POST', root + '/' + action, body=data, headers=identity)
+        assert post_evidence('upload', contents)[0] == 403
+        local.execute('INSERT INTO grants VALUES(?,?,?,?)', ('pilot', task, digest, 'upload'))
+        assert post_evidence('upload', contents + b'!')[0] == 422
+        ack = post_evidence('upload', contents)[2]
+        assert ack == {'status':'Uploaded', 'task':task, 'content_hash':digest}
+        assert rpc('workstream.node.verifiedTip')['result']['height'] == 0
+        assert post_evidence('link')[0] == 403
+        local.execute('INSERT INTO grants VALUES(?,?,?,?)', ('pilot', task, digest, 'read'))
+        link = post_evidence('link')[2]['url']
+        local.execute("DELETE FROM grants WHERE operation='read'")
+        assert post_evidence('link')[0] == 403
+        assert request(api_port, ca, 'GET', link)[2] == contents
+        local.execute('UPDATE objects SET body=?', (contents + b'!',))
+        assert request(api_port, ca, 'GET', link)[0] == 409
+        local.execute('UPDATE objects SET body=?', (contents,))
+        local.execute('UPDATE tickets SET expires=unixepoch()')
+        assert request(api_port, ca, 'GET', link)[0] == 403
+        print('Evidence: scoped upload, digest mismatch, revocation, issued-link expiry and unchanged verifier tip passed', flush=True)
 
         for label, credential in login.items():
             workspace_auth = {'Authorization': f'Bearer {credential}'}
@@ -220,6 +252,7 @@ def run(directory, binaries, fixture):
         print('Projection read model and OpenAPI document served over the browser API', flush=True)
 
     logs = log_path.read_bytes()
+    assert contents not in logs and link.encode() not in logs, 'private evidence or download URL logged'
     assert b'transaction admitted' in logs, 'missing positive log control'
     for secret in [*login.values(), token, '0b' * 32, str([11] * 32), 'AGE-SECRET-KEY-']:
         assert secret.encode() not in logs, 'credential or signing material in service logs'

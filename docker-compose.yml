@@ -24,23 +24,53 @@ services:
     network_mode: none
     read_only: true
     tmpfs: [/tmp]
-    volumes: [ipc:/ipc, node-id:/keys/node, writer-id:/keys/sequencer, worker-id:/keys/prover, writer-data:/data]
+    volumes: [ipc:/ipc, node-id:/keys/node, writer-id:/keys/sequencer, worker-id:/keys/prover, writer-data:/data, db-secrets:/db-secrets]
     entrypoint: [/bin/bash, -euc]
     command:
       - |
         install -d -m 0700 -o 10001 -g 10001 /ipc/runtime
         install -d -m 0700 -o 10001 -g 10001 /data/journal
+        for key in admin worker; do
+          if [ ! -s /db-secrets/$$key ]; then openssl rand -hex 32 > /db-secrets/$$key; fi
+          chmod 0444 /db-secrets/$$key
+        done
+        cp /db-secrets/worker /keys/prover/pg.password
+        chmod 0600 /keys/prover/pg.password
         bash /app/dev-service-identities.sh /tmp/identities
         for role in node sequencer prover; do
           cp /tmp/identities/$$role/*.{der,pem} /keys/$$role/
           chown -R 10001:10001 /keys/$$role
           chmod 0700 /keys/$$role
         done
+  jobdb:
+    image: postgres:16-alpine
+    network_mode: none
+    depends_on: {bootstrap: {condition: service_completed_successfully}}
+    command: [postgres, -c, listen_addresses=]
+    environment:
+      POSTGRES_DB: proofjobs
+      POSTGRES_PASSWORD_FILE: /db-secrets/admin
+      POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256
+    volumes:
+      - jobs-data:/var/lib/postgresql/data
+      - jobs-socket:/var/run/postgresql
+      - db-secrets:/db-secrets:ro
+      - ./scripts/init-proof-jobs.sh:/docker-entrypoint-initdb.d/10-worker.sh:ro
+    healthcheck:
+      test: [CMD-SHELL, 'PGPASSWORD=$$(cat /db-secrets/worker) psql -U worker -d proofjobs -Atqc "SELECT 1"']
+      interval: 2s
+      timeout: 3s
+      retries: 15
   prover:
     <<: *service
-    depends_on: {bootstrap: {condition: service_completed_successfully}}
+    depends_on: {jobdb: {condition: service_healthy}}
     command: [workstream-prover, --metrics-port, '9090']
-    volumes: [ipc:/ipc, worker-id:/identity:ro]
+    environment:
+      <<: *env
+      WORKSTREAM_JOBS_SOCKET: /var/run/postgresql
+      WORKSTREAM_JOBS_PORT: '5432'
+      WORKSTREAM_JOBS_PASSWORD_FILE: /identity/pg.password
+    volumes: [ipc:/ipc, worker-id:/identity:ro, jobs-socket:/var/run/postgresql:ro]
   sequencer:
     <<: *service
     depends_on: {prover: {condition: service_healthy}}
@@ -59,6 +89,9 @@ services:
     volumes: [ipc:/ipc, node-id:/identity:ro]
 
 volumes:
+  jobs-data:
+  jobs-socket:
+  db-secrets:
   writer-data:
   ipc:
   node-id:

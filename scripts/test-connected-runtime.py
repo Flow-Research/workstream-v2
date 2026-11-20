@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import ssl
 import struct
 import subprocess
 import tempfile
@@ -24,6 +25,8 @@ def wait(check):
 
 
 def run(directory, binaries, fixture):
+    pki = directory / 'identities'
+    subprocess.run(['bash', 'scripts/dev-service-identities.sh', pki], check=True)
     env = {k: v for k, v in os.environ.items() if not k.startswith('WORKSTREAM_')}
     env['WORKSTREAM_RUNTIME_DIR'] = str(directory)
     with socket.socket() as reserve:
@@ -36,14 +39,20 @@ def run(directory, binaries, fixture):
             sock.sendall(json.dumps(dict(jsonrpc='2.0', id=1, method=method, params=params)).encode() + b'\n')
             return json.loads(sock.makefile('rb').readline())
 
-    def writer(req):
-        with socket.socket(socket.AF_UNIX) as sock:
+    def writer(req, role='node'):
+        ctx = ssl.create_default_context(cafile=str(pki / 'ca.pem'))
+        if role:
+            ctx.load_cert_chain(str(pki / role / 'cert.pem'), str(pki / role / 'key.pem'))
+        with ctx.wrap_socket(socket.socket(socket.AF_UNIX), server_hostname='sequencer.workstream.internal') as sock:
             sock.settimeout(3)
             sock.connect(str(directory / 'writer.sock'))
             data = json.dumps(req).encode()
             sock.sendall(struct.pack('!I', len(data)) + data)
             with sock.makefile('rb') as f:
-                size, = struct.unpack('!I', f.read(4))
+                header = f.read(4)
+                if not header:
+                    raise EOFError('service closed before dispatch')
+                size, = struct.unpack('!I', header)
                 return json.loads(f.read(size))['Ok']
 
     def verified():
@@ -54,7 +63,7 @@ def run(directory, binaries, fixture):
 
     with contextlib.ExitStack() as cleanup:
         def start(role):
-            child = subprocess.Popen([binaries / role], env=env)
+            child = subprocess.Popen([binaries / role], env={**env, 'WORKSTREAM_IDENTITY_DIR': str(pki / role)})
             cleanup.callback(child.wait)
             cleanup.callback(child.kill)
             return child
@@ -63,6 +72,19 @@ def run(directory, binaries, fixture):
         start('node')
         genesis = wait(verified)
         wait(lambda: (directory / 'writer.sock').exists())
+        for role in (None, 'prover'):
+            try:
+                writer('Tip', role)
+            except (EOFError, ssl.SSLError, ConnectionResetError, BrokenPipeError):
+                print(f'Writer rejected caller: {role or "no client certificate"}', flush=True)
+            else:
+                raise AssertionError('unauthorized caller received a writer response')
+        assert rpc('workstream.prover.proveBlock')['error']['code'] == -32601
+        with socket.create_connection(('127.0.0.1', port), timeout=3) as malformed:
+            malformed.sendall(b'{not-json}\n')
+            assert json.loads(malformed.makefile('rb').readline())['error']['code'] == -32700
+        with socket.create_connection(('127.0.0.1', port), timeout=3) as interrupted:
+            interrupted.sendall(b'{')
         assert submit()['result']['status'] == 'Pending'
         # Writer ticks twice with no worker. It must retain the pending action.
         time.sleep(1.25)

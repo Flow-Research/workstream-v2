@@ -105,12 +105,25 @@ pub struct WebhookSink {
 }
 
 impl WebhookSink {
-    pub fn new(url: impl Into<String>, secret: impl Into<String>) -> Self {
-        Self {
-            url: url.into(),
-            secret: secret.into(),
-            client: reqwest::Client::new(),
+    pub fn new(url: String, secret: String) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|_| Error::Config("webhook TLS configuration failed".into()))?;
+        let endpoint =
+            reqwest::Url::parse(&url).map_err(|_| Error::Config("invalid webhook URL".into()))?;
+        if endpoint.scheme() != "https" || secret.len() < 32 {
+            return Err(Error::Config(
+                "webhook requires HTTPS and a secret of at least 32 bytes".into(),
+            ));
         }
+        Ok(Self {
+            url,
+            secret,
+            client,
+        })
     }
 }
 
@@ -125,8 +138,9 @@ impl DeliverySink for WebhookSink {
             .post(&self.url)
             .header("Content-Type", "application/json")
             .header("X-Workstream-Delivery", &delivery.delivery_id)
+            .header("X-Workstream-Timestamp", timestamp.to_string())
             .header("X-Workstream-Signature", &signature)
-            .body(delivery.notification_json.clone())
+            .body(body)
             .send()
             .await
             .map_err(|e| format!("webhook delivery failed: {e}"))?;
@@ -211,7 +225,7 @@ pub fn verify_delivery_signature(
     if !constant_time_eq(expected.as_bytes(), actual.as_bytes()) {
         return false;
     }
-    (now_secs - timestamp).abs() <= SIGNATURE_TOLERANCE_SECS
+    now_secs.abs_diff(timestamp) <= SIGNATURE_TOLERANCE_SECS as u64
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -352,7 +366,14 @@ impl Outbox {
     /// Enqueue a notification for a recipient. Re-enqueueing an event that
     /// already reached a terminal state never creates a second delivery.
     pub fn enqueue(&self, notification: &Notification, recipient: &str) -> Result<Delivery> {
-        let delivery_id = delivery_id(&notification.event_type, recipient, &notification.subject);
+        let event_key = format!(
+            "{}:{}:{}:{}",
+            notification.chain,
+            notification.block_number,
+            notification.tx_index,
+            notification.subject
+        );
+        let delivery_id = delivery_id(&notification.event_type, recipient, &event_key);
         let now = now_secs();
         let db = self.lock()?;
         db.execute(

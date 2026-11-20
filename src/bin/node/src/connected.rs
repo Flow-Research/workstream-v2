@@ -396,24 +396,28 @@ pub async fn serve(
     };
     let webhook_url = std::env::var("WORKSTREAM_NOTIFICATION_WEBHOOK_URL").ok();
     let webhook_secret = std::env::var("WORKSTREAM_NOTIFICATION_WEBHOOK_SECRET").ok();
-    let notifications_task = tokio::spawn(async move {
-        let Some(url) = webhook_url else {
-            return;
+    let notifications_task = async move {
+        let (url, secret) = match (webhook_url, webhook_secret) {
+            (None, None) => return std::future::pending().await,
+            (Some(url), Some(secret)) if !secret.is_empty() => (url, secret),
+            _ => {
+                return Err(Error::Config(
+                    "notification webhook requires URL and secret".into(),
+                ))
+            }
         };
-        let Some(secret) = webhook_secret else {
-            return;
-        };
-        let _ = workstream_ops::notifications::run(
+        workstream_ops::notifications::run(
             &notifications_db_path,
-            Arc::new(workstream_ops::notifications::WebhookSink::new(url, secret))
-                as Arc<dyn workstream_ops::notifications::DeliverySink>,
+            Arc::new(workstream_ops::notifications::WebhookSink::new(
+                url, secret,
+            )?) as Arc<dyn workstream_ops::notifications::DeliverySink>,
         )
-        .await;
-    });
+        .await
+    };
     tokio::select! {
         result = sync => result,
         result = api => result,
-        _ = notifications_task => Err(Error::Io("notification consumer task stopped".into())),
+        result = notifications_task => result,
         _ = rpc => Err(Error::Io("connected node listener stopped".into())),
     }
 }

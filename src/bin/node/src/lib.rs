@@ -449,16 +449,16 @@ impl<S: BlockSource> Node<S> {
         for event in events {
             let notification = match event.event_type.as_str() {
                 workstream_ops::notifications::EVENT_REVIEW_DECIDED => {
-                    let payload: workstream_stf::ReviewDecidePayload =
+                    let (submission, _, decision): (H256, u64, workstream_stf::ReviewDecision) =
                         postcard::from_bytes(&event.data).map_err(|e| {
                             Error::Serialization(format!("review decision decode: {e}"))
                         })?;
-                    let decision = match payload.decision {
+                    let decision = match decision {
                         workstream_stf::ReviewDecision::Accept => "accept",
                         workstream_stf::ReviewDecision::NeedsRevision => "needs_revision",
                         workstream_stf::ReviewDecision::Reject => "reject",
                     };
-                    let subject = payload.submission.to_hex();
+                    let subject = submission.to_hex();
                     let chain = self.stf.fork_schedule().chain_id.to_string();
                     Some(workstream_ops::notifications::Notification::new(
                         workstream_ops::notifications::EVENT_REVIEW_DECIDED,
@@ -471,11 +471,11 @@ impl<S: BlockSource> Node<S> {
                     ))
                 }
                 workstream_ops::notifications::EVENT_ACCEPT_FINALIZED => {
-                    let payload: workstream_stf::SubmissionIdPayload =
-                        postcard::from_bytes(&event.data).map_err(|e| {
-                            Error::Serialization(format!("accept finalize decode: {e}"))
-                        })?;
-                    let subject = payload.submission.to_hex();
+                    let (submission, _, _): (H256, H256, u64) = postcard::from_bytes(&event.data)
+                        .map_err(|e| {
+                        Error::Serialization(format!("accept finalize decode: {e}"))
+                    })?;
+                    let subject = submission.to_hex();
                     let tx = block
                         .transactions
                         .get(event.tx_index as usize)

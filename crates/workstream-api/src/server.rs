@@ -12,6 +12,7 @@
 //!   never include transaction payloads, witnesses or signing material.
 mod evidence;
 mod explorer;
+mod sponsor;
 pub use evidence::EvidenceStore;
 
 use std::{
@@ -308,6 +309,8 @@ async fn security_and_cors<B: Backend>(
     }
 
     let explorer = state.config.explorer && request.uri().path() == "/explorer";
+    let sponsor =
+        state.config.explorer && matches!(request.uri().path(), "/sponsor" | "/sponsor/preview");
     let mut response = next.run(request).await;
     if allowed {
         apply_cors(response.headers_mut(), origin.as_deref());
@@ -315,6 +318,9 @@ async fn security_and_cors<B: Backend>(
     security_headers(response.headers_mut());
     if explorer {
         response.headers_mut().insert("content-security-policy",HeaderValue::from_static("default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"));
+    }
+    if sponsor {
+        response.headers_mut().insert("content-security-policy",HeaderValue::from_static("default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"));
     }
     response
 }
@@ -632,6 +638,7 @@ pub fn router<B: Backend>(state: Arc<ApiState<B>>) -> Router {
         Router::new()
             .route("/explorer", get(explorer::view::<B>))
             .route("/explorer.css", get(explorer::css))
+            .merge(sponsor::routes::<B>())
     } else {
         Router::new()
     };

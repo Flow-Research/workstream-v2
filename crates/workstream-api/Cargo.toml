@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "query"] }
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "query", "form"] }
 getrandom = "0.3"
 jsonwebtoken = { version = "10.4", default-features = false, features = ["aws_lc_rs"] }
 serde = { workspace = true }
@@ -20,9 +20,9 @@ tracing = { workspace = true }
 workstream-core = { path = "../workstream-core" }
 workstream-crypto = { path = "../workstream-crypto" }
 workstream-tx = { path = "../workstream-tx" }
+workstream-stf = { path = "../workstream-stf" }
 
 [dev-dependencies]
 tempfile = "3"
-workstream-stf = { path = "../workstream-stf" }
 ed25519-dalek = { workspace = true }
 tower = { version = "0.5", features = ["util"] }

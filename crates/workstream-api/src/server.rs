@@ -10,7 +10,9 @@
 //!   `X-Request-Id` with a different body is rejected (`DUPLICATE_REQUEST`).
 //! * Every error is a versioned envelope with stable string codes; messages
 //!   never include transaction payloads, witnesses or signing material.
+mod evidence;
 mod explorer;
+pub use evidence::EvidenceStore;
 
 use std::{
     collections::HashMap,
@@ -56,6 +58,7 @@ use crate::{
 /// origin is trusted until it is explicitly configured.
 #[derive(Clone)]
 pub struct ApiConfig {
+    pub evidence: Option<Arc<EvidenceStore>>,
     pub explorer: bool,
     pub workspace_login: Option<crate::workspace::WorkspaceLogin>,
     pub allowed_origins: Vec<String>,
@@ -67,6 +70,7 @@ impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             workspace_login: None,
+            evidence: None,
             explorer: false,
             allowed_origins: Vec::new(),
             session_ttl: Duration::from_secs(300),
@@ -615,6 +619,7 @@ pub fn router<B: Backend>(state: Arc<ApiState<B>>) -> Router {
         Router::new()
     };
     Router::new()
+        .merge(evidence::routes::<B>(&state))
         .merge(shell)
         .merge(public)
         .merge(protected)
@@ -774,6 +779,7 @@ mod tests {
 
     fn test_config() -> ApiConfig {
         ApiConfig {
+            evidence: None,
             explorer: false,
             workspace_login: None,
             allowed_origins: vec!["https://app.example".into()],

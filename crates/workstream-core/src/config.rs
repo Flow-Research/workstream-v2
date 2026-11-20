@@ -131,7 +131,7 @@ impl SequencerConfig {
 /// Prover configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProverConfig {
-    /// zkVM backend name (e.g. "risc0", "sp1")
+    /// Optional backend assertion: auto follows the shared profile.
     pub zkvm: String,
     /// Optional path to a file listing block numbers to prove
     #[serde(default)]
@@ -147,7 +147,7 @@ pub struct ProverConfig {
 impl Default for ProverConfig {
     fn default() -> Self {
         Self {
-            zkvm: "risc0".to_string(),
+            zkvm: "auto".to_string(),
             blocks: None,
             guest_id: None,
             log_level: default_log_level(),
@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn test_prover_defaults() {
         let cfg = ProverConfig::default();
-        assert_eq!(cfg.zkvm, "risc0");
+        assert_eq!(cfg.zkvm, "auto");
         assert!(cfg.validate().is_ok());
     }
 

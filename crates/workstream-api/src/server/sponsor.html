@@ -1,0 +1,14 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sponsor desk · WorkStream</title><link rel="stylesheet" href="/explorer.css"></head>
+<body><main><header>WORKSTREAM / SPONSOR DESK</header><h1>Commission work</h1>
+<aside>01 / Prepare one action &nbsp; 02 / Review and sign locally &nbsp; 03 / Follow the receipt</aside>
+<section><h2>Publication checklist</h2><ol>
+<li>Register a sponsor and create the project. For grants, register the worker first. ClaimWork and SubmitWork are separate grants.</li>
+<li>Ingest a versioned guide, then activate the same version and content digest. Policy approval requires an already compiled policy ID.</li>
+<li>Create the task under the project, screen against the active guide, then release with a reason. Check each receipt for Verified before using its outcome.</li></ol></section>
+<form action="/sponsor/preview" method="post"><fieldset><legend>Signing account</legend><label>Sponsor account hash <input name="account" required maxlength="66"></label><label>Next confirmed nonce (lane 0) <input name="nonce" required inputmode="numeric"></label></fieldset>
+<fieldset><legend>Instruction</legend><label>Action <select name="action"><option value="register">Register sponsor</option><option value="project">Create project</option><option value="claim-grant">Grant ClaimWork</option><option value="submit-grant">Grant SubmitWork</option><option value="guide">Ingest guide</option><option value="activate">Activate guide</option><option value="policy">Approve compiled policy</option><option value="task">Create task</option><option value="screen">Screen task</option><option value="release">Publish screened task</option></select></label>
+<label>Target ID: worker for grant, project for guide/task creation, policy for approval, task for screen/release <input name="target" maxlength="66"></label>
+<label>Project/task title, guide content digest, or release reason <input name="detail" maxlength="256"></label>
+<label>Guide version (ingest or activate) <input name="version" inputmode="numeric"></label>
+<label>Task award in base units <input name="amount" inputmode="numeric"></label></fieldset><button>Preview unsigned action</button></form>
+<footer><a href="/explorer">Receipt and work history</a> · Signing keys stay local</footer></main></body></html>

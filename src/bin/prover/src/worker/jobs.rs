@@ -12,6 +12,7 @@ use workstream_core::dev::crash_point;
 pub(super) struct Jobs {
     client: tokio::sync::Mutex<Client>,
     chain: String,
+    monitor: std::sync::Arc<Monitor>,
 }
 
 fn db(e: tokio_postgres::Error) -> Error {
@@ -20,6 +21,14 @@ fn db(e: tokio_postgres::Error) -> Error {
         .map(|e| e.message().to_string())
         .unwrap_or_else(|| e.to_string());
     Error::Io(format!("proof job database: {detail}"))
+}
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 fn encode<T: serde::Serialize>(v: &T) -> Result<Vec<u8>> {
     postcard::to_allocvec(v).map_err(|e| Error::Serialization(e.to_string()))
@@ -52,7 +61,7 @@ async fn delete_witness(
 }
 
 impl Jobs {
-    pub(super) async fn open(chain: u64) -> Result<Self> {
+    pub(super) async fn open(chain: u64, monitor: std::sync::Arc<Monitor>) -> Result<Self> {
         let socket = std::env::var_os("WORKSTREAM_JOBS_SOCKET")
             .map(PathBuf::from)
             .ok_or_else(|| Error::Config("missing WORKSTREAM_JOBS_SOCKET".into()))?;
@@ -102,6 +111,7 @@ impl Jobs {
         Ok(Self {
             client: tokio::sync::Mutex::new(client),
             chain: chain.to_string(),
+            monitor,
         })
     }
 
@@ -192,15 +202,27 @@ impl Jobs {
         if t.guest_hash.as_bytes() != guest || t.block_hash != key {
             return Err(Error::State("stored proof job identity mismatch".into()));
         }
-        client
-            .execute(
+        let queued: i64 = client
+            .query_one(
                 "UPDATE proof_jobs SET attempts=attempts+1, \
                  queue_ms=(extract(epoch FROM clock_timestamp()-queued_at)*1000)::bigint \
-                 WHERE chain=$1 AND guest=$2 AND commitment=$3",
+                 WHERE chain=$1 AND guest=$2 AND commitment=$3 RETURNING queue_ms",
                 args,
             )
             .await
-            .map_err(db)?;
+            .map_err(db)?
+            .get(0);
+        // Proof delay is the age of the job when work began. It is a safe
+        // scalar derived from a timestamp, never witness or payload bytes.
+        self.monitor
+            .observe_proof_delay_ms(u64::try_from(queued.max(0)).unwrap_or(u64::MAX));
+        // Correlate proving by the public commitment hash. The job key
+        // (chain, guest, commitment) is safe; the encoded witness `t` is not
+        // a field and is never formatted into a log line.
+        let context = workstream_ops::trace::Correlation::new(key, "prove");
+        let span = context.span();
+        let _entered = span.enter();
+        tracing::info!(chain = %self.chain, commitment = %hex_encode(key), "proving queued transition");
 
         // Dev-only fault injection: deterministic in-flight window for the
         // worker-restart drill. It is ignored outside the dev profile.

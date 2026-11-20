@@ -36,4 +36,7 @@ pub trait Backend: Send + Sync + 'static {
     /// Whitelisted projection page (`events`, `work_items`, `grants`,
     /// `reviews`, `receipts`). Unknown kinds are rejected by the backend.
     async fn page(&self, kind: &str, cursor: &str, limit: u64) -> Result<PageData, ApiErrorBody>;
+
+    /// Public archive/work metadata only, for the opt-in explorer.
+    async fn lookup(&self, kind: &str, key: &str) -> Result<Vec<(String, String)>, ApiErrorBody>;
 }

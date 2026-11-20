@@ -160,6 +160,16 @@ impl Backend for NodeApiBackend {
         })
     }
 
+    async fn lookup(&self, kind: &str, key: &str) -> Result<Vec<(String, String)>, ApiErrorBody> {
+        let projection = self.projection.as_ref().ok_or_else(|| {
+            ApiErrorBody::new(ErrorCode::StaleProjection, "projection unavailable")
+        })?;
+        projection.lookup(kind, key).await.map_err(|e| match e {
+            Error::Validation(_) => ApiErrorBody::new(ErrorCode::InvalidRequest, "invalid lookup"),
+            _ => ApiErrorBody::new(ErrorCode::Internal, "archive unavailable"),
+        })
+    }
+
     async fn page(&self, kind: &str, cursor: &str, limit: u64) -> Result<PageData, ApiErrorBody> {
         // Only projection kinds declared in the OpenAPI contract are legal.
         if !matches!(kind, "events" | "work_items" | "reviews" | "receipts") {

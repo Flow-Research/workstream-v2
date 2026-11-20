@@ -11,7 +11,7 @@ pub(super) struct Search {
     cursor: String,
 }
 
-fn text(s: &str) -> String {
+pub(super) fn text(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

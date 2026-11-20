@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import resource
 import socket
@@ -65,12 +66,15 @@ def run(directory, binaries, fixtures, unauthorized):
         api_port = reserve.getsockname()[1]
     env.update(WORKSTREAM_EXPLORER='1', WORKSTREAM_API_PORT=str(api_port))
 
-    def explorer(query=''):
+    def https(path, *args):
         # Each invocation opens a new authenticated TLS connection. No cookie,
         # token or local browser state is needed to resolve the bookmark.
         return subprocess.check_output(['curl', '-qsS', '--max-time', '5', '--noproxy', '*',
             '--cacert', str(pki / 'ca.pem'), '--resolve', f'node.workstream.internal:{api_port}:127.0.0.1',
-            f'https://node.workstream.internal:{api_port}/explorer{query}'], text=True)
+            *args, f'https://node.workstream.internal:{api_port}{path}'], text=True)
+
+    def explorer(query=''):
+        return https('/explorer' + query)
     processes = {}
 
     def rpc(method, params=None):
@@ -150,9 +154,27 @@ def run(directory, binaries, fixtures, unauthorized):
         # A crash before the projection transaction commits leaves no cursor
         # and no partial rows. The first verified block is replayed by the
         # restarted verifier from the writer's durable journal.
-        ack = submit(fixtures[0])['result']
+        # Walk the sponsor's preview -> local signature handoff -> receipt path.
+        # Use the independently signed fixture as the local signer's output.
+        signer = bytes(fixtures[0]['account']).hex()
+        form = ['--data-urlencode', 'action=register', '--data-urlencode', 'nonce=0',
+                '--data-urlencode', 'account=' + signer]
+        preview = https('/sponsor/preview', *form)
+        assert 'Network 1' in preview and preview == https('/sponsor/preview', *form)
+        digest = re.search(r'id="digest">(0x[0-9a-f]{64})<', preview)[1]
+        raw = json.dumps(fixtures[0])
+        token = json.loads(https('/v1/session', '-X','POST'))['data']['token']
+        signed_hash = https('/sponsor/check/' + digest, '--data-binary', raw)
+        assert re.fullmatch(r'0x[0-9a-f]{64}', signed_hash)
+        assert https('/sponsor/check/' + digest, '--data-binary', json.dumps(fixtures[1]),
+                     '-w', '%{http_code}') == '409'
+        args = ['-H', 'Authorization: Bearer ' + token, '-H', 'X-Request-Id: ' + signed_hash,
+                '-H', 'Content-Type: application/json', '--data-binary', json.dumps({
+                    'version':1, 'api_version':1, 'tx_bytes':list(raw.encode())})]
+        ack = json.loads(https('/v1/submit', *args))['data']
+        assert ack['tx_hash'] == signed_hash and json.loads(https('/v1/submit', *args))['data'] == ack
         assert ack['status'] == 'Pending'
-        tx_id = bytes(ack['tx_hash']).hex()
+        tx_id = signed_hash[2:]
         bookmark = '?kind=receipt&key=' + tx_id
         assert '<strong>Pending</strong>' in explorer(bookmark)
         start('prover')
@@ -167,6 +189,7 @@ def run(directory, binaries, fixtures, unauthorized):
         assert status()['indexed_height'] == 1 and status()['lag'] == 0
         print('Mid-batch restart: verifier replayed block 1 and indexed it once', flush=True)
         assert tx_id in explorer() and '<strong>Verified</strong>' in explorer(bookmark)
+        print('Sponsor workspace: preview refresh stable, mismatched signed file refused, exact retry resolved to one verified receipt', flush=True)
         assert 'Unknown · No receipt recorded' in explorer('?kind=receipt&key=' + '00'*32)
         assert 'Proof guest' in explorer('?kind=block&key=1')
 

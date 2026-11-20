@@ -22,7 +22,24 @@ impl Journal {
             CREATE TABLE IF NOT EXISTS admissions(id BLOB UNIQUE NOT NULL, signed BLOB NOT NULL, status TEXT NOT NULL CHECK(status IN ('Pending','Published','Rejected')), height INTEGER);
             CREATE INDEX IF NOT EXISTS queue ON admissions(status);
             CREATE TABLE IF NOT EXISTS blocks(height INTEGER PRIMARY KEY, block BLOB NOT NULL);
+            CREATE TABLE IF NOT EXISTS block_refs(height INTEGER PRIMARY KEY, da_ref BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS checkpoint(id INTEGER PRIMARY KEY CHECK(id=1), snapshot BLOB NOT NULL);").map_err(db)?;
+        // Backfill references for journals created before object DA existed.
+        let published: Vec<(u64, Vec<u8>)> = c
+            .prepare("SELECT height,block FROM blocks")
+            .map_err(db)?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(db)?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(db)?;
+        for (height, bytes) in published {
+            let block: Block = decode(&bytes)?;
+            c.execute(
+                "INSERT OR IGNORE INTO block_refs(height,da_ref) VALUES(?,?)",
+                params![height, block.header.da_ref.as_bytes().as_slice()],
+            )
+            .map_err(db)?;
+        }
         Ok(Self(c))
     }
     pub(super) fn restore(&self, seq: &mut Sequencer) -> Result<()> {
@@ -107,6 +124,14 @@ impl Journal {
         )
         .map_err(db)?;
         t.execute(
+            "INSERT OR REPLACE INTO block_refs(height,da_ref) VALUES(?,?)",
+            params![
+                block.header.number,
+                block.header.da_ref.as_bytes().as_slice()
+            ],
+        )
+        .map_err(db)?;
+        t.execute(
             "INSERT OR REPLACE INTO checkpoint VALUES(1,?)",
             [encode(&seq.state.snapshot())?],
         )
@@ -131,6 +156,25 @@ impl Journal {
             .optional()
             .map_err(db)?;
         bytes.map(|b| decode(&b)).transpose()
+    }
+    pub(super) fn da_ref(&self, height: u64) -> Result<Option<H256>> {
+        let bytes: Option<Vec<u8>> = self
+            .0
+            .query_row(
+                "SELECT da_ref FROM block_refs WHERE height=?",
+                [height],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db)?;
+        bytes
+            .map(|bytes| {
+                let array: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| Error::State("journal DA reference length mismatch".into()))?;
+                Ok(H256::from_bytes(array))
+            })
+            .transpose()
     }
     pub(super) fn queue(&self) -> Result<(u64, u64)> {
         self.0.query_row("SELECT count(*),coalesce(sum(length(signed)),0) FROM admissions WHERE status='Pending'",[],|r|Ok((r.get(0)?,r.get(1)?))).map_err(db)

@@ -36,6 +36,9 @@ services:
         done
         cp /db-secrets/worker /keys/prover/pg.password
         chmod 0600 /keys/prover/pg.password
+        # Recover from socket files retained by a stopped localnet project;
+        # run before the owning services bind, after they are stopped.
+        rm -f /ipc/runtime/*.sock
         bash /app/dev-service-identities.sh /tmp/identities
         for role in node sequencer prover; do
           cp /tmp/identities/$$role/*.{der,pem} /keys/$$role/
@@ -77,8 +80,6 @@ services:
     command: [workstream-sequencer, --metrics-port, '9090']
     environment:
       <<: *env
-      WORKSTREAM_WRITER_DATA: /data/journal
-    volumes: [ipc:/ipc, writer-id:/identity:ro, writer-data:/data]
   node:
     <<: *service
     depends_on: {sequencer: {condition: service_healthy}}

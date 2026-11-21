@@ -29,6 +29,9 @@ services:
     command:
       - |
         install -d -m 0700 -o 10001 -g 10001 /ipc/runtime
+        # Recover from socket files retained by a stopped localnet project;
+        # run before the owning services bind, after they are stopped.
+        rm -f /ipc/runtime/*.sock
         bash /app/dev-service-identities.sh /tmp/identities
         for role in node sequencer prover; do
           cp /tmp/identities/$$role/*.{der,pem} /keys/$$role/

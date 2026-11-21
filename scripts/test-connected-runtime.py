@@ -24,11 +24,14 @@ def wait(check):
     raise TimeoutError('runtime did not reach expected state')
 
 
-def run(directory, binaries, fixture):
+def run(directory, binaries, fixture, future_nonce):
     pki = directory / 'identities'
     subprocess.run(['bash', 'scripts/dev-service-identities.sh', pki], check=True)
     env = {k: v for k, v in os.environ.items() if not k.startswith('WORKSTREAM_')}
     env['WORKSTREAM_RUNTIME_DIR'] = str(directory)
+    data = directory / 'writer-data'
+    data.mkdir(mode=0o700)
+    env['WORKSTREAM_WRITER_DATA'] = str(data)
     with socket.socket() as reserve:
         reserve.bind(('127.0.0.1', 0))
         port = reserve.getsockname()[1]
@@ -58,8 +61,8 @@ def run(directory, binaries, fixture):
     def verified():
         return rpc('workstream.node.verifiedTip')['result']
 
-    def submit():
-        return rpc('workstream.sequencer.submitTransaction', dict(version=1, api_version=1, tx_bytes=list(json.dumps(fixture).encode())))
+    def submit(transaction=fixture):
+        return rpc('workstream.sequencer.submitTransaction', dict(version=1, api_version=1, tx_bytes=list(json.dumps(transaction).encode())))
 
     with contextlib.ExitStack() as cleanup:
         def start(role):
@@ -85,7 +88,19 @@ def run(directory, binaries, fixture):
             assert json.loads(malformed.makefile('rb').readline())['error']['code'] == -32700
         with socket.create_connection(('127.0.0.1', port), timeout=3) as interrupted:
             interrupted.sendall(b'{')
-        assert submit()['result']['status'] == 'Pending'
+        ack = submit()['result']
+        assert ack['status'] == 'Pending'
+        seq.kill()
+        seq.wait()
+        seq = start('sequencer')
+        wait(lambda: writer('Tip') == [0, genesis['state_root']])
+        assert submit()['result'] == ack
+        receipt_method = 'workstream.node.getReceipt'
+        lookup = {'tx_hash': ack['tx_hash']}
+        assert rpc(receipt_method, lookup)['result']['status'] == 'Pending'
+        queue = rpc('workstream.sequencer.getMempoolStatus')['result']
+        assert queue['pending_count'] == 1 and queue['size_bytes'] > 0
+        print(f'After SIGKILL: identical receipt, one pending transaction, {queue["size_bytes"]} signed bytes', flush=True)
         # Writer ticks twice with no worker. It must retain the pending action.
         time.sleep(1.25)
         assert writer('Tip')[0] == 0 and verified() == genesis
@@ -96,16 +111,27 @@ def run(directory, binaries, fixture):
         assert block['transactions'] == [fixture] and block['header']['proof'] is not None
         assert tip['state_root'] != genesis['state_root']
         assert writer('Tip') == [1, tip['state_root']]
+        assert rpc(receipt_method,lookup)['result']['status'] == 'Verified'
         print('Signed action included; worker proof present; independent node matched writer:', json.dumps(tip), flush=True)
         seq.kill()
         seq.wait()
         assert 'error' in submit() and verified() == tip
+        start('sequencer')
+        wait(lambda: writer('Tip') == [1, tip['state_root']])
+        assert submit()['result']['status'] == 'Published'
+        assert writer('Queue') == [0, 0]
+        print('Published checkpoint restored; duplicate did not re-enter queue', flush=True)
+        assert rpc(receipt_method, {'tx_hash': [0]*32})['result']['status'] == 'Unknown'
+        invalid = submit(future_nonce)['result']
+        wait(lambda: rpc(receipt_method, {'tx_hash': invalid['tx_hash']})['result']['status'] == 'Rejected')
+        print('Unknown ID distinguished from durable semantic rejection', flush=True)
         print('Writer stopped: admission failed, verified height unchanged', flush=True)
 
 
 if __name__ == '__main__':
     subprocess.run(['cargo', 'build', '--quiet', '--bin', 'node', '--bin', 'sequencer', '--bin', 'prover'], check=True)
     fixture = json.loads(subprocess.check_output(['cargo','run','--quiet','-p','workstream-tests','--example','connected_fixture']))
+    future_nonce = json.loads(subprocess.check_output(['cargo','run','--quiet','-p','workstream-tests','--example','connected_fixture','--','future-nonce']))
     target = json.loads(subprocess.check_output(['cargo','metadata','--format-version','1','--no-deps']))['target_directory']
     with tempfile.TemporaryDirectory() as directory:
-        run(Path(directory), Path(target) / 'debug', fixture)
+        run(Path(directory), Path(target) / 'debug', fixture, future_nonce)

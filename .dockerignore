@@ -1,0 +1,8 @@
+**
+!Cargo.toml
+!Cargo.lock
+!crates/**
+!src/**
+!tests/support/**
+!config/**
+!scripts/dev-service-identities.sh

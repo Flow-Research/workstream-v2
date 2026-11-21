@@ -1,48 +1,64 @@
 name: workstream-localnet
 
+x-service: &service
+  image: ${WORKSTREAM_IMAGE:-workstream:compose-gate}
+  pull_policy: never
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  environment: &env
+    WORKSTREAM_PROFILE: dev
+    WORKSTREAM_RUNTIME_DIR: /ipc/runtime
+    WORKSTREAM_IDENTITY_DIR: /identity
+  healthcheck:
+    test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9090/readyz', timeout=2).read()"]
+    interval: 2s
+    timeout: 3s
+    retries: 12
+
 services:
-  sequencer:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: workstream:dev
-    container_name: ws-sequencer
-    command: workstream-sequencer --config config/sequencer.example.toml
-    ports:
-      - "8545:8545"
-    environment:
-      WORKSTREAM_SEQUENCER_LOG_LEVEL: debug
-    healthcheck:
-      test: ["CMD", "true"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-
+  bootstrap:
+    image: ${WORKSTREAM_IMAGE:-workstream:compose-gate}
+    build: .
+    user: '0:0'
+    network_mode: none
+    read_only: true
+    tmpfs: [/tmp]
+    volumes: [ipc:/ipc, node-id:/keys/node, writer-id:/keys/sequencer, worker-id:/keys/prover]
+    entrypoint: [/bin/bash, -euc]
+    command:
+      - |
+        install -d -m 0700 -o 10001 -g 10001 /ipc/runtime
+        # Recover from socket files retained by a stopped localnet project;
+        # run before the owning services bind, after they are stopped.
+        rm -f /ipc/runtime/*.sock
+        bash /app/dev-service-identities.sh /tmp/identities
+        for role in node sequencer prover; do
+          cp /tmp/identities/$$role/*.{der,pem} /keys/$$role/
+          chown -R 10001:10001 /keys/$$role
+          chmod 0700 /keys/$$role
+        done
   prover:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: workstream:dev
-    container_name: ws-prover
-    command: workstream-prover --config config/prover.example.toml
-    ports:
-      - "8080:8080"
-    environment:
-      WORKSTREAM_PROVER_LOG_LEVEL: debug
-    depends_on:
-      - sequencer
-
+    <<: *service
+    depends_on: {bootstrap: {condition: service_completed_successfully}}
+    command: [workstream-prover, --metrics-port, '9090']
+    volumes: [ipc:/ipc, worker-id:/identity:ro]
+  sequencer:
+    <<: *service
+    depends_on: {prover: {condition: service_healthy}}
+    command: [workstream-sequencer, --metrics-port, '9090']
+    volumes: [ipc:/ipc, writer-id:/identity:ro]
   node:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: workstream:dev
-    container_name: ws-node
-    command: workstream-node --config config/node.example.toml
-    ports:
-      - "30303:30303"
+    <<: *service
+    depends_on: {sequencer: {condition: service_healthy}}
+    command: [workstream-node, --metrics-port, '9090']
     environment:
-      WORKSTREAM_NODE_LOG_LEVEL: debug
-    depends_on:
-      - sequencer
-      - prover
+      <<: *env
+      WORKSTREAM_NODE_RPC_PORT: '8545'
+    volumes: [ipc:/ipc, node-id:/identity:ro]
+
+volumes:
+  ipc:
+  node-id:
+  writer-id:
+  worker-id:

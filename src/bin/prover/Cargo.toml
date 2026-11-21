@@ -14,7 +14,7 @@ path = "main.rs"
 workstream-ops = { path = "../../../crates/workstream-ops" }
 risc0-zkvm = { version = "=3.0.3", default-features = false, features = ["client", "disable-dev-mode"] }
 risc0-binfmt = "=3.0.2"
-risc0-zkos-v1compat = "=2.2.0"
+risc0-zkos-v1compat = "=2.2.3"
 # Receipt control IDs and seal formats must match the r0vm 3.0.3 binary.
 risc0-circuit-rv32im = { version = "=4.0.2", default-features = false }
 risc0-circuit-recursion = { version = "=4.0.2", default-features = false }

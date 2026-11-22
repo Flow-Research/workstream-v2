@@ -80,6 +80,8 @@ services:
     command: [workstream-sequencer, --metrics-port, '9090']
     environment:
       <<: *env
+      WORKSTREAM_WRITER_DATA: /data/journal
+    volumes: [ipc:/ipc, writer-id:/identity:ro, writer-data:/data]
   node:
     <<: *service
     depends_on: {sequencer: {condition: service_healthy}}

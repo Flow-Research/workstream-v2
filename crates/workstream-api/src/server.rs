@@ -408,7 +408,8 @@ async fn submit<B: Backend>(
     }
 
     // Reject oversized user-controlled submissions before deserializing.
-    if body.len() > MAX_SUBMISSION_BYTES {
+    let bytes: &[u8] = body.as_ref();
+    if bytes.len() > MAX_SUBMISSION_BYTES {
         return simple_error(
             &meta,
             ErrorCode::InvalidRequest,
@@ -419,7 +420,7 @@ async fn submit<B: Backend>(
     // The submission body is bounded above and deserialized into the typed
     // request; serde enforces the required-field contract and malformed
     // payloads fail closed with a stable error.
-    let request: SubmitRequest = match serde_json::from_slice(&body) {
+    let request: SubmitRequest = match serde_json::from_slice(bytes) {
         Ok(request) => request,
         Err(_) => return simple_error(&meta, ErrorCode::InvalidRequest, "invalid submission body"),
     };

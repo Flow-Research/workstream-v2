@@ -13,6 +13,7 @@ jsonwebtoken = { version = "10.4", default-features = false, features = ["aws_lc
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+rusqlite = { version = "0.43", features = ["bundled"] }
 tokio = { workspace = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 tracing = { workspace = true }
@@ -21,5 +22,7 @@ workstream-crypto = { path = "../workstream-crypto" }
 workstream-tx = { path = "../workstream-tx" }
 
 [dev-dependencies]
+tempfile = "3"
+workstream-stf = { path = "../workstream-stf" }
 ed25519-dalek = { workspace = true }
 tower = { version = "0.5", features = ["util"] }

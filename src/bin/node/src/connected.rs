@@ -157,8 +157,13 @@ pub async fn serve(
     let schedule = stf.fork_schedule().clone();
     let chain_id = schedule.chain_id;
     let projection = Projection::open(chain_id).await?.map(Arc::new);
+    let notifications_db_path: PathBuf = std::env::var_os("WORKSTREAM_NOTIFICATIONS_DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dir.join("notifications.sqlite"));
+    let notifications_outbox = workstream_ops::notifications::Outbox::open(&notifications_db_path)?;
     let mut node = Node::with_backend(stf, schedule, MemoryBlockSource::new(), prover.backend())
-        .require_proof();
+        .require_proof()
+        .with_notifications(notifications_outbox);
     let (tx, tip) = tokio::sync::watch::channel((0, node.state_root(), None));
     let writer = dir.join("writer.sock");
     let included = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
@@ -389,9 +394,30 @@ pub async fn serve(
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
     };
+    let webhook_url = std::env::var("WORKSTREAM_NOTIFICATION_WEBHOOK_URL").ok();
+    let webhook_secret = std::env::var("WORKSTREAM_NOTIFICATION_WEBHOOK_SECRET").ok();
+    let notifications_task = async move {
+        let (url, secret) = match (webhook_url, webhook_secret) {
+            (None, None) => return std::future::pending().await,
+            (Some(url), Some(secret)) if !secret.is_empty() => (url, secret),
+            _ => {
+                return Err(Error::Config(
+                    "notification webhook requires URL and secret".into(),
+                ))
+            }
+        };
+        workstream_ops::notifications::run(
+            &notifications_db_path,
+            Arc::new(workstream_ops::notifications::WebhookSink::new(
+                url, secret,
+            )?) as Arc<dyn workstream_ops::notifications::DeliverySink>,
+        )
+        .await
+    };
     tokio::select! {
         result = sync => result,
         result = api => result,
+        result = notifications_task => result,
         _ = rpc => Err(Error::Io("connected node listener stopped".into())),
     }
 }

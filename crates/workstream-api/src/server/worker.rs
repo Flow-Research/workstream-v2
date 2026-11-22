@@ -6,7 +6,7 @@ use workstream_crypto::signature::tx_message_hash;
 use workstream_stf::{encode_payload, BundleAdmitPayload, SubmissionCreatePayload, TaskIdPayload};
 use workstream_tx::TxBuilder;
 
-fn id(s: &str) -> Result<H256, StatusCode> {
+pub(super) fn id(s: &str) -> Result<H256, StatusCode> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     if s.len() != 64 {
         return Err(StatusCode::BAD_REQUEST);
@@ -52,6 +52,22 @@ async fn preview<B: Backend>(
         ),
         _ => return Err(StatusCode::BAD_REQUEST),
     };
+    unsigned(
+        &s,
+        account,
+        d.nonce,
+        kind,
+        payload.map_err(|_| StatusCode::BAD_REQUEST)?,
+    )
+}
+
+pub(super) fn unsigned<B: Backend>(
+    s: &ApiState<B>,
+    account: H256,
+    nonce: u64,
+    kind: ActionType,
+    payload: Vec<u8>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
     let chain = s
         .backend
         .network()
@@ -60,13 +76,13 @@ async fn preview<B: Backend>(
     let tx = TxBuilder::new()
         .chain_id(chain)
         .account(account)
-        .nonce(0, d.nonce)
+        .nonce(0, nonce)
         .fee(FeeSpec {
             payer: FeePayer::Self_,
             asset_id: 0,
             max_fee: 1000,
         })
-        .add_action(kind, payload.map_err(|_| StatusCode::BAD_REQUEST)?)
+        .add_action(kind, payload)
         .build()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     let digest = tx_message_hash(&tx).map_err(|_| StatusCode::BAD_REQUEST)?;

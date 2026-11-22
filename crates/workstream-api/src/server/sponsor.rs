@@ -171,12 +171,20 @@ async fn preview<B: Backend>(State(s): State<Arc<ApiState<B>>>, Form(i): Form<In
     Html(format!(r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sponsor review</title><link rel="stylesheet" href="/explorer.css"><main><header>SPONSOR DESK / REVIEW</header><h1>Review action</h1><aside>Network {chain} · Nonce {} · Maximum fee 1000 (asset 0)</aside><h2>{:?}</h2><section><p>{}</p><p>Signing account: {}</p><p>Approval digest: <code id="digest">{digest}</code></p></section><h2>Local signature</h2><p>Save this unsigned JSON as draft.json. Inspect it with workstream-inspect, then sign with workstream-sign using the network and digest above.</p><textarea readonly aria-label="Unsigned transaction" rows="6" cols="40">{}</textarea><p><label>Signed transaction JSON file <input id="signed" type="file" accept="application/json,.json"></label></p><button id="send" type="button">Submit signed action</button><p id="result" role="status"></p><footer><a href="/sponsor">Sponsor desk</a> · <a href="/explorer">Outcome history</a></footer></main><script src="/sponsor.js" defer></script></html>"#,tx.nonce.seq,tx.actions[0].action_type,text(&summary),tx.account,text(&draft))).into_response()
 }
 
+/// Maximum accepted signed-transaction check body. User-controlled payloads
+/// are bounded before deserialization so oversized requests fail closed.
+const MAX_CHECK_BYTES: usize = 256 * 1024;
+
 // Verify exact bytes for the browser handoff without forwarding or signing.
 async fn check(
     axum::extract::Path(expected): axum::extract::Path<String>,
     body: Bytes,
 ) -> Result<String, StatusCode> {
-    let tx: Transaction = serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let bytes: &[u8] = body.as_ref();
+    if bytes.len() > MAX_CHECK_BYTES {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let tx: Transaction = serde_json::from_slice(bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
     if tx_message_hash(&tx).ok() != Some(id(&expected).ok_or(StatusCode::BAD_REQUEST)?) {
         return Err(StatusCode::CONFLICT);
     }

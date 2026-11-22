@@ -38,6 +38,9 @@ services:
         chmod 0600 /keys/prover/pg.password
         cp /db-secrets/projection /keys/node/pg.password
         chmod 0600 /keys/node/pg.password
+        # Recover from socket files retained by a stopped localnet project;
+        # run before the owning services bind, after they are stopped.
+        rm -f /ipc/runtime/*.sock
         bash /app/dev-service-identities.sh /tmp/identities
         for role in node sequencer prover; do
           cp /tmp/identities/$$role/*.{der,pem} /keys/$$role/

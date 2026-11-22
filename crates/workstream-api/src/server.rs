@@ -10,6 +10,8 @@
 //!   `X-Request-Id` with a different body is rejected (`DUPLICATE_REQUEST`).
 //! * Every error is a versioned envelope with stable string codes; messages
 //!   never include transaction payloads, witnesses or signing material.
+mod explorer;
+
 use std::{
     collections::HashMap,
     io,
@@ -54,6 +56,7 @@ use crate::{
 /// origin is trusted until it is explicitly configured.
 #[derive(Clone)]
 pub struct ApiConfig {
+    pub explorer: bool,
     pub workspace_login: Option<crate::workspace::WorkspaceLogin>,
     pub allowed_origins: Vec<String>,
     pub session_ttl: Duration,
@@ -64,6 +67,7 @@ impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             workspace_login: None,
+            explorer: false,
             allowed_origins: Vec::new(),
             session_ttl: Duration::from_secs(300),
             max_body_bytes: 256 * 1024,
@@ -299,11 +303,15 @@ async fn security_and_cors<B: Backend>(
         return response;
     }
 
+    let explorer = state.config.explorer && request.uri().path() == "/explorer";
     let mut response = next.run(request).await;
     if allowed {
         apply_cors(response.headers_mut(), origin.as_deref());
     }
     security_headers(response.headers_mut());
+    if explorer {
+        response.headers_mut().insert("content-security-policy",HeaderValue::from_static("default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"));
+    }
     response
 }
 
@@ -616,7 +624,15 @@ pub fn router<B: Backend>(state: Arc<ApiState<B>>) -> Router {
             move |s: State<Arc<ApiState<B>>>, r: Request, n: Next| context(s, r, n, true),
         ));
 
+    let shell = if state.config.explorer {
+        Router::new()
+            .route("/explorer", get(explorer::view::<B>))
+            .route("/explorer.css", get(explorer::css))
+    } else {
+        Router::new()
+    };
     Router::new()
+        .merge(shell)
         .merge(public)
         .merge(protected)
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))
@@ -723,6 +739,9 @@ mod tests {
 
     #[async_trait]
     impl Backend for FakeBackend {
+        async fn lookup(&self, _: &str, _: &str) -> Result<Vec<(String, String)>, ApiErrorBody> {
+            Ok(vec![])
+        }
         fn network(&self) -> String {
             "1".into()
         }
@@ -772,6 +791,7 @@ mod tests {
 
     fn test_config() -> ApiConfig {
         ApiConfig {
+            explorer: false,
             workspace_login: None,
             allowed_origins: vec!["https://app.example".into()],
             session_ttl: Duration::from_secs(300),

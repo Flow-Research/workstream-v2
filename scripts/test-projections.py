@@ -60,6 +60,17 @@ def run(directory, binaries, fixtures, unauthorized):
     data = directory / 'writer-data'
     data.mkdir(mode=0o700)
     env['WORKSTREAM_WRITER_DATA'] = str(data)
+    with socket.socket() as reserve:
+        reserve.bind(('127.0.0.1', 0))
+        api_port = reserve.getsockname()[1]
+    env.update(WORKSTREAM_EXPLORER='1', WORKSTREAM_API_PORT=str(api_port))
+
+    def explorer(query=''):
+        # Each invocation opens a new authenticated TLS connection. No cookie,
+        # token or local browser state is needed to resolve the bookmark.
+        return subprocess.check_output(['curl', '-qsS', '--max-time', '5', '--noproxy', '*',
+            '--cacert', str(pki / 'ca.pem'), '--resolve', f'node.workstream.internal:{api_port}:127.0.0.1',
+            f'https://node.workstream.internal:{api_port}/explorer{query}'], text=True)
     processes = {}
 
     def rpc(method, params=None):
@@ -133,7 +144,6 @@ def run(directory, binaries, fixtures, unauthorized):
             }
 
         start('sequencer')
-        start('prover')
         start('node', 'projection-mid-batch')
         wait(verified)
 
@@ -142,6 +152,10 @@ def run(directory, binaries, fixtures, unauthorized):
         # restarted verifier from the writer's durable journal.
         ack = submit(fixtures[0])['result']
         assert ack['status'] == 'Pending'
+        tx_id = bytes(ack['tx_hash']).hex()
+        bookmark = '?kind=receipt&key=' + tx_id
+        assert '<strong>Pending</strong>' in explorer(bookmark)
+        start('prover')
         wait(lambda: processes['node'].poll() is not None)
         assert sql("SELECT indexed_height||'|'||verified_height FROM projection_meta WHERE chain='1'") == '0|0'
         assert sql('SELECT count(*) FROM projection_events') == '0'
@@ -152,12 +166,16 @@ def run(directory, binaries, fixtures, unauthorized):
         wait(lambda: (t if (t := verified())['height'] == 1 else None))
         assert status()['indexed_height'] == 1 and status()['lag'] == 0
         print('Mid-batch restart: verifier replayed block 1 and indexed it once', flush=True)
+        assert tx_id in explorer() and '<strong>Verified</strong>' in explorer(bookmark)
+        assert 'Unknown · No receipt recorded' in explorer('?kind=receipt&key=' + '00'*32)
+        assert 'Proof guest' in explorer('?kind=block&key=1')
 
         # Hold the real verifier at block 1 and vary only the disposable read
         # cursor. All three commands must distinguish an available stale read
         # from a current one, without changing the writer or verifier.
         for indexed in (1, 0, 1):
             sql(f"UPDATE projection_meta SET indexed_height={indexed} WHERE chain='1'")
+            assert ('· Current</aside>' if indexed else '· Stale</aside>') in explorer(bookmark)
             for cmd in ('status', 'doctor', 'smoke'):
                 run_cli = subprocess.run([binaries / 'workstream-chain', '--port', str(rpc_port), cmd],
                                          capture_output=True, text=True, timeout=8)
@@ -234,6 +252,13 @@ def run(directory, binaries, fixtures, unauthorized):
 
         restart_node()
 
+        reopened = explorer(bookmark)
+        assert tx_id in reopened and '<strong>Verified</strong>' in reopened and 'Block 1</a>' in reopened
+        work = page('work_items')['items'][0]
+        for kind, field in [('account', 'actor'), ('task', 'subject')]:
+            assert work['kind'] in explorer(f'?kind={kind}&key={work[field]}')
+        print('Explorer: same receipt bookmark verified after reconnect, wipe/reindex and replay; block, account and task lookups passed', flush=True)
+
         # Projection edits are read-model edits only. A forged active grant in
         # PostgreSQL must not authorize a chain action.
         reviewer = json.loads(subprocess.check_output([
@@ -253,6 +278,7 @@ def run(directory, binaries, fixtures, unauthorized):
         tx_hash = ack['tx_hash']
         outcome = wait(lambda: (r if (r := receipt(tx_hash))['result']['status'] == 'Rejected' else None))
         assert outcome['result']['status'] == 'Rejected'
+        assert '<strong>Rejected</strong>' in explorer('?kind=receipt&key=' + bytes(tx_hash).hex())
         print('Projection authority: forged grant visible in read model, chain rejected the action', flush=True)
 
         # Rebuild removes the forged row without changing the verified chain.

@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS projection_work_items (
 );
 CREATE INDEX IF NOT EXISTS projection_work_items_subject
     ON projection_work_items (chain, subject, height);
+CREATE INDEX IF NOT EXISTS projection_work_items_actor
+    ON projection_work_items (chain, actor, height);
 CREATE INDEX IF NOT EXISTS projection_work_items_height
     ON projection_work_items (chain, height, tx_index, ordinal);
 

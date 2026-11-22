@@ -30,12 +30,14 @@ services:
       - |
         install -d -m 0700 -o 10001 -g 10001 /ipc/runtime
         install -d -m 0700 -o 10001 -g 10001 /data/journal
-        for key in admin worker; do
+        for key in admin worker projection; do
           if [ ! -s /db-secrets/$$key ]; then openssl rand -hex 32 > /db-secrets/$$key; fi
           chmod 0444 /db-secrets/$$key
         done
         cp /db-secrets/worker /keys/prover/pg.password
         chmod 0600 /keys/prover/pg.password
+        cp /db-secrets/projection /keys/node/pg.password
+        chmod 0600 /keys/node/pg.password
         # Recover from socket files retained by a stopped localnet project;
         # run before the owning services bind, after they are stopped.
         rm -f /ipc/runtime/*.sock
@@ -59,6 +61,7 @@ services:
       - jobs-socket:/var/run/postgresql
       - db-secrets:/db-secrets:ro
       - ./scripts/init-proof-jobs.sh:/docker-entrypoint-initdb.d/10-worker.sh:ro
+      - ./scripts/init-projections.sh:/docker-entrypoint-initdb.d/11-projections.sh:ro
     healthcheck:
       test: [CMD-SHELL, 'PGPASSWORD=$$(cat /db-secrets/worker) psql -U worker -d proofjobs -Atqc "SELECT 1"']
       interval: 2s
@@ -84,12 +87,15 @@ services:
     volumes: [ipc:/ipc, writer-id:/identity:ro, writer-data:/data]
   node:
     <<: *service
-    depends_on: {sequencer: {condition: service_healthy}}
+    depends_on: {sequencer: {condition: service_healthy}, jobdb: {condition: service_healthy}}
     command: [workstream-node, --metrics-port, '9090']
     environment:
       <<: *env
       WORKSTREAM_NODE_RPC_PORT: '8545'
-    volumes: [ipc:/ipc, node-id:/identity:ro]
+      WORKSTREAM_PROJECTIONS_SOCKET: /var/run/postgresql
+      WORKSTREAM_PROJECTIONS_PORT: '5432'
+      WORKSTREAM_PROJECTIONS_PASSWORD_FILE: /identity/pg.password
+    volumes: [ipc:/ipc, node-id:/identity:ro, jobs-socket:/var/run/postgresql:ro]
 
 volumes:
   jobs-data:

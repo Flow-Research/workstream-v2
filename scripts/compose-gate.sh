@@ -18,6 +18,7 @@ trap cleanup EXIT
 docker compose build bootstrap 2>&1 | tee "$out/build.log"
 docker compose up -d --no-build --wait --wait-timeout 90 node
 docker compose exec -T node python3 - < scripts/compose-receipt.py | tee "$out/receipt.json"
+docker compose exec -T node python3 - < scripts/compose-projection.py | tee "$out/projection.json"
 docker compose exec -T jobdb sh -c \
   'PGPASSWORD=$(cat /db-secrets/worker) psql -U worker -d proofjobs -Atc \
    "SELECT chain,height,attempts,queue_ms IS NOT NULL,runtime_ms IS NOT NULL,rejection IS NULL,complete FROM proof_job_status"' \

@@ -5,6 +5,14 @@ use workstream_core::{Error, H256};
 use workstream_state::State;
 
 pub(super) struct Journal(Connection);
+
+/// Durable publication intent for one canonical block height.
+#[derive(Debug)]
+pub(super) struct Publication {
+    pub(super) da_ref: H256,
+    pub(super) block: Block,
+}
+
 fn db(e: rusqlite::Error) -> Error {
     Error::Io(format!("admission journal: {e}"))
 }
@@ -23,7 +31,9 @@ impl Journal {
             CREATE INDEX IF NOT EXISTS queue ON admissions(status);
             CREATE TABLE IF NOT EXISTS blocks(height INTEGER PRIMARY KEY, block BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS block_refs(height INTEGER PRIMARY KEY, da_ref BLOB NOT NULL);
-            CREATE TABLE IF NOT EXISTS checkpoint(id INTEGER PRIMARY KEY CHECK(id=1), snapshot BLOB NOT NULL);").map_err(db)?;
+            CREATE TABLE IF NOT EXISTS checkpoint(id INTEGER PRIMARY KEY CHECK(id=1), snapshot BLOB NOT NULL);
+            CREATE TABLE IF NOT EXISTS checkpoint_meta(id INTEGER PRIMARY KEY CHECK(id=1), height INTEGER NOT NULL, state_root BLOB NOT NULL, da_ref BLOB NOT NULL);
+            CREATE TABLE IF NOT EXISTS publications(height INTEGER PRIMARY KEY, da_ref BLOB NOT NULL, block BLOB NOT NULL, accepted INTEGER NOT NULL DEFAULT 0 CHECK(accepted IN (0,1)));").map_err(db)?;
         // Backfill references for journals created before object DA existed.
         let published: Vec<(u64, Vec<u8>)> = c
             .prepare("SELECT height,block FROM blocks")
@@ -54,6 +64,34 @@ impl Journal {
             let state = State::from_snapshot(decode(&bytes)?)?;
             seq.last_header = state.last_header.clone();
             seq.state = state;
+        }
+        // The snapshot is a local hint, not an authority. Its metadata must
+        // agree with the header and the recomputed state root before any
+        // pending admission is replayed.
+        let meta: Option<(u64, Vec<u8>, Vec<u8>)> = self
+            .0
+            .query_row(
+                "SELECT height,state_root,da_ref FROM checkpoint_meta WHERE id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(db)?;
+        if let Some((height, state_root, da_ref)) = meta {
+            let actual_root = encode(&seq.state().root())?;
+            let actual_da_ref = seq
+                .last_header
+                .as_ref()
+                .map(|h| h.da_ref)
+                .unwrap_or(H256::ZERO);
+            if height != seq.tip()
+                || state_root != actual_root
+                || da_ref != actual_da_ref.as_bytes().as_slice()
+            {
+                return Err(Error::Determinism(
+                    "checkpoint snapshot disagrees with its committed metadata".into(),
+                ));
+            }
         }
         let mut stmt = self
             .0
@@ -111,6 +149,61 @@ impl Journal {
             height: None,
         })
     }
+    /// Return a previously recorded publication intent for `height`.
+    pub(super) fn publication(&self, height: u64) -> Result<Option<Publication>> {
+        let row: Option<(Vec<u8>, Vec<u8>)> = self
+            .0
+            .query_row(
+                "SELECT da_ref,block FROM publications WHERE height=?",
+                [height],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(db)?;
+        row.map(|(da_ref, bytes)| {
+            let array: [u8; 32] = da_ref
+                .try_into()
+                .map_err(|_| Error::State("publication reference length mismatch".into()))?;
+            Ok(Publication {
+                da_ref: H256::from_bytes(array),
+                block: decode(&bytes)?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Record the stable publication key before the external DA write.
+    ///
+    /// Replaying a pending admission after a crash must reproduce the exact
+    /// same key and bytes. Any divergence is a determinism failure, never a
+    /// second publication under a different logical object.
+    pub(super) fn record_publication(&self, block: &Block) -> Result<()> {
+        if block.header.da_ref == H256::ZERO {
+            return Err(Error::State("publication key is not committed".into()));
+        }
+        let bytes = encode(block)?;
+        if let Some(existing) = self.publication(block.header.number)? {
+            if existing.da_ref != block.header.da_ref || encode(&existing.block)? != bytes {
+                return Err(Error::Determinism(format!(
+                    "publication replay diverged at height {}",
+                    block.header.number
+                )));
+            }
+            return Ok(());
+        }
+        self.0
+            .execute(
+                "INSERT INTO publications(height,da_ref,block) VALUES(?,?,?)",
+                params![
+                    block.header.number,
+                    block.header.da_ref.as_bytes().as_slice(),
+                    bytes
+                ],
+            )
+            .map_err(db)?;
+        Ok(())
+    }
+
     pub(super) fn finish(&mut self, id: H256, block: &Block, seq: &Sequencer) -> Result<()> {
         let status = match block.transactions.as_slice() {
             [] => "Rejected",
@@ -118,9 +211,39 @@ impl Journal {
             _ => return Err(Error::State("admission batch identity mismatch".into())),
         };
         let t = self.0.transaction().map_err(db)?;
+        let block_bytes = encode(block)?;
+        let published: Option<(Vec<u8>, Vec<u8>)> = t
+            .query_row(
+                "SELECT da_ref,block FROM publications WHERE height=?",
+                [block.header.number],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(db)?;
+        match published {
+            Some((da_ref, bytes)) => {
+                if da_ref != block.header.da_ref.as_bytes().as_slice() || bytes != block_bytes {
+                    return Err(Error::Determinism(format!(
+                        "local commit disagrees with publication at height {}",
+                        block.header.number
+                    )));
+                }
+            }
+            None => {
+                t.execute(
+                    "INSERT INTO publications(height,da_ref,block,accepted) VALUES(?,?,?,1)",
+                    params![
+                        block.header.number,
+                        block.header.da_ref.as_bytes().as_slice(),
+                        block_bytes
+                    ],
+                )
+                .map_err(db)?;
+            }
+        }
         t.execute(
             "INSERT INTO blocks VALUES(?,?)",
-            params![block.header.number, encode(block)?],
+            params![block.header.number, block_bytes],
         )
         .map_err(db)?;
         t.execute(
@@ -134,6 +257,20 @@ impl Journal {
         t.execute(
             "INSERT OR REPLACE INTO checkpoint VALUES(1,?)",
             [encode(&seq.state.snapshot())?],
+        )
+        .map_err(db)?;
+        t.execute(
+            "INSERT OR REPLACE INTO checkpoint_meta(id,height,state_root,da_ref) VALUES(1,?,?,?)",
+            params![
+                block.header.number,
+                encode(&seq.state().root())?,
+                block.header.da_ref.as_bytes().as_slice()
+            ],
+        )
+        .map_err(db)?;
+        t.execute(
+            "UPDATE publications SET accepted=1 WHERE height=?",
+            [block.header.number],
         )
         .map_err(db)?;
         if t.execute(

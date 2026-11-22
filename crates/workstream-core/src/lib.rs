@@ -10,6 +10,7 @@ pub mod account;
 #[cfg(not(target_os = "zkvm"))]
 pub mod bridge;
 pub mod config;
+pub mod dev;
 pub mod error;
 pub mod fork;
 pub mod hash;

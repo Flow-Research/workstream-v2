@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::{path::Path, sync::Arc, time::Duration};
 use workstream_core::{
+    dev::crash_point,
     types::{Block, Transaction},
     Result,
 };
@@ -84,21 +85,42 @@ pub async fn serve(
     loop {
         tokio::select! {
             _=tick.tick()=>{
-                if let Some(first)=seq.mempool.pending.front() {
-                    let id=crate::tx_hash(first)?;
-                    match seq.build_and_submit_block(Some(1)).await {
-                        Ok(b)=>journal.finish(id,&b,&seq)?,
-                        Err(e)=>{tracing::warn!(error=%e,"publication deferred");monitor.heartbeat(false);continue;}
-                    }
+                let Some(first)=seq.mempool.pending.front() else {
+                    monitor.heartbeat(true);
+                    continue;
+                };
+                let id=crate::tx_hash(first)?;
+                let outcome = async {
+                    let mut prepared = seq.prepare_block(Some(1)).await?;
+                    journal.record_publication(prepared.block())?;
+                    prepared.publish().await?;
+                    // After DA acceptance but before the local checkpoint is
+                    // committed. Replay in a fresh writer reproduces the same
+                    // publication key and bytes.
+                    crash_point("da-accepted");
+                    let block = prepared.commit(&mut seq)?;
+                    journal.finish(id, &block, &seq)?;
+                    crash_point("local-commit");
+                    Ok::<_, workstream_core::Error>(block)
+                }.await;
+                match outcome {
+                    Ok(_) => monitor.heartbeat(true),
+                    Err(e) => { tracing::warn!(error=%e,"publication deferred"); monitor.heartbeat(false); }
                 }
-                monitor.heartbeat(true);
             },
             accepted=listener.accept()=>{
                 let (socket,_)=accepted.map_err(ipc::io_err)?;
                 let Ok(mut s)=tls.accept(socket).await else {continue};
                 let Ok(req)=ipc::read::<Request>(&mut s,ipc::ADMISSION_LIMIT).await else {continue};
                 match req {
-                    Request::Submit(tx)=>{let r=journal.admit(&mut seq,*tx).map_err(|e|e.to_string());let _=ipc::write(&mut s,&r).await;},
+                    Request::Submit(tx)=>{
+                        let r=journal.admit(&mut seq,*tx).map_err(|e|e.to_string());
+                        if r.is_ok() {
+                            // Signed bytes are durable before the acknowledgement.
+                            crash_point("admission");
+                        }
+                        let _=ipc::write(&mut s,&r).await;
+                    },
                     Request::Block(n)=>{let b=journal.block(n)?;let _=ipc::write(&mut s,&Ok::<_,String>(b)).await;},
                     Request::DaRef(n)=>{let r=journal.da_ref(n)?.map(|d|(n,d));let _=ipc::write(&mut s,&Ok::<_,String>(r)).await;},
                     Request::Receipt(id)=>{let r=journal.receipt(id)?;let _=ipc::write(&mut s,&Ok::<_,String>(r)).await;},

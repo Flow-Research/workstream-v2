@@ -59,7 +59,7 @@ fn main() -> workstream_core::Result<()> {
     let guide_hash = H256::from_bytes([0xBB; 32]);
     let guide = derive_guide(&project, 1, &guide_hash);
     let task = derive_task(&project, "Projection drill task");
-    let content = H256::from_bytes([0xCC; 32]);
+    let content = workstream_core::Hash::sha256(b"worker browser drill evidence");
     let submission = derive_submission(&task, &content);
 
     let txs = vec![

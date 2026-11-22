@@ -33,15 +33,23 @@ impl EvidenceStore {
         Ok(Self(Mutex::new(db)))
     }
 
-    fn upload(&self, subject: &str, task: &str, digest: &str, body: &[u8]) -> Outcome<()> {
+    fn upload(&self, subject: &str, task: &str, digest: &str, body: &[u8]) -> Outcome<Option<i64>> {
         if Hash::sha256(body).to_hex() != digest {
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
-        let db = self.0.lock().map_err(|_| INTERNAL)?;
-        // Authorize and store in one statement; replay never changes bytes.
+        let mut conn = self.0.lock().map_err(|_| INTERNAL)?;
+        let db = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| INTERNAL)?;
+        let deadline:Option<(i64,bool)>=db.query_row("SELECT expires,expires<=unixepoch() FROM upload_deadlines JOIN grants USING(subject,task,digest) WHERE subject=? AND task=? AND digest=? AND operation='upload'",params![subject,task,digest],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|_|INTERNAL)?;
+        if deadline.is_some_and(|(_, expired)| expired) {
+            return Err(StatusCode::GONE);
+        }
+        // Grant, deadline and bytes share one snapshot; replay never changes bytes.
         let n=db.execute("INSERT INTO objects(task,digest,body) SELECT ?1,?2,?3 WHERE EXISTS(SELECT 1 FROM grants WHERE subject=?4 AND task=?1 AND digest=?2 AND operation='upload') ON CONFLICT(task,digest) DO UPDATE SET digest=excluded.digest WHERE objects.body=excluded.body",params![task,digest,body,subject]).map_err(|_|INTERNAL)?;
         if n == 1 {
-            Ok(())
+            db.commit().map_err(|_| INTERNAL)?;
+            Ok(deadline.map(|(expires, _)| expires))
         } else {
             Err(DENIED)
         }
@@ -99,10 +107,12 @@ async fn upload<B: Backend>(
     let task = canonical(&task)?;
     let digest = canonical(&digest)?;
     tokio::task::spawn_blocking(move || {
-        db.upload(&who, &task, &digest, &body)?;
-        Ok(Json(
-            serde_json::json!({"status":"Uploaded","task":task,"content_hash":digest}),
-        ))
+        let deadline = db.upload(&who, &task, &digest, &body)?;
+        let mut ack = serde_json::json!({"status":"Uploaded","task":task,"content_hash":digest});
+        if let Some(expires) = deadline {
+            ack["upload_lease_expires"] = expires.into();
+        }
+        Ok(Json(ack))
     })
     .await
     .map_err(|_| INTERNAL)?

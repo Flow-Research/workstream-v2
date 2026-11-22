@@ -416,35 +416,10 @@ async fn submit<B: Backend>(
         );
     }
 
-    // Validate the user-controlled submission body before typed deserialization:
-    // the payload must be a JSON object carrying the required submission fields
-    // (version, api_version, tx_bytes); anything else fails closed with
-    // `InvalidRequest` before the typed request is decoded.
-    let parsed: serde_json::Value = match serde_json::from_slice(&body) {
-        Ok(value) => value,
-        Err(_) => return simple_error(&meta, ErrorCode::InvalidRequest, "invalid submission body"),
-    };
-    let version = parsed.get("version").and_then(serde_json::Value::as_u64);
-    let api_version = parsed
-        .get("api_version")
-        .and_then(serde_json::Value::as_u64);
-    let tx_bytes = parsed
-        .get("tx_bytes")
-        .and_then(|value| value.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|byte| byte.as_u64())
-                .map(|byte| byte as u8)
-                .collect::<Vec<u8>>()
-        });
-    let valid_submission = version.is_some_and(|version| version <= u32::MAX as u64)
-        && api_version.is_some_and(|api_version| api_version <= u32::MAX as u64)
-        && tx_bytes.is_some();
-    if !parsed.is_object() || !valid_submission {
-        return simple_error(&meta, ErrorCode::InvalidRequest, "invalid submission body");
-    }
-    let request: SubmitRequest = match serde_json::from_value(parsed) {
+    // The submission body is bounded above and deserialized into the typed
+    // request; serde enforces the required-field contract and malformed
+    // payloads fail closed with a stable error.
+    let request: SubmitRequest = match serde_json::from_slice(&body) {
         Ok(request) => request,
         Err(_) => return simple_error(&meta, ErrorCode::InvalidRequest, "invalid submission body"),
     };

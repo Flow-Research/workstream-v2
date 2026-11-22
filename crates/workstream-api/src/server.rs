@@ -382,6 +382,10 @@ async fn issue_session<B: Backend>(
     json_body(StatusCode::OK, serialize(&env))
 }
 
+/// Maximum accepted browser submission body. User-controlled payloads are
+/// bounded before deserialization so oversized requests fail closed.
+const MAX_SUBMISSION_BYTES: usize = 256 * 1024;
+
 async fn submit<B: Backend>(
     State(state): State<Arc<ApiState<B>>>,
     Extension(meta): Extension<RequestMeta>,
@@ -401,6 +405,15 @@ async fn submit<B: Backend>(
                 "request id reused with a different body",
             );
         }
+    }
+
+    // Reject oversized user-controlled submissions before deserializing.
+    if body.len() > MAX_SUBMISSION_BYTES {
+        return simple_error(
+            &meta,
+            ErrorCode::InvalidRequest,
+            "submission body too large",
+        );
     }
 
     // Validate the user-controlled submission body before typed deserialization:

@@ -403,7 +403,17 @@ async fn submit<B: Backend>(
         }
     }
 
-    let request: SubmitRequest = match serde_json::from_slice(&body) {
+    // Validate the user-controlled submission body before typed deserialization:
+    // only a JSON object can satisfy the submission contract, so reject
+    // anything else with a stable error before decoding into `SubmitRequest`.
+    let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => return simple_error(&meta, ErrorCode::InvalidRequest, "invalid submission body"),
+    };
+    if !parsed.is_object() {
+        return simple_error(&meta, ErrorCode::InvalidRequest, "invalid submission body");
+    }
+    let request: SubmitRequest = match serde_json::from_value(parsed) {
         Ok(request) => request,
         Err(_) => return simple_error(&meta, ErrorCode::InvalidRequest, "invalid submission body"),
     };

@@ -20,7 +20,7 @@ impl ZkvmBackend for WorkerBackend {
 }
 pub async fn serve(dir: &Path, chain: u64, prover: Prover, monitor: Arc<Monitor>) -> Result<()> {
     let tls = ipc::tls::Server::load()?;
-    let jobs = jobs::Jobs::open(chain).await?;
+    let jobs = jobs::Jobs::open(chain, monitor.clone()).await?;
     let socket = dir.join("worker.sock");
     use std::os::unix::fs::FileTypeExt;
     if std::fs::symlink_metadata(&socket).is_ok_and(|m| m.file_type().is_socket()) {

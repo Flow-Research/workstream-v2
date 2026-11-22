@@ -6,7 +6,40 @@ groups:
         for: 1m
         annotations:
           summary: "WorkStream component {{ $labels.instance }} unavailable"
+          description: "Liveness is separate: a stalled dependency fails readiness, not liveness."
       - alert: WorkStreamRpcErrors
         expr: increase(workstream_rpc_errors_total{job="workstream"}[5m]) > 10
         annotations:
           summary: "More than 10 RPC errors in five minutes on {{ $labels.instance }}"
+      # Each stall category has one alert. The labels identify which stage of
+      # a transaction's journey is stuck so the on-call engineer does not have
+      # to infer it from a generic "stalled" signal.
+      - alert: AdmissionBacklogStall
+        expr: workstream_admission_backlog{job="workstream"} > 0 and workstream_blocks_submitted_total{job="workstream"} == 0
+        for: 2m
+        annotations:
+          summary: "Signed transactions waiting for a block on {{ $labels.instance }}"
+          description: "Admission is accepting but no block has been published."
+      - alert: ProofDelayStall
+        expr: workstream_proof_delay_ms{job="workstream"} > 300000
+        for: 1m
+        annotations:
+          summary: "Proof job older than five minutes on {{ $labels.instance }}"
+          description: "The prover queue is not draining; check worker availability."
+      - alert: DaFailureStall
+        expr: increase(workstream_da_failures_total{job="workstream"}[5m]) > 0
+        for: 1m
+        annotations:
+          summary: "DA failure on {{ $labels.instance }}"
+          description: "A durable publication attempt could not reach DA; the verified tip is held until it recovers."
+      - alert: VerificationRejectionStall
+        expr: increase(workstream_verification_rejections_total{job="workstream"}[5m]) > 0
+        annotations:
+          summary: "Block rejected by verification on {{ $labels.instance }}"
+          description: "A produced block failed verification; inspect trusted checkpoint and guest profile."
+      - alert: IndexLagStall
+        expr: workstream_index_lag_blocks{job="workstream"} > 2
+        for: 2m
+        annotations:
+          summary: "Projection read model more than two blocks behind on {{ $labels.instance }}"
+          description: "Verified blocks are not being projected; check the indexer owner lock."

@@ -412,14 +412,19 @@ async fn submit<B: Backend>(
         Err(_) => return simple_error(&meta, ErrorCode::InvalidRequest, "invalid submission body"),
     };
     let version = parsed.get("version").and_then(serde_json::Value::as_u64);
-    let api_version = parsed.get("api_version").and_then(serde_json::Value::as_u64);
-    let tx_bytes = parsed.get("tx_bytes").and_then(|value| value.as_array()).map(|items| {
-        items
-            .iter()
-            .filter_map(|byte| byte.as_u64())
-            .map(|byte| byte as u8)
-            .collect::<Vec<u8>>()
-    });
+    let api_version = parsed
+        .get("api_version")
+        .and_then(serde_json::Value::as_u64);
+    let tx_bytes = parsed
+        .get("tx_bytes")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|byte| byte.as_u64())
+                .map(|byte| byte as u8)
+                .collect::<Vec<u8>>()
+        });
     let valid_submission = version.is_some_and(|version| version <= u32::MAX as u64)
         && api_version.is_some_and(|api_version| api_version <= u32::MAX as u64)
         && tx_bytes.is_some();

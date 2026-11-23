@@ -20,4 +20,11 @@ ignore = [
     # log poisoning (RUSTSEC-2025-0055). The fix requires tracing-subscriber
     # >=0.3.20, which the pinned ark 0.5 proving dependencies cannot adopt.
     "RUSTSEC-2025-0055",
+    # age 0.12 depends unconditionally on hpke 0.12 with its "p256" feature,
+    # which pins elliptic-curve 0.13 / crypto-bigint 0.5. There is no patched
+    # 0.5.x release (the fix requires >=0.7.6, a semver-incompatible bump that
+    # age 0.12 cannot take). workstream-wallet only uses age's X25519 identity
+    # for recovery backups and performs no P-256 operations.
+    # Tracked: RUSTSEC-2026-0387
+    "RUSTSEC-2026-0387",
 ]

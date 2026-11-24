@@ -48,7 +48,7 @@ function messageOrigin(message, sender) {
   return message.origin ?? null;
 }
 
-export function createGrantsFeature({ storage, windows, runtime, signer }) {
+export function createGrantsFeature({ storage, windows, runtime, signer, onSigned }) {
   const read = async (key, fallback) => (await storage.get(key))[key] ?? fallback;
   const write = (key, value) => storage.set({ [key]: value });
 
@@ -209,6 +209,11 @@ export function createGrantsFeature({ storage, windows, runtime, signer }) {
             request.kind === "connect"
               ? { granted: true, accounts: [request.account], chainId: request.chainId }
               : await signer(request);
+          if (request.kind !== "connect" && typeof onSigned === "function") {
+            // The #175 tracker records and submits exactly once per request ID;
+            // retries reuse the stored decision and never reach this hook.
+            await onSigned(request, result);
+          }
           await updateRequest(request.id, { state: "consumed", result });
         } else {
           throw protocolError("INVALID_DECISION", "Decision must be approve or reject");

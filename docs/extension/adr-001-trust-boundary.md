@@ -16,7 +16,8 @@ stay client-side and the only write is already-signed transaction bytes.
 | Page script (dapp) | `globalThis.workstream` provider facade: connect, disconnect, account/chain discovery, typed requests, decision polling | Never | Talks only over `window.postMessage` with the content-script bridge. Receives public account and chain data after an origin grant, never a secret or raw storage value. |
 | Content script (isolated world) | Page origin, message relay | Never | Injects `content/inpage.js` into the page world and forwards allowlisted message types to the background. Must not read extension storage or log message payloads. |
 | Service worker | `chrome.storage.local`, grants, pending requests, approval-window map, signing capability | Only context allowed to sign | Sole authority for origin grants and decisions. Current signer is a mock; the real vault is #174. All state lives in storage so an idle restart is safe. |
-| Popup | Extension version and read-only state display | Never | No signing, no storage writes. |
+| Popup | Extension version and read-only transaction list | Never | No signing, no storage writes; verifies and refreshes through service-worker messages. |
+| Transaction tracker (service worker) | `chrome.storage.local` transaction records, `chrome.alarms`, API session token in worker memory, explorer links | Never | Records signed actions by request ID, submits once, polls receipts from #130, links #132 explorer bookmarks; session token is never persisted or sent to a page. |
 | Approval UI | One request by ID: origin, chain, account, decoded action, approve/reject | Never | Renders from storage via a background message and returns a decision keyed by request ID. Closing the window is a rejection. |
 
 Rule for future work: the service worker exposes one registration function
@@ -59,7 +60,7 @@ decision instead of signing twice.
 | Risk | Owner | Treatment |
 |---|---|---|
 | Exact-origin CORS allowlist is empty by default; the extension origin must be added to PR #163 | #130 / PR #163 | Comment posted on PR #163; no wildcard CORS, no API edits from the extension |
-| Sessions are in-process; a restart clears them and yields 401 | #130 | Clients re-issue on 401; covered by #175 |
+| Sessions are in-process; a restart clears them and yields 401 | #130 / #175 | Tracker re-issues once and retries with the same `X-Request-Id` |
 | Browser API listener is loopback-only by default | #130 / pilot ops | Not an extension change; operator-managed cert/DNS if exposed |
 | TypeScript types are hand-mirrored from OpenAPI | #130 | Accepted for pilot, guarded by the schema-equality test |
 | No hosted browser conformance suite | #176 (release gate) | CI artifact from localnet E2E is the evidence |

@@ -83,6 +83,17 @@ keeps the extension ID stable across machines. Service worker logs are under
 For automated browser tests, `npx playwright install chromium` installs a
 Chromium build that supports `--load-extension`.
 
+The popup lists submitted actions as text-labelled **PENDING**, **REJECTED** or
+**VERIFIED** records. The service worker persists them in `chrome.storage.local`,
+submits signed bytes to the browser API (#130) and polls receipts via an MV3
+alarm; verified rows link to the explorer receipt bookmark (#132). The API base
+defaults to `https://localhost:8443` and can be overridden with `apiBaseUrl` in
+`chrome.storage.local`. Sessions are in-process: after a restart the tracker
+re-issues once on 401 and retries with the same request ID. The pilot operator
+must add the exact origin
+`chrome-extension://kceihmiobchfkkjmcmehbbociojgadap` to `WORKSTREAM_API_ORIGINS`;
+no wildcard CORS is used.
+
 ### Makefile Targets
 
 | Command | Description |

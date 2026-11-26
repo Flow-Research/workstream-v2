@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WorkStream Wallet</title>
+    <style>
+      body { font: 14px/1.5 system-ui, sans-serif; margin: 16px; min-width: 300px; }
+      h1 { font-size: 16px; margin: 0 0 8px; }
+      h2 { font-size: 13px; margin: 12px 0 4px; }
+      p { margin: 4px 0; color: #444; }
+      ul { list-style: none; margin: 4px 0; padding: 0; }
+      li { border-top: 1px solid #ddd; padding: 6px 0; overflow-wrap: anywhere; }
+      .state { font-weight: 700; }
+      button { margin-top: 8px; }
+    </style>
+  </head>
+  <body>
+    <h1>WorkStream Wallet</h1>
+    <p>Pilot build — no keys are held in this popup.</p>
+    <p>Version: <span id="version">unknown</span></p>
+    <h2>Transactions</h2>
+    <p id="status">Loading…</p>
+    <ul id="transactions"></ul>
+    <button id="refresh" type="button">Refresh verification</button>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

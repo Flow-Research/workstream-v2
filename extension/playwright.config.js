@@ -1,0 +1,16 @@
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  testDir: "./tests/e2e",
+  timeout: 30_000,
+  expect: { timeout: 5_000 },
+  fullyParallel: false,
+  workers: 1,
+  reporter: "list",
+  use: {
+    // The bundled "chromium" channel uses the new headless mode, which can
+    // load unpacked extensions (the legacy headless shell cannot).
+    channel: "chromium",
+    headless: true,
+  },
+});

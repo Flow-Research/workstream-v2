@@ -4,25 +4,72 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>WorkStream Wallet</title>
-    <style>
-      body { font: 14px/1.5 system-ui, sans-serif; margin: 16px; min-width: 300px; }
-      h1 { font-size: 16px; margin: 0 0 8px; }
-      h2 { font-size: 13px; margin: 12px 0 4px; }
-      p { margin: 4px 0; color: #444; }
-      ul { list-style: none; margin: 4px 0; padding: 0; }
-      li { border-top: 1px solid #ddd; padding: 6px 0; overflow-wrap: anywhere; }
-      .state { font-weight: 700; }
-      button { margin-top: 8px; }
-    </style>
   </head>
   <body>
-    <h1>WorkStream Wallet</h1>
-    <p>Pilot build — no keys are held in this popup.</p>
-    <p>Version: <span id="version">unknown</span></p>
-    <h2>Transactions</h2>
-    <p id="status">Loading…</p>
-    <ul id="transactions"></ul>
-    <button id="refresh" type="button">Refresh verification</button>
-    <script type="module" src="popup.js"></script>
+    <div id="loader" class="loader" aria-hidden="true">
+      <div id="matrix" class="matrix"></div>
+      <div class="loader-center">
+        <div class="loader-wordmark">WorkStream</div>
+        <div class="loader-sub">Securing workspace</div>
+      </div>
+    </div>
+
+    <div class="app-shell">
+      <div class="layout">
+        <main class="panel" aria-labelledby="app-title">
+          <header class="panel-header">
+            <div>
+              <div class="eyebrow">Pilot Wallet</div>
+              <h1 id="app-title" class="title">WorkStream Wallet</h1>
+              <p class="subtitle">Review tracked activity and receipt verification. Private keys and signing stay inside the service worker.</p>
+            </div>
+            <div class="version-chip">v<span id="version">0.0.0</span></div>
+          </header>
+
+          <div class="panel-body">
+            <div class="section-head">
+              <p class="section-title">Transaction activity</p>
+              <div class="status-pill" aria-live="polite">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span id="status">Loading…</span>
+              </div>
+            </div>
+
+            <ul id="transactions" class="tx-list" aria-live="polite"></ul>
+
+            <div class="actions">
+              <button id="refresh" type="button" class="action-btn">Refresh verification</button>
+            </div>
+          </div>
+        </main>
+
+        <aside class="panel side-panel" aria-label="Security overview">
+          <p class="side-title">Security overview</p>
+
+          <div class="info-card">
+            <h3>Trust boundary</h3>
+            <ul class="info-list">
+              <li>Signing stays in the extension service worker.</li>
+              <li>Pages only get approved provider responses.</li>
+              <li>Every action needs an explicit origin grant.</li>
+            </ul>
+          </div>
+
+          <div class="info-card">
+            <h3>Pilot status</h3>
+            <div class="kv"><span>Signer</span><span>Mock pilot</span></div>
+            <div class="kv"><span>Storage</span><span>Local extension</span></div>
+            <div class="kv"><span>Verification</span><span>API receipt</span></div>
+          </div>
+
+          <div class="info-card">
+            <h3>Before approving</h3>
+            <p>Check the origin, chain, account, and decoded action. Reject anything you do not recognize.</p>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    <script type="module" src="./popup.ts"></script>
   </body>
 </html>

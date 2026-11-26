@@ -4,27 +4,68 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Approve WorkStream action</title>
-    <style>
-      body { font: 14px/1.5 system-ui, sans-serif; margin: 16px; }
-      h1 { font-size: 16px; }
-      dt { font-weight: 600; margin-top: 8px; }
-      dd { margin: 0; overflow-wrap: anywhere; }
-      button { margin: 16px 8px 0 0; padding: 6px 12px; }
-      #status { color: #444; }
-    </style>
   </head>
-  <body>
-    <h1>Approve WorkStream action</h1>
-    <dl>
-      <dt>Origin</dt><dd id="origin">loading…</dd>
-      <dt>Chain</dt><dd id="chain">loading…</dd>
-      <dt>Account</dt><dd id="account">loading…</dd>
-      <dt>Action</dt><dd id="action">loading…</dd>
-      <dt>Request ID</dt><dd id="request-id">loading…</dd>
-    </dl>
-    <button id="approve" type="button" disabled>Approve</button>
-    <button id="reject" type="button" disabled>Reject</button>
-    <p id="status" role="status" aria-live="polite"></p>
-    <script type="module" src="approval.js"></script>
+  <body class="approval">
+    <div id="loader" class="loader" aria-hidden="true">
+      <div id="matrix" class="matrix"></div>
+      <div class="loader-center">
+        <div class="loader-wordmark">WorkStream</div>
+        <div class="loader-sub">Review request</div>
+      </div>
+    </div>
+
+    <div class="app-shell">
+      <div class="layout">
+        <main class="panel" aria-labelledby="approval-title">
+          <header class="panel-header">
+            <div>
+              <div class="eyebrow">Approval Required</div>
+              <h1 id="approval-title" class="title">Approve WorkStream action</h1>
+              <p class="subtitle">Verify the requesting origin and decoded action before signing. Nothing is signed until you approve.</p>
+            </div>
+            <div class="version-chip">v<span id="version">0.0.0</span></div>
+          </header>
+
+          <div class="panel-body">
+            <div class="detail-card">
+              <dl class="detail-list">
+                <div class="detail-row"><dt>Origin</dt><dd id="origin">loading…</dd></div>
+                <div class="detail-row"><dt>Chain</dt><dd id="chain">loading…</dd></div>
+                <div class="detail-row"><dt>Account</dt><dd id="account" class="mono">loading…</dd></div>
+                <div class="detail-row"><dt>Action</dt><dd id="action" class="mono">loading…</dd></div>
+                <div class="detail-row"><dt>Request ID</dt><dd id="request-id" class="mono">loading…</dd></div>
+              </dl>
+            </div>
+
+            <p id="status" class="muted" role="status" aria-live="polite"></p>
+
+            <div class="actions">
+              <button id="approve" type="button" class="action-btn" disabled>Approve action</button>
+              <button id="reject" type="button" class="action-btn action-btn-secondary" disabled>Reject</button>
+            </div>
+          </div>
+        </main>
+
+        <aside class="panel side-panel" aria-label="Review checklist">
+          <p class="side-title">Review checklist</p>
+
+          <div class="info-card">
+            <h3>Check before approve</h3>
+            <ul class="info-list">
+              <li>Origin matches the site you intended.</li>
+              <li>Chain and account are expected.</li>
+              <li>Decoded action matches your intent.</li>
+            </ul>
+          </div>
+
+          <div class="info-card">
+            <h3>Safety note</h3>
+            <p>Reject closes the request safely. Approved transaction requests are signed once per request ID and tracked for receipt verification.</p>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    <script type="module" src="./approval.ts"></script>
   </body>
 </html>

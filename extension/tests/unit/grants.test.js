@@ -5,7 +5,7 @@ import { createGrantsFeature } from "../../src/background/grants.js";
 const PAGE = { tab: { url: "https://dapp.example/app" }, url: "https://dapp.example/app" };
 const UI = { url: "chrome-extension://test/approval.html" };
 
-function setup() {
+function setup({ onSigned, createWindow } = {}) {
   const data = new Map();
   const storage = {
     async get(key) {
@@ -20,6 +20,11 @@ function setup() {
     removed: [],
     async create(options) {
       const id = windows.opened.length + 1;
+      if (createWindow) {
+        const created = await createWindow(options, id);
+        windows.opened.push({ id: created.id ?? id, options });
+        return created;
+      }
       windows.opened.push({ id, options });
       return { id };
     },
@@ -33,7 +38,7 @@ function setup() {
     signCalls += 1;
     return { signature: `sig:${request.id}`, account: request.account };
   };
-  const feature = createGrantsFeature({ storage, windows, runtime, signer });
+  const feature = createGrantsFeature({ storage, windows, runtime, signer, onSigned });
   return { feature, storage, windows, data, signCalls: () => signCalls };
 }
 
@@ -43,8 +48,14 @@ function send(feature, message, sender = PAGE) {
   });
 }
 
+let grantCounter = 0;
+
 async function grantOrigin(feature) {
-  const pending = await send(feature, { type: "connect", requestId: "connect-1" });
+  grantCounter += 1;
+  const pending = await send(feature, {
+    type: "connect",
+    requestId: `connect-grant-${grantCounter}`,
+  });
   assert.equal(pending.status, "pending");
   const decided = await send(
     feature,
@@ -250,4 +261,120 @@ test("unknown request IDs are rejected", async () => {
   const { feature } = setup();
   const result = await send(feature, { type: "getDecision", requestId: "missing" });
   assert.equal(result.error.code, "UNKNOWN_REQUEST");
+});
+
+test("a request ID is bound to canonical params, account and chain", async () => {
+  const { feature, signCalls } = setup();
+  await grantOrigin(feature);
+  const original = {
+    type: "request",
+    requestId: "req-bind",
+    method: "workstream_submitWork",
+    params: { chainId: "workstream-local-1", title: "Fix docs", labels: ["a", "b"] },
+  };
+  const pending = await send(feature, original);
+  assert.equal(pending.status, "pending");
+  await send(feature, { type: "decide", requestId: "req-bind", decision: "approve" }, UI);
+
+  // Key order is not part of the binding; a canonical hash ignores it.
+  const reordered = await send(feature, {
+    ...original,
+    params: { labels: ["a", "b"], title: "Fix docs", chainId: "workstream-local-1" },
+  });
+  assert.equal(reordered.status, "approved");
+  assert.equal(signCalls(), 1);
+
+  const changed = await send(feature, {
+    ...original,
+    params: { ...original.params, title: "Different work" },
+  });
+  assert.equal(changed.error.code, "REQUEST_ID_REUSE");
+  assert.equal(signCalls(), 1);
+});
+
+test("a connect ID cannot be stolen by another origin", async () => {
+  const { feature, windows } = setup();
+  const other = { tab: { url: "https://other.example/app" }, url: "https://other.example/app" };
+  const first = await send(feature, { type: "connect", requestId: "connect-shared" });
+  assert.equal(first.status, "pending");
+
+  const stolen = await send(feature, { type: "connect", requestId: "connect-shared" }, other);
+  assert.equal(stolen.error.code, "REQUEST_ID_REUSE");
+  const approval = await send(feature, { type: "getApproval", requestId: "connect-shared" }, UI);
+  assert.equal(approval.request.origin, "https://dapp.example");
+  assert.equal(windows.opened.length, 1);
+
+  const replay = await send(feature, { type: "connect", requestId: "connect-shared" });
+  assert.equal(replay.status, "pending");
+  assert.equal(windows.opened.length, 1);
+});
+
+test("a failing tracker hook cannot cause a second signature and is replayed", async () => {
+  let deliveries = 0;
+  const { feature, signCalls } = setup({
+    onSigned: async () => {
+      deliveries += 1;
+      if (deliveries === 1) throw new Error("tracker unavailable");
+    },
+  });
+  await grantOrigin(feature);
+  const params = { chainId: "workstream-local-1", workItemId: "9" };
+  await send(feature, {
+    type: "request",
+    requestId: "req-hook",
+    method: "workstream_submitWork",
+    params,
+  });
+  const decided = await send(feature, { type: "decide", requestId: "req-hook", decision: "approve" }, UI);
+  assert.equal(decided.status, "approved");
+  assert.equal(decided.deliveryPending, true);
+  assert.equal(signCalls(), 1);
+  assert.equal(deliveries, 1);
+
+  const replay = await send(feature, {
+    type: "request",
+    requestId: "req-hook",
+    method: "workstream_submitWork",
+    params,
+  });
+  assert.equal(replay.status, "approved");
+  assert.equal(replay.deliveryPending, undefined);
+  assert.equal(signCalls(), 1);
+  assert.equal(deliveries, 2);
+});
+
+test("overlapping approvals sign once", async () => {
+  const { feature, signCalls } = setup();
+  await grantOrigin(feature);
+  await send(feature, {
+    type: "request",
+    requestId: "req-race",
+    method: "workstream_submitWork",
+    params: { chainId: "workstream-local-1" },
+  });
+  const [first, second] = await Promise.all([
+    send(feature, { type: "decide", requestId: "req-race", decision: "approve" }, UI),
+    send(feature, { type: "decide", requestId: "req-race", decision: "approve" }, UI),
+  ]);
+  assert.equal(first.status, "approved");
+  assert.equal(second.alreadyDecided, true);
+  assert.equal(signCalls(), 1);
+});
+
+test("a failed approval window is reopened on replay without a duplicate", async () => {
+  let attempts = 0;
+  const { feature, windows } = setup({
+    createWindow: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("popup blocked");
+      return { id: attempts };
+    },
+  });
+  const first = await send(feature, { type: "connect", requestId: "connect-retry" });
+  assert.equal(first.ok, false);
+  assert.equal(windows.opened.length, 0);
+
+  const replay = await send(feature, { type: "connect", requestId: "connect-retry" });
+  assert.equal(replay.status, "pending");
+  assert.equal(windows.opened.length, 1);
 });

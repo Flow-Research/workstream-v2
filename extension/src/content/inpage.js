@@ -3,6 +3,9 @@
 // no privileged chrome.* API is reachable from this file.
 (() => {
   const CHANNEL = "workstream-provider";
+  const token = document.currentScript?.dataset?.workstreamChannel ?? "";
+  if (!token) return;
+
   const pending = new Map();
   let fallbackId = 0;
 
@@ -10,8 +13,17 @@
     globalThis.crypto?.randomUUID?.() ?? `ws-${Date.now()}-${fallbackId++}`;
 
   window.addEventListener("message", (event) => {
+    // Only the injected script's own window may answer. A frame or another
+    // document cannot forge the reply with postMessage.
+    if (event.source !== window || event.origin !== window.location.origin) return;
     const message = event.data;
-    if (message?.channel !== CHANNEL || message.direction !== "content->inpage") return;
+    if (
+      message?.channel !== CHANNEL ||
+      message.token !== token ||
+      message.direction !== "content->inpage"
+    ) {
+      return;
+    }
     const entry = pending.get(message.id);
     if (!entry) return;
     pending.delete(message.id);
@@ -29,8 +41,15 @@
       const id = newId();
       pending.set(id, { resolve, reject });
       window.postMessage(
-        { channel: CHANNEL, direction: "inpage->content", id, type, payload },
-        "*",
+        {
+          channel: CHANNEL,
+          token,
+          direction: "inpage->content",
+          id,
+          type,
+          payload,
+        },
+        window.location.origin,
       );
     });
   }

@@ -48,40 +48,179 @@ function messageOrigin(message, sender) {
   return message.origin ?? null;
 }
 
+// A stable, dependency-free canonical form. The hash binds a caller-supplied
+// request ID to the exact action it approved, not just to its method.
+function stableStringify(value) {
+  if (value === undefined) return "undefined";
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+}
+
+function canonicalHash(value) {
+  const input = stableStringify(value);
+  let a = 0x811c9dc5;
+  let b = 0x01000193;
+  for (let index = 0; index < input.length; index += 1) {
+    const code = input.charCodeAt(index);
+    a = Math.imul(a ^ code, 0x01000193) >>> 0;
+    b = Math.imul(b + code, 0x85ebca6b) >>> 0;
+  }
+  return `${a.toString(16).padStart(8, "0")}${b.toString(16).padStart(8, "0")}`;
+}
+
+function bindingHash(request) {
+  return canonicalHash({
+    kind: request.kind,
+    origin: request.origin,
+    account: request.account,
+    chainId: request.chainId,
+    method: request.method ?? null,
+    params: request.params ?? null,
+  });
+}
+
+function assertSameBinding(existing, candidate) {
+  if (bindingHash(existing) !== candidate.requestHash) {
+    throw protocolError("REQUEST_ID_REUSE", "Request ID belongs to a different action");
+  }
+}
+
+function requireRequestId(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw protocolError("INVALID_REQUEST_ID", "A request ID is required");
+  }
+  return value;
+}
+
 export function createGrantsFeature({ storage, windows, runtime, signer, onSigned }) {
   const read = async (key, fallback) => (await storage.get(key))[key] ?? fallback;
   const write = (key, value) => storage.set({ [key]: value });
+  const queues = new Map();
+
+  // chrome.storage reads and writes are separate async calls. Serialize whole
+  // map mutations (and each request's decision transition) so a stale snapshot
+  // cannot erase a concurrent record or sign the same request twice.
+  function serialized(key, fn) {
+    const previous = queues.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => {}).then(fn);
+    queues.set(key, next);
+    const cleanup = () => {
+      if (queues.get(key) === next) queues.delete(key);
+    };
+    next.then(cleanup, cleanup);
+    return next;
+  }
+
+  async function mutateMap(key, mutator) {
+    return serialized(`map:${key}`, async () => {
+      const map = await read(key, {});
+      const result = await mutator(map);
+      await write(key, map);
+      return result;
+    });
+  }
+
+  const readRequest = async (id) => (await read("requests", {}))[id];
+  const withRequest = (id, fn) => serialized(`request:${id}`, fn);
+
+  async function updateRequest(requestId, patch) {
+    return mutateMap("requests", (requests) => {
+      const current = requests[requestId];
+      if (!current) return null;
+      requests[requestId] = { ...current, ...patch };
+      return requests[requestId];
+    });
+  }
 
   async function openApproval(request) {
     const url = runtime.getURL(`approval.html?id=${encodeURIComponent(request.id)}`);
     const window = await windows.create({ url, type: "popup", width: 440, height: 560 });
-    const windowMap = await read("windowMap", {});
-    windowMap[String(window.id)] = request.id;
-    await write("windowMap", windowMap);
+    await mutateMap("windowMap", (windowMap) => {
+      windowMap[String(window.id)] = request.id;
+    });
   }
 
-  async function newRequest(request) {
-    const requests = await read("requests", {});
-    requests[request.id] = request;
-    await write("requests", requests);
+  async function ensureApproval(request) {
+    if (request.state !== "pending") return;
+    const windowMap = await read("windowMap", {});
+    if (Object.values(windowMap).includes(request.id)) return;
+    // A failed windows.create leaves the request pending with no UI. Replaying
+    // the request retries creation; a successful replay never duplicates it.
     await openApproval(request);
   }
 
-  async function updateRequest(requestId, patch) {
-    const requests = await read("requests", {});
-    const current = requests[requestId];
-    if (!current) return null;
-    requests[requestId] = { ...current, ...patch };
-    await write("requests", requests);
-    return requests[requestId];
+  async function closeApprovalWindows(requestId) {
+    const remove = [];
+    await mutateMap("windowMap", (windowMap) => {
+      for (const [windowId, mappedId] of Object.entries(windowMap)) {
+        if (mappedId === requestId) {
+          remove.push(Number(windowId));
+          delete windowMap[windowId];
+        }
+      }
+    });
+    for (const windowId of remove) await windows.remove?.(windowId);
   }
 
-  async function decisionResult(request) {
-    if (request.state === "pending") return { status: "pending", requestId: request.id };
-    if (request.state === "rejected") {
-      return { status: "rejected", requestId: request.id, error: request.error };
+  // Persist consumed state BEFORE calling side effects. If a hook fails, replay
+  // finishes it from the stored result instead of signing a second time.
+  async function finalize(request) {
+    if (request.state !== "consumed") return request;
+
+    if (request.kind === "connect") {
+      await mutateMap("grants", (grants) => {
+        const prior = grants[request.origin];
+        grants[request.origin] = {
+          account: request.account,
+          chainId: request.chainId,
+          grantedAt: prior?.grantedAt ?? Date.now(),
+        };
+      });
+      return (await updateRequest(request.id, { completion: "complete" })) ?? request;
     }
-    return { status: "approved", requestId: request.id, result: request.result };
+
+    if (typeof onSigned === "function") {
+      try {
+        await onSigned(request, request.result);
+      } catch (error) {
+        await updateRequest(request.id, {
+          sideEffectError: { code: error.code ?? "INTERNAL", message: error.message },
+        });
+        return (await readRequest(request.id)) ?? request;
+      }
+    }
+    await updateRequest(request.id, { delivered: true, sideEffectError: null });
+    return (await readRequest(request.id)) ?? request;
+  }
+
+  async function replay(request) {
+    const finalized = await finalize(request);
+    await ensureApproval(finalized);
+    return finalized;
+  }
+
+  function decisionResult(request) {
+    const result =
+      request.state === "pending"
+        ? { status: "pending", requestId: request.id }
+        : request.state === "rejected"
+          ? { status: "rejected", requestId: request.id, error: request.error }
+          : { status: "approved", requestId: request.id, result: request.result };
+    if (request.state === "consumed") {
+      const pendingSideEffect =
+        request.kind === "connect" ? request.completion !== "complete" : request.delivered !== true;
+      if (pendingSideEffect) result.deliveryPending = true;
+    }
+    return result;
+  }
+
+  async function newRequest(request) {
+    await mutateMap("requests", (requests) => {
+      requests[request.id] = request;
+    });
+    await ensureApproval(request);
   }
 
   async function handle(message, sender) {
@@ -98,8 +237,9 @@ export function createGrantsFeature({ storage, windows, runtime, signer, onSigne
         if (grants[origin]) {
           return { granted: true, accounts: [grants[origin].account], chainId: grants[origin].chainId };
         }
-        const request = {
-          id: message.requestId,
+        const id = requireRequestId(message.requestId);
+        const candidate = {
+          id,
           origin,
           chainId: CHAIN_ID,
           account: MOCK_ACCOUNT,
@@ -107,8 +247,17 @@ export function createGrantsFeature({ storage, windows, runtime, signer, onSigne
           decoded: { method: "connect", fields: ["origin", "chainId", "account"] },
           state: "pending",
         };
-        await newRequest(request);
-        return { status: "pending", requestId: request.id };
+        candidate.requestHash = bindingHash(candidate);
+        const outcome = await withRequest(id, async () => {
+          const existing = await readRequest(id);
+          if (existing) {
+            assertSameBinding(existing, candidate);
+            return replay(existing);
+          }
+          await newRequest(candidate);
+          return candidate;
+        });
+        return outcome === candidate ? { status: "pending", requestId: id } : decisionResult(outcome);
       }
 
       case "getAccounts": {
@@ -120,18 +269,18 @@ export function createGrantsFeature({ storage, windows, runtime, signer, onSigne
         return { chainId: CHAIN_ID };
 
       case "disconnect": {
-        const grants = await read("grants", {});
-        delete grants[origin];
-        await write("grants", grants);
+        await mutateMap("grants", (grants) => {
+          delete grants[origin];
+        });
         return { disconnected: true, origin };
       }
 
       case "revoke": {
         const target = isExtensionSender(sender) ? message.targetOrigin : origin;
         if (!target) throw protocolError("INVALID_TARGET", "No origin to revoke");
-        const grants = await read("grants", {});
-        delete grants[target];
-        await write("grants", grants);
+        await mutateMap("grants", (grants) => {
+          delete grants[target];
+        });
         return { revoked: true, origin: target };
       }
 
@@ -145,21 +294,9 @@ export function createGrantsFeature({ storage, windows, runtime, signer, onSigne
         if (params.chainId !== CHAIN_ID) {
           throw protocolError("CHAIN_MISMATCH", `Expected chain ${CHAIN_ID}`);
         }
-        if (typeof message.requestId !== "string" || message.requestId.length === 0) {
-          throw protocolError("INVALID_REQUEST_ID", "A request ID is required");
-        }
-
-        const requests = await read("requests", {});
-        const existing = requests[message.requestId];
-        if (existing) {
-          if (existing.origin !== origin || existing.method !== message.method) {
-            throw protocolError("REQUEST_ID_REUSE", "Request ID belongs to a different action");
-          }
-          return await decisionResult(existing);
-        }
-
-        const request = {
-          id: message.requestId,
+        const id = requireRequestId(message.requestId);
+        const candidate = {
+          id,
           origin,
           chainId: CHAIN_ID,
           account: grants[origin].account,
@@ -168,72 +305,78 @@ export function createGrantsFeature({ storage, windows, runtime, signer, onSigne
           decoded: { method: message.method, params },
           state: "pending",
         };
-        await newRequest(request);
-        return { status: "pending", requestId: request.id };
+        candidate.requestHash = bindingHash(candidate);
+        const outcome = await withRequest(id, async () => {
+          const existing = await readRequest(id);
+          if (existing) {
+            assertSameBinding(existing, candidate);
+            return replay(existing);
+          }
+          await newRequest(candidate);
+          return candidate;
+        });
+        return outcome === candidate ? { status: "pending", requestId: id } : decisionResult(outcome);
       }
 
       case "getDecision": {
-        const requests = await read("requests", {});
-        const request = requests[message.requestId];
-        if (!request || request.origin !== origin) {
-          throw protocolError("UNKNOWN_REQUEST", "Unknown request ID for this origin");
-        }
-        return await decisionResult(request);
+        const id = requireRequestId(message.requestId);
+        const request = await withRequest(id, async () => {
+          const existing = await readRequest(id);
+          if (!existing || existing.origin !== origin) {
+            throw protocolError("UNKNOWN_REQUEST", "Unknown request ID for this origin");
+          }
+          return replay(existing);
+        });
+        return decisionResult(request);
       }
 
       case "getApproval": {
         if (!isExtensionSender(sender)) throw protocolError("FORBIDDEN", "Extension context only");
-        const requests = await read("requests", {});
-        const request = requests[message.requestId];
+        const request = await readRequest(requireRequestId(message.requestId));
         if (!request) throw protocolError("UNKNOWN_REQUEST", "Unknown request ID");
         return { request };
       }
 
       case "decide": {
         if (!isExtensionSender(sender)) throw protocolError("FORBIDDEN", "Extension context only");
-        const request = await read("requests", {}).then((requests) => requests[message.requestId]);
-        if (!request) throw protocolError("UNKNOWN_REQUEST", "Unknown request ID");
-        if (request.state !== "pending") {
-          return { alreadyDecided: true, ...(await decisionResult(request)) };
-        }
-        if (message.decision === "reject") {
-          await updateRequest(request.id, {
-            state: "rejected",
-            error: { code: "REJECTED", message: "User rejected the action" },
-          });
-        } else if (message.decision === "approve") {
-          // Connecting grants an account but signs nothing. Transaction
-          // requests are signed exactly once per request ID; retries read the
-          // stored result instead of invoking the signer again.
-          const result =
-            request.kind === "connect"
-              ? { granted: true, accounts: [request.account], chainId: request.chainId }
-              : await signer(request);
-          if (request.kind !== "connect" && typeof onSigned === "function") {
-            // The #175 tracker records and submits exactly once per request ID;
-            // retries reuse the stored decision and never reach this hook.
-            await onSigned(request, result);
+        const id = requireRequestId(message.requestId);
+        return withRequest(id, async () => {
+          const request = await readRequest(id);
+          if (!request) throw protocolError("UNKNOWN_REQUEST", "Unknown request ID");
+          if (request.state !== "pending") {
+            const finalized = await finalize(request);
+            return { alreadyDecided: true, ...decisionResult(finalized) };
           }
-          await updateRequest(request.id, { state: "consumed", result });
-        } else {
-          throw protocolError("INVALID_DECISION", "Decision must be approve or reject");
-        }
-
-        const windowMap = await read("windowMap", {});
-        for (const [windowId, requestId] of Object.entries(windowMap)) {
-          if (requestId === request.id) {
-            delete windowMap[windowId];
-            await write("windowMap", windowMap);
-            await windows.remove?.(Number(windowId));
+          if (message.decision === "reject") {
+            await updateRequest(id, {
+              state: "rejected",
+              error: { code: "REJECTED", message: "User rejected the action" },
+            });
+          } else if (message.decision === "approve") {
+            // Connecting grants an account but signs nothing. Transaction
+            // requests are signed exactly once per request ID; retries read the
+            // stored result instead of invoking the signer again.
+            if (request.kind === "connect") {
+              await updateRequest(id, {
+                state: "consumed",
+                result: { granted: true, accounts: [request.account], chainId: request.chainId },
+                completion: "grant-pending",
+              });
+            } else {
+              const result = await signer(request);
+              // Durable before the tracker hook: a failing hook can be replayed
+              // from storage, but it can never cause a second signature.
+              await updateRequest(id, { state: "consumed", result, delivered: false });
+            }
+          } else {
+            throw protocolError("INVALID_DECISION", "Decision must be approve or reject");
           }
-        }
 
-        if (request.kind === "connect" && message.decision === "approve") {
-          const grants = await read("grants", {});
-          grants[request.origin] = { account: request.account, chainId: request.chainId, grantedAt: Date.now() };
-          await write("grants", grants);
-        }
-        return { ok: true, ...(await decisionResult(await read("requests", {}).then((r) => r[request.id]))) };
+          const finalized = await finalize(await readRequest(id));
+          // Window cleanup happens after the required effect is durable.
+          await closeApprovalWindows(id);
+          return decisionResult(finalized);
+        });
       }
 
       default:
@@ -251,18 +394,21 @@ export function createGrantsFeature({ storage, windows, runtime, signer, onSigne
       return true;
     },
     async onWindowRemoved(windowId) {
-      const windowMap = await read("windowMap", {});
-      const requestId = windowMap[String(windowId)];
+      const requestId = await mutateMap("windowMap", (windowMap) => {
+        const id = windowMap[String(windowId)];
+        if (id) delete windowMap[String(windowId)];
+        return id;
+      });
       if (!requestId) return;
-      delete windowMap[String(windowId)];
-      await write("windowMap", windowMap);
-      const request = await read("requests", {}).then((requests) => requests[requestId]);
-      if (request?.state === "pending") {
-        await updateRequest(requestId, {
-          state: "rejected",
-          error: { code: "POPUP_CLOSED", message: "Approval window was closed" },
-        });
-      }
+      await withRequest(requestId, async () => {
+        const request = await readRequest(requestId);
+        if (request?.state === "pending") {
+          await updateRequest(requestId, {
+            state: "rejected",
+            error: { code: "POPUP_CLOSED", message: "Approval window was closed" },
+          });
+        }
+      });
     },
   };
 }

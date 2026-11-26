@@ -254,3 +254,41 @@ test("401 re-issues one session and retries with the same X-Request-Id", async (
   assert.equal(client.hasSession(), true);
   assert.equal(calls.filter((call) => call.url.endsWith("/v1/session")).length, 1);
 });
+
+test("explicit submission rejections are terminal and never poll a receipt", async () => {
+  const { feature, storage, client } = setup();
+  client.submissionError = new ApiError("INVALID_TRANSACTION", "bad transaction", 400);
+  await feature.record({ request: REQUEST, result: RESULT });
+  await waitFor(() => storage.data.get("transactions")["tx-1"].status === "rejected");
+
+  const refreshed = await send(feature, { type: "refreshTransaction", id: "tx-1" });
+  assert.equal(refreshed.transaction.status, "rejected");
+  assert.equal(refreshed.transaction.apiError.code, "INVALID_TRANSACTION");
+  assert.equal(client.calls.receipts.length, 0);
+});
+
+test("the explorer link follows the authoritative submitted hash", async () => {
+  const { feature, storage } = setup();
+  await feature.record({
+    request: { ...REQUEST, id: "tx-hash" },
+    result: { ...RESULT, txHash: "draft-hash" },
+  });
+  await waitFor(() => storage.data.get("transactions")["tx-hash"].submitted === true);
+  const record = storage.data.get("transactions")["tx-hash"];
+  assert.equal(record.txHash, "mock-tx:tx-hash");
+  assert.match(record.explorerUrl, /key=mock-tx%3Atx-hash/);
+});
+
+test("concurrent records do not overwrite each other", async () => {
+  const { feature, storage, client } = setup();
+  await Promise.all([
+    feature.record({ request: { ...REQUEST, id: "tx-a" }, result: RESULT }),
+    feature.record({ request: { ...REQUEST, id: "tx-b" }, result: RESULT }),
+  ]);
+  await waitFor(() => client.calls.submissions.length === 2);
+  const transactions = storage.data.get("transactions");
+  assert.ok(transactions["tx-a"]);
+  assert.ok(transactions["tx-b"]);
+  assert.equal(transactions["tx-a"].requestId, "tx-a");
+  assert.equal(transactions["tx-b"].requestId, "tx-b");
+});

@@ -46,6 +46,17 @@ decision instead of signing twice.
 - Idle-safe behaviour uses `chrome.alarms` (#174), never a timer that assumes
   the worker stays resident.
 - Listener registration is centralised as described above.
+- The page bridge carries a per-injection random token, and both sides require
+  `event.source === window` and `event.origin === window.location.origin`.
+  Replies target only the page origin. A script in another frame or document
+  cannot forge a request or an approval reply.
+- The approval page is not a web-accessible resource. It refuses to run in a
+  frame, keeps both controls disabled until a top-level request loads, and
+  re-enables them after a failed decision so the user can retry.
+- Consumed state is written to `chrome.storage.local` before the tracker hook
+  runs. A failed hook is replayed from the stored result rather than re-signing.
+- A request ID is bound to a canonical hash of origin, account, chain, method
+  and full params; reuse with different bytes fails as `REQUEST_ID_REUSE`.
 
 ## Open questions for the owner
 
@@ -59,7 +70,7 @@ decision instead of signing twice.
 
 | Risk | Owner | Treatment |
 |---|---|---|
-| Exact-origin CORS allowlist is empty by default; the extension origin must be added to PR #163 | #130 / PR #163 | Comment posted on PR #163; no wildcard CORS, no API edits from the extension |
+| Exact-origin CORS allowlist is empty by default; the extension origin must be added to `WORKSTREAM_API_ORIGINS` | #130 / pilot ops | PR #163 merged without the origin. No wildcard CORS, no API edits from the extension; operator config is still required |
 | Sessions are in-process; a restart clears them and yields 401 | #130 / #175 | Tracker re-issues once and retries with the same `X-Request-Id` |
 | Browser API listener is loopback-only by default | #130 / pilot ops | Not an extension change; operator-managed cert/DNS if exposed |
 | TypeScript types are hand-mirrored from OpenAPI | #130 | Accepted for pilot, guarded by the schema-equality test |

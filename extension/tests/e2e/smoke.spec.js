@@ -26,6 +26,24 @@ test("loads the unpacked extension in a fresh profile and renders the popup", as
     await page.goto(`chrome-extension://${extensionId}/popup.html`);
     await expect(page.getByRole("heading", { name: "WorkStream Wallet" })).toBeVisible();
     await expect(page.locator("#version")).toHaveText(/^\d+\.\d+\.\d+$/);
+
+    // A missing approval renders a safe, disabled state.
+    await page.goto(`chrome-extension://${extensionId}/approval.html?id=missing`);
+    await expect(page.getByRole("heading", { name: "Approve WorkStream action" })).toBeVisible();
+    await expect(page.locator("#status")).toHaveText("Request not found");
+    await expect(page.locator("#approve")).toBeDisabled();
+
+    // Even another extension page cannot clickjack the approval controls.
+    await page.goto(`chrome-extension://${extensionId}/popup.html`);
+    await page.evaluate(() => {
+      const iframe = document.createElement("iframe");
+      iframe.id = "approval-frame";
+      iframe.src = "approval.html?id=missing";
+      document.body.appendChild(iframe);
+    });
+    const frame = page.frameLocator("#approval-frame");
+    await expect(frame.locator("#status")).toHaveText("Approval UI cannot be framed");
+    await expect(frame.locator("#approve")).toBeDisabled();
   } finally {
     await context.close();
     await rm(profile, { recursive: true, force: true });

@@ -7,7 +7,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "npm run build && playwright test",
-    "test:unit": "node --test tests/unit"
+    "test:unit": "node --test tests/unit/*.test.js"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.1"

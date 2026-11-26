@@ -45,6 +45,29 @@ export function createTrackerFeature({
   const write = (key, value) => storage.set({ [key]: value });
   const clients = new Map();
   const inflight = new Set();
+  const queues = new Map();
+
+  // chrome.storage reads and writes are separate async calls. Serialize every
+  // whole-map mutation so a stale snapshot cannot erase another transaction.
+  function serialized(key, fn) {
+    const previous = queues.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => {}).then(fn);
+    queues.set(key, next);
+    const cleanup = () => {
+      if (queues.get(key) === next) queues.delete(key);
+    };
+    next.then(cleanup, cleanup);
+    return next;
+  }
+
+  async function mutateTransactions(mutator) {
+    return serialized("transactions", async () => {
+      const transactions = await all();
+      const result = await mutator(transactions);
+      await write("transactions", transactions);
+      return result;
+    });
+  }
 
   function clientFor(apiBase) {
     if (client) return client;
@@ -64,12 +87,19 @@ export function createTrackerFeature({
   const all = () => read("transactions", {});
 
   async function save(id, patch) {
-    const transactions = await all();
-    const current = transactions[id];
-    if (!current) return null;
-    transactions[id] = { ...current, ...patch, updatedAt: now() };
-    await write("transactions", transactions);
-    return transactions[id];
+    return mutateTransactions(async (transactions) => {
+      const current = transactions[id];
+      if (!current) return null;
+      const next = { ...current, ...patch, updatedAt: now() };
+      // The API response is authoritative for the submitted hash. Keep the
+      // explorer link in step when the returned hash differs from the draft.
+      if (patch.txHash && patch.txHash !== current.txHash) {
+        const apiBase = await read("apiBaseUrl", baseUrl);
+        next.explorerUrl = explorerUrl(apiBase, patch.txHash);
+      }
+      transactions[id] = next;
+      return next;
+    });
   }
 
   async function submit(id) {
@@ -91,12 +121,18 @@ export function createTrackerFeature({
         apiError: null,
       });
     } catch (error) {
-      // A duplicate response means the earlier submission landed; never send
-      // it again. Other failures stay pending with a visible error.
-      await save(id, {
-        submitted: error.code === "DUPLICATE_REQUEST",
-        apiError: { code: error.code ?? "INTERNAL", message: error.message },
-      });
+      const code = error.code ?? "INTERNAL";
+      const patch = {
+        // A duplicate response means the earlier submission landed; never send
+        // it again. Explicit protocol rejections are terminal; transient
+        // failures stay pending with a visible error.
+        submitted: code === "DUPLICATE_REQUEST",
+        apiError: { code, message: error.message },
+      };
+      if (code === "INVALID_TRANSACTION" || code === "NETWORK_MISMATCH") {
+        patch.status = "rejected";
+      }
+      await save(id, patch);
     } finally {
       inflight.delete(guard);
     }
@@ -111,6 +147,9 @@ export function createTrackerFeature({
       if (!record || record.status !== "pending") return record ?? null;
       await submit(id);
       record = (await all())[id];
+      // An explicit submission rejection must not fall through to receipt
+      // polling, which could overwrite the error or resubmit on a later alarm.
+      if (!record || record.status !== "pending") return record ?? null;
 
       const apiBase = await read("apiBaseUrl", baseUrl);
       const envelope = await clientFor(apiBase).receipt(record.txHash, `${record.requestId ?? id}:receipt`);
@@ -178,28 +217,31 @@ export function createTrackerFeature({
   return {
     async record({ request, result }) {
       const id = request.id;
-      const transactions = await all();
-      if (transactions[id]) return summarise(transactions[id]);
-      const apiBase = await read("apiBaseUrl", baseUrl);
-      const txHash = result.txHash ?? `mock-tx:${encodeURIComponent(id)}`;
-      const timestamp = now();
-      transactions[id] = {
-        id,
-        requestId: id,
-        origin: request.origin ?? null,
-        account: request.account ?? null,
-        method: request.method ?? null,
-        txHash,
-        txBytes: result.txBytes ?? [],
-        status: "pending",
-        submitted: false,
-        explorerUrl: explorerUrl(apiBase, txHash),
-        createdAt: timestamp,
-        updatedAt: timestamp,
-      };
-      await write("transactions", transactions);
-      void submit(id);
-      return summarise(transactions[id]);
+      let created = false;
+      const record = await mutateTransactions(async (transactions) => {
+        if (transactions[id]) return transactions[id];
+        created = true;
+        const apiBase = await read("apiBaseUrl", baseUrl);
+        const txHash = result.txHash ?? `mock-tx:${encodeURIComponent(id)}`;
+        const timestamp = now();
+        transactions[id] = {
+          id,
+          requestId: id,
+          origin: request.origin ?? null,
+          account: request.account ?? null,
+          method: request.method ?? null,
+          txHash,
+          txBytes: result.txBytes ?? [],
+          status: "pending",
+          submitted: false,
+          explorerUrl: explorerUrl(apiBase, txHash),
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        return transactions[id];
+      });
+      if (created) void submit(id);
+      return summarise(record);
     },
 
     onAlarm: refreshAll,

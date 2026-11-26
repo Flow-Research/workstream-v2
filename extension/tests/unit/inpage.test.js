@@ -3,14 +3,19 @@ import { before, test } from "node:test";
 
 const listeners = [];
 const posted = [];
+const TOKEN = "test-injection-token";
 
 globalThis.window = {
+  location: { origin: "https://dapp.example" },
   addEventListener(type, handler) {
     if (type === "message") listeners.push(handler);
   },
-  postMessage(message) {
-    posted.push(message);
+  postMessage(message, targetOrigin) {
+    posted.push({ message, targetOrigin });
   },
+};
+globalThis.document = {
+  currentScript: { dataset: { workstreamChannel: TOKEN } },
 };
 
 before(async () => {
@@ -18,35 +23,41 @@ before(async () => {
 });
 
 function lastMessage() {
-  return posted.at(-1);
+  return posted.at(-1).message;
+}
+
+function deliver(event) {
+  for (const listener of listeners) listener(event);
 }
 
 function reply(id, result) {
-  for (const listener of listeners) {
-    listener({
-      data: {
-        channel: "workstream-provider",
-        direction: "content->inpage",
-        id,
-        ok: true,
-        result,
-      },
-    });
-  }
+  deliver({
+    source: window,
+    origin: window.location.origin,
+    data: {
+      channel: "workstream-provider",
+      token: TOKEN,
+      direction: "content->inpage",
+      id,
+      ok: true,
+      result,
+    },
+  });
 }
 
 function reject(id, code, message) {
-  for (const listener of listeners) {
-    listener({
-      data: {
-        channel: "workstream-provider",
-        direction: "content->inpage",
-        id,
-        ok: false,
-        error: { code, message },
-      },
-    });
-  }
+  deliver({
+    source: window,
+    origin: window.location.origin,
+    data: {
+      channel: "workstream-provider",
+      token: TOKEN,
+      direction: "content->inpage",
+      id,
+      ok: false,
+      error: { code, message },
+    },
+  });
 }
 
 test("provider exposes only the public facade", () => {
@@ -61,13 +72,52 @@ test("provider exposes only the public facade", () => {
   ]);
 });
 
-test("connect carries a request ID and resolves with the result", async () => {
+test("connect carries a request ID and the injection token", async () => {
   const promise = globalThis.workstream.connect();
   const message = lastMessage();
   assert.equal(message.type, "connect");
+  assert.equal(message.token, TOKEN);
   assert.equal(message.payload.requestId.length > 0, true);
+  assert.equal(posted.at(-1).targetOrigin, window.location.origin);
   reply(message.id, { status: "pending", requestId: message.payload.requestId });
   assert.deepEqual(await promise, { status: "pending", requestId: message.payload.requestId });
+});
+
+test("forged replies from another frame, origin or channel are ignored", async () => {
+  const promise = globalThis.workstream.getAccounts();
+  const id = lastMessage().id;
+  let settled = false;
+  promise.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+
+  const data = (overrides = {}) => ({
+    channel: "workstream-provider",
+    token: TOKEN,
+    direction: "content->inpage",
+    id,
+    ok: true,
+    result: { accounts: ["forged"] },
+    ...overrides,
+  });
+  for (const event of [
+    { source: { frame: "third-party" }, origin: window.location.origin, data: data() },
+    { source: window, origin: "https://evil.example", data: data() },
+    { source: window, origin: window.location.origin, data: data({ token: "guessed" }) },
+    { source: window, origin: window.location.origin, data: data({ channel: "other-provider" }) },
+  ]) {
+    deliver(event);
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+
+  reply(id, { accounts: ["mock-account-1"] });
+  assert.deepEqual(await promise, ["mock-account-1"]);
 });
 
 test("account and chain discovery unwrap replies", async () => {
